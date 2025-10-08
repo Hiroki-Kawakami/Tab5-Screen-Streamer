@@ -13,6 +13,7 @@ pub struct FrameCaptureData {
     pub data: Vec<u8>,
     pub width: usize,
     pub height: usize,
+    pub pixel_format: turbojpeg::PixelFormat,
     pub fps: Option<usize>,
 }
 
@@ -45,12 +46,17 @@ pub fn start(display_index: Option<usize>) -> Context {
         let mut frames = 0;
         let mut start = std::time::Instant::now();
         loop {
-            let frame = if let Frame::BGRA(frame) = capturer.get_next_frame().expect("Capture Recv Failed!") {
-                frame
-            } else {
-                panic!("Unsupported Frame Format!");
+            let frame = capturer.get_next_frame().expect("Capture Recv Failed!");
+            let (data, width, height, pixel_format) = match frame {
+                Frame::YUVFrame(_) => panic!("Unsupported Frame Format!: YUV"),
+                Frame::RGB(_) => panic!("Unsupported Frame Format!: RGB"),
+                Frame::RGBx(frame) => (frame.data, frame.width, frame.height, turbojpeg::PixelFormat::RGBX),
+                Frame::XBGR(_) => panic!("Unsupported Frame Format!: XBGR"),
+                Frame::BGRx(_) => panic!("Unsupported Frame Format!: BGRX"),
+                Frame::BGR0(_) => panic!("Unsupported Frame Format!: BGR0"),
+                Frame::BGRA(frame) => (frame.data, frame.width, frame.height, turbojpeg::PixelFormat::BGRA),
             };
-            if frame.data.len() == 0 { continue }
+            if data.len() == 0 { continue }
 
             frames += 1;
             let fps = if start.elapsed() >= Duration::from_secs(1) {
@@ -62,8 +68,8 @@ pub fn start(display_index: Option<usize>) -> Context {
                 None
             };
 
-            let frame_size = (frame.width, frame.height);
-            let data = FrameCaptureData { data: frame.data, width: frame.width as usize, height: frame.height as usize, fps };
+            let frame_size = (width, height);
+            let data = FrameCaptureData { data, pixel_format, width: width as usize, height: height as usize, fps };
             if frame_size == (1280, 720) || frame_size == (720, 1280) {
                 let _ = jpeg_tx_capture.try_send(data);
             } else {
@@ -78,11 +84,16 @@ pub fn start(display_index: Option<usize>) -> Context {
         let mut resizer = fir::Resizer::new();
         for frame in resz_rx {
             let (rwidth, rheight) = if frame.width > frame.height { (1280, 720) } else { (720, 1280) };
+            let pixel_type = match frame.pixel_format {
+                turbojpeg::PixelFormat::RGBX => fir::PixelType::U8x4,
+                turbojpeg::PixelFormat::BGRA => fir::PixelType::U8x4,
+                _ => panic!("Unsupported Pixel Format!"),
+            };
             let original = fir::images::Image::from_vec_u8(
-                frame.width as u32, frame.height as u32, frame.data, fir::PixelType::U8x4
+                frame.width as u32, frame.height as u32, frame.data, pixel_type
             ).expect("Failed to create original image container");
             let mut resized = fir::images::Image::from_vec_u8(
-                rwidth as u32, rheight as u32, vec![0; rwidth * rheight * 4], fir::PixelType::U8x4
+                rwidth as u32, rheight as u32, vec![0; rwidth * rheight * 4], pixel_type
             ).expect("Failed to create resized image container");
 
             resizer.resize(&original, &mut resized, &fir::ResizeOptions {
@@ -90,7 +101,13 @@ pub fn start(display_index: Option<usize>) -> Context {
                 cropping: fir::SrcCropping::None,
                 mul_div_alpha: false,
             }).expect("Resize Image Failed!");
-            let data = FrameCaptureData { data: resized.into_vec(), width: rwidth, height: rheight, fps: frame.fps };
+            let data = FrameCaptureData {
+                data: resized.into_vec(),
+                pixel_format: frame.pixel_format,
+                width: rwidth,
+                height: rheight,
+                fps: frame.fps
+            };
             let _ = jpeg_tx_resize.try_send(data);
         }
     });
@@ -115,7 +132,7 @@ pub fn start(display_index: Option<usize>) -> Context {
                 width: 1280,
                 pitch: frame.width * 4,
                 height: 720,
-                format: turbojpeg::PixelFormat::BGRA,
+                format: frame.pixel_format,
             };
 
             let mut converted = unsafe { Box::<[u8]>::new_uninit_slice(BUF_SIZE).assume_init() };
