@@ -26,9 +26,9 @@ pub mod macos;
 pub use self::macos::*;
 
 #[cfg(target_os = "windows")]
-pub mod common;
+pub mod windows;
 #[cfg(target_os = "windows")]
-pub use self::common::*;
+pub use self::windows::*;
 
 #[cfg(target_os = "linux")]
 pub mod common;

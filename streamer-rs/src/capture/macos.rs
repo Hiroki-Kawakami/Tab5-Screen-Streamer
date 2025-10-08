@@ -130,7 +130,7 @@ struct SCStreamOutput {
 }
 impl SCStreamOutputTrait for SCStreamOutput {
     fn did_output_sample_buffer(&self, sample_buffer: CMSampleBuffer, _of_type: SCStreamOutputType) {
-        self.tx.send(sample_buffer).expect("Send CMSampleBuffer failed!");
+        let _ = self.tx.try_send(sample_buffer);
     }
 }
 

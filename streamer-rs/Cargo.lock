@@ -1404,6 +1404,7 @@ dependencies = [
  "screencapturekit 0.3.6",
  "tokio",
  "turbojpeg",
+ "windows-capture",
 ]
 
 [[package]]
