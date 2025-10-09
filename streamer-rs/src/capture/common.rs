@@ -21,7 +21,10 @@ pub struct Context {
     rx: mpsc::Receiver<FrameConvertedData>,
 }
 
-pub fn start(display_index: Option<usize>) -> Context {
+pub fn start<F>(display_index: Option<usize>, tx_thread: F)
+where
+    F: FnOnce(Context) + Send + 'static,
+{
     let (resz_tx, resz_rx) = mpsc::sync_channel::<FrameCaptureData>(1);
     let (jpeg_tx, jpeg_rx) = mpsc::sync_channel::<FrameCaptureData>(1);
     let (conv_tx, conv_rx) = mpsc::sync_channel::<FrameConvertedData>(1);
@@ -167,7 +170,7 @@ pub fn start(display_index: Option<usize>) -> Context {
         }
     });
 
-    Context { rx: conv_rx }
+    tx_thread(Context { rx: conv_rx });
 }
 
 impl Context {

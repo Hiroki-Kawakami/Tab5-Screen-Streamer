@@ -25,25 +25,25 @@ fn main() {
     }
 
     let device = open_device().expect("Device Open Failed!");
-    let capture_context = capture::start(args.display);
-
-    let mut frames: usize = 0;
-    let mut transferred: usize = 0;
-    loop {
-        let frame = capture_context.get_frame();
-        if let Ok(size) = device.write_bulk(EP_OUT, &frame.data[..frame.data_size], Duration::from_secs(1)) {
-            transferred += size;
-            frames += 1;
-        } else {
-            panic!("USB Tx Failed!")
+    capture::start(args.display, move |capture_context| {
+        let mut frames: usize = 0;
+        let mut transferred: usize = 0;
+        loop {
+            let frame = capture_context.get_frame();
+            if let Ok(size) = device.write_bulk(EP_OUT, &frame.data[..frame.data_size], Duration::from_secs(1)) {
+                transferred += size;
+                frames += 1;
+            } else {
+                panic!("USB Tx Failed!")
+            }
+            if let Some(fps) = frame.fps {
+                let speed = transferred / 1000;
+                println!("Capture: {}fps, USB Tx: {}fps, {}kB/s, quality={}", fps, frames, speed, frame.quality);
+                frames = 0;
+                transferred = 0;
+            }
         }
-        if let Some(fps) = frame.fps {
-            let speed = transferred / 1000;
-            println!("Capture: {}fps, USB Tx: {}fps, {}kB/s, quality={}", fps, frames, speed, frame.quality);
-            frames = 0;
-            transferred = 0;
-        }
-    }
+    });
 }
 
 fn open_device() -> Result<DeviceHandle<GlobalContext>, rusb::Error> {
