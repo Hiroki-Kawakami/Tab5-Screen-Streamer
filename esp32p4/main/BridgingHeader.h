@@ -10,5 +10,5 @@
 // M5Stack Tab5
 #include "board/BridgeImpl.h"
 
-// TinyUSB
-#include "USBConfig.h"
+// USB Device
+#include "usbd.h"

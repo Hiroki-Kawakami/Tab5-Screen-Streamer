@@ -1,0 +1,7 @@
+targets:
+  - esp32p4
+dependencies:
+  idf: '>=5.0'
+  tinyusb:
+    version: '>=0.17.0'
+    public: true

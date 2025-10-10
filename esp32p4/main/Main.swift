@@ -24,7 +24,10 @@ func main() throws(IDF.Error) {
     drawable.clear(color: .red)
     drawable.flush()
 
-    try IDF.Error.check(tinyusb_driver_install(&tusb_install_cfg))
+    try IDF.Error.check(usbd_init());
+    Task(name: "TinyUSB", priority: 5, xCoreID: 1) { _ in
+        usbd_task()
+    }
 
     let jpegBufferSize = 512 * 1024
     let jpegBuffer = [UnsafeMutableBufferPointer<UInt8>]((0...2).map({ _ in
@@ -67,7 +70,7 @@ func main() throws(IDF.Error) {
     Task(name: "Recv", priority: 4, xCoreID: 1) { _ in
         var mounted: Bool? = nil
         frameLoop: while (true) {
-            let deviceMounted = tud_mounted()
+            let deviceMounted = usbd_mounted()
             if mounted != deviceMounted {
                 Log.info("Device mounted: \(deviceMounted)")
                 mounted = deviceMounted
@@ -77,11 +80,11 @@ func main() throws(IDF.Error) {
                 continue;
             }
 
-            let availableSize = tud_vendor_available()
+            let availableSize = usbd_vendor_available()
             if availableSize < 2 { continue }
 
             var bufferAddress = jpegBuffer[jpegBufferIndex].baseAddress!
-            let readSize = tud_vendor_read(bufferAddress, min(availableSize, 512))
+            let readSize = usbd_vendor_read(bufferAddress, min(availableSize, 512))
             var jpegDataSize = UnsafeRawPointer(bufferAddress).load(as: UInt32.self).littleEndian
             bufferAddress = bufferAddress.advanced(by: Int(readSize))
             // Log.info("Start Receive: \(jpegDataSize)")
@@ -89,12 +92,12 @@ func main() throws(IDF.Error) {
             while jpegDataSize > readSize {
                 jpegDataSize -= readSize
                 var waitCount = 0
-                while (tud_vendor_available() == 0) {
+                while usbd_vendor_available() == 0 {
                     if waitCount >= 1000 { continue frameLoop }
                     waitCount += 1
                 }
 
-                let readSize = tud_vendor_read(bufferAddress, min(tud_vendor_available(), jpegDataSize, 512))
+                let readSize = usbd_vendor_read(bufferAddress, min(usbd_vendor_available(), jpegDataSize, 512))
                 // Log.info("Receive: \(readSize), \(i)/\(sizeCount)")
                 bufferAddress = bufferAddress.advanced(by: Int(readSize))
             }
