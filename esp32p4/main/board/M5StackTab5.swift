@@ -183,7 +183,7 @@ class M5StackTab5 {
             var dpiConfig = esp_lcd_dpi_panel_config_t(
                 virtual_channel: 0,
                 dpi_clk_src: MIPI_DSI_DPI_CLK_SRC_DEFAULT,
-                dpi_clock_freq_mhz: 80,
+                dpi_clock_freq_mhz: 75,
                 pixel_format: LCD_COLOR_PIXEL_FORMAT_RGB888,
                 in_color_format: LCD_COLOR_FMT_RGB888,
                 out_color_format: LCD_COLOR_FMT_RGB888,

@@ -164,7 +164,6 @@ fileprivate extension ColorSpace {
         case .rgb565: return PPA_SRM_COLOR_MODE_RGB565
         case .rgb888: return PPA_SRM_COLOR_MODE_RGB888
         case .yuv420: return PPA_SRM_COLOR_MODE_YUV420
-        case .yuv422: return PPA_SRM_COLOR_MODE_YUV422
         }
     }
 }

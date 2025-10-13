@@ -207,5 +207,4 @@ enum ColorSpace {
     case rgb565
     case rgb888
     case yuv420
-    case yuv422
 }
