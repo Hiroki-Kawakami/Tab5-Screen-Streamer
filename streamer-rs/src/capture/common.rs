@@ -1,4 +1,4 @@
-use crate::capture::FrameConvertedData;
+use crate::capture::{CaptureConfig, FrameConvertedData};
 use std::{thread, sync::mpsc, time::Duration};
 use scap::{
     capturer::{self, Capturer},
@@ -7,7 +7,7 @@ use scap::{
 use fast_image_resize as fir;
 
 const BUF_SIZE: usize = 512 * 1024;
-const JPEG_QUALITY_LEVELS: [i32; 4] = [40, 60, 70, 80];
+const JPEG_QUALITY_LEVELS: [i32; 7] = [20, 30, 40, 50, 60, 70, 80];
 
 pub struct FrameCaptureData {
     pub data: Vec<u8>,
@@ -21,7 +21,7 @@ pub struct Context {
     rx: mpsc::Receiver<FrameConvertedData>,
 }
 
-pub fn start<F>(display_index: Option<usize>, tx_thread: F)
+pub fn start<F>(config: CaptureConfig, tx_thread: F)
 where
     F: FnOnce(Context) + Send + 'static,
 {
@@ -35,7 +35,7 @@ where
     thread::spawn(move || {
         let options = capturer::Options {
             fps: 60,
-            target: capture_target(display_index),
+            target: capture_target(config.display),
             show_cursor: true,
             show_highlight: true,
             excluded_targets: None,

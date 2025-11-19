@@ -5,6 +5,11 @@ pub struct FrameConvertedData {
     pub fps: Option<usize>,
 }
 
+pub struct CaptureConfig {
+    pub display: Option<usize>,
+    pub quality: Option<i32>
+}
+
 pub fn check_permission() -> bool {
     if !scap::is_supported() {
         println!("Platform not supported!");

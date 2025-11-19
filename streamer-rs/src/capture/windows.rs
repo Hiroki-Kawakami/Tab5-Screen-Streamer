@@ -1,4 +1,4 @@
-use crate::capture::FrameConvertedData;
+use crate::capture::{CaptureConfig, FrameConvertedData};
 use std::{sync::mpsc::{self, SyncSender}, thread, time::Duration};
 use windows_capture::{
     capture::GraphicsCaptureApiHandler,
@@ -7,7 +7,7 @@ use windows_capture::{
 use fast_image_resize as fir;
 
 const BUF_SIZE: usize = 512 * 1024;
-const JPEG_QUALITY_LEVELS: [i32; 4] = [40, 60, 70, 80];
+const JPEG_QUALITY_LEVELS: [i32; 7] = [20, 30, 40, 50, 60, 70, 80];
 
 pub struct FrameCaptureData {
     pub data: Vec<u8>,
@@ -20,7 +20,7 @@ pub struct Context {
     rx: mpsc::Receiver<FrameConvertedData>,
 }
 
-pub fn start<F>(display_index: Option<usize>, tx_thread: F)
+pub fn start<F>(config: CaptureConfig, tx_thread: F)
 where
     F: FnOnce(Context) + Send + 'static,
 {
@@ -31,7 +31,11 @@ where
     // Capture Thread
     let jpeg_tx_capture = jpeg_tx.clone();
     thread::spawn(move || {
-        let display = Monitor::primary().expect("Display not found.");
+        let display = if let Some(index) = config.display && index > 0 {
+            Monitor::from_index(index)
+        } else {
+            Monitor::primary()
+        }.expect("Display not found.");
         let settings = Settings::new(
             display,
             windows_capture::settings::CursorCaptureSettings::Default,

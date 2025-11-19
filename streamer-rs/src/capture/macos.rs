@@ -1,4 +1,4 @@
-use crate::capture::FrameConvertedData;
+use crate::capture::{CaptureConfig, FrameConvertedData};
 use std::{os::raw::c_void, sync::mpsc, thread, time::Duration};
 use core_foundation::{error::CFError, runloop::CFRunLoopRun};
 use core_media_rs::{cm_time::CMTime, cm_sample_buffer::CMSampleBuffer};
@@ -21,7 +21,7 @@ use objc2_app_kit::NSApplication;
 use dispatch2::DispatchQueue;
 
 const BUF_SIZE: usize = 512 * 1024;
-const JPEG_QUALITY_LEVELS: [i32; 4] = [40, 60, 70, 80];
+const JPEG_QUALITY_LEVELS: [i32; 7] = [20, 30, 40, 50, 60, 70, 80];
 
 pub struct Context {
     rx: mpsc::Receiver<FrameConvertedData>,
@@ -36,7 +36,7 @@ unsafe extern "C-unwind" fn display_settings_changed(display: u32, _flags: CGDis
     }
 }
 
-pub fn start<F>(display_index: Option<usize>, tx_thread: F)
+pub fn start<F>(config: CaptureConfig, tx_thread: F)
 where
     F: FnOnce(Context) + Send + 'static,
 {
@@ -46,7 +46,7 @@ where
     thread::spawn(move || {
         let (capt_tx, capt_rx) = mpsc::sync_channel::<CMSampleBuffer>(1);
 
-        let (display_id, _virtual_display) = if let Some(i) = display_index {
+        let (display_id, _virtual_display) = if let Some(i) = config.display {
             let contents = SCShareableContent::get()
                 .expect("Failed to get display list.");
             (contents.displays()[i].display_id(), None)
@@ -63,7 +63,7 @@ where
         let mut transformer = turbojpeg::Transformer::new().expect("Failed to create turbojpeg Transformer");
 
         let mut quality_level: usize = 0;
-        compressor.set_quality(JPEG_QUALITY_LEVELS[0]).expect("set jpeg quality failed!");
+        compressor.set_quality(config.quality.unwrap_or(JPEG_QUALITY_LEVELS[0])).expect("set jpeg quality failed!");
         compressor.set_optimize(false).expect("set jpeg optimize failed!");
         compressor.set_subsamp(turbojpeg::Subsamp::Sub2x2).expect("set jpeg subsamp failed!");
 
@@ -131,16 +131,23 @@ where
                 let size = size + 4;
                 let bytes = (size as u32).to_le_bytes();
                 converted[..4].copy_from_slice(&bytes);
-                let data = FrameConvertedData { data: converted, data_size: size, quality: JPEG_QUALITY_LEVELS[quality_level], fps };
+                let data = FrameConvertedData {
+                    data: converted,
+                    data_size: size,
+                    quality: config.quality.unwrap_or(JPEG_QUALITY_LEVELS[quality_level]),
+                    fps
+                };
                 let _ = conv_tx.try_send(data);
 
-                let tx_speed = (size as f64) / last.elapsed().as_secs_f64();
-                if quality_level > 0 && tx_speed > 7e6 {
-                    quality_level -= 1;
-                    compressor.set_quality(JPEG_QUALITY_LEVELS[quality_level]).expect("set jpeg quality failed!");
-                } else if quality_level + 1 < JPEG_QUALITY_LEVELS.len() && tx_speed < 4e6 {
-                    quality_level += 1;
-                    compressor.set_quality(JPEG_QUALITY_LEVELS[quality_level]).expect("set jpeg quality failed!");
+                if config.quality.is_none() {
+                    let tx_speed = (size as f64) / last.elapsed().as_secs_f64();
+                    if quality_level > 0 && tx_speed > 7e6 {
+                        quality_level -= 1;
+                        compressor.set_quality(JPEG_QUALITY_LEVELS[quality_level]).expect("set jpeg quality failed!");
+                    } else if quality_level + 1 < JPEG_QUALITY_LEVELS.len() && tx_speed < 4e6 {
+                        quality_level += 1;
+                        compressor.set_quality(JPEG_QUALITY_LEVELS[quality_level]).expect("set jpeg quality failed!");
+                    }
                 }
                 last = std::time::Instant::now();
             }
