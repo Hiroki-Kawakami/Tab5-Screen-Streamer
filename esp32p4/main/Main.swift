@@ -55,7 +55,7 @@ func main() throws(IDF.Error) {
             }
 
             tab5.display.drawable(frameBuffer: frameBuffers[frameBufferIndex]).flush()
-            frameBufferIndex = frameBufferIndex == 0 ? 1 : 0
+            frameBufferIndex = (frameBufferIndex + 1) % 3
 
             frameCount += 1
             let now = timer.count

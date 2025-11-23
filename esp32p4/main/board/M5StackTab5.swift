@@ -187,7 +187,7 @@ class M5StackTab5 {
                 pixel_format: LCD_COLOR_PIXEL_FORMAT_RGB888,
                 in_color_format: LCD_COLOR_FMT_RGB888,
                 out_color_format: LCD_COLOR_FMT_RGB888,
-                num_fbs: 2,
+                num_fbs: 3,
                 video_timing: esp_lcd_video_timing_t(
                     h_size: width,
                     v_size: height,
@@ -250,9 +250,9 @@ class M5StackTab5 {
 
         var frameBuffers: [UnsafeMutableBufferPointer<RGB888>] {
             get {
-                var fb0: UnsafeMutableRawPointer?, fb1: UnsafeMutableRawPointer?
-                esp_lcd_dpi_panel_get_frame_buffers(panel, &fb0, &fb1)
-                return [fb0, fb1].map({ ptr in
+                var fb0: UnsafeMutableRawPointer?, fb1: UnsafeMutableRawPointer?, fb2: UnsafeMutableRawPointer?
+                esp_lcd_dpi_panel_get_frame_buffers(panel, &fb0, &fb1, &fb2)
+                return [fb0, fb1, fb2].map({ ptr in
                     let typedPointer = ptr!.bindMemory(to: RGB888.self, capacity: size.width * size.height)
                     return UnsafeMutableBufferPointer<RGB888>(start: typedPointer, count: size.width * size.height)
                 })

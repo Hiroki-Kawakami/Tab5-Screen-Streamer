@@ -7,8 +7,8 @@
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "usb/usb_host.h"
 
-esp_err_t esp_lcd_dpi_panel_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1) {
-    return esp_lcd_dpi_panel_get_frame_buffer(panel, 2, fb0, fb1);
+esp_err_t esp_lcd_dpi_panel_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1, void **fb2) {
+    return esp_lcd_dpi_panel_get_frame_buffer(panel, 3, fb0, fb1, fb2);
 }
 
 /*
