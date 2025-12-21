@@ -6,8 +6,7 @@ idf_component_register(
 
 idf_build_get_property(target IDF_TARGET)
 idf_build_get_property(arch IDF_TARGET_ARCH)
-set(SWIFT_TOOLCHAIN_DIR /Library/Developer/Toolchains/swift-latest.xctoolchain)
-set(CMAKE_Swift_COMPILER ${SWIFT_TOOLCHAIN_DIR}/usr/bin/swiftc CACHE FILEPATH "Swift compiler")
+set(CMAKE_Swift_COMPILER $ENV{HOME}/.swiftly/bin/swiftc CACHE FILEPATH "Swift compiler")
 
 if("${arch}" STREQUAL "xtensa")
     message(FATAL_ERROR "Not supported target: ${target}")

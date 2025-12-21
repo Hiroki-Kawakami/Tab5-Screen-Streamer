@@ -1,6 +1,6 @@
 #include "esp_lcd_ili9881c.h"
 
-static const ili9881c_lcd_init_cmd_t tab5_lcd_ili9881c_specific_init_code_default[] = {
+static const ili9881c_lcd_init_cmd_t bsp_lcd_ili9881c_specific_init_code_default[] = {
     // {cmd, { data }, data_size, delay}
     /**** CMD_Page 1 ****/
     {0xFF, (uint8_t[]){0x98, 0x81, 0x01}, 3, 0},
@@ -215,5 +215,5 @@ static const ili9881c_lcd_init_cmd_t tab5_lcd_ili9881c_specific_init_code_defaul
     //============ Gamma END===========
 };
 
-static const ili9881c_lcd_init_cmd_t *tab5_lcd_ili9881c_specific_init_code_default_ptr = tab5_lcd_ili9881c_specific_init_code_default;
-static uint16_t tab5_lcd_ili9881c_specific_init_code_default_num = sizeof(tab5_lcd_ili9881c_specific_init_code_default) / sizeof(ili9881c_lcd_init_cmd_t);
+static const ili9881c_lcd_init_cmd_t *bsp_lcd_ili9881c_specific_init_code_default_ptr = bsp_lcd_ili9881c_specific_init_code_default;
+static uint16_t bsp_lcd_ili9881c_specific_init_code_default_num = sizeof(bsp_lcd_ili9881c_specific_init_code_default) / sizeof(ili9881c_lcd_init_cmd_t);

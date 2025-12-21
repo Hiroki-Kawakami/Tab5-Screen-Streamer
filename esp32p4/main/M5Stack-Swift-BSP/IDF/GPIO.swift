@@ -1,5 +1,5 @@
 extension IDF {
-    class GPIO {
+    struct GPIO {
         enum Pin: Int32 {
             case gpio0 = 0
             case gpio1 = 1
@@ -64,6 +64,16 @@ extension IDF {
 
         static func reset(pin: Pin) throws(IDF.Error) {
             try IDF.Error.check(gpio_reset_pin(pin.value))
+        }
+
+        let pin: Pin
+        var value: Bool {
+            get {
+                return gpio_get_level(pin.value) == 1
+            }
+            set {
+                gpio_set_level(pin.value, newValue ? 1 : 0)
+            }
         }
     }
 }

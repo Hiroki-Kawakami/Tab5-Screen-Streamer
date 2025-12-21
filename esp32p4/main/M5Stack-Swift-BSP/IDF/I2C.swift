@@ -23,6 +23,10 @@ extension IDF {
             self.handle = handle!
         }
 
+        func probe(address: UInt8, timeoutMs: Int32 = 10) -> Bool {
+            return i2c_master_probe(handle, UInt16(address), timeoutMs) == ESP_OK
+        }
+
         class Device {
             let handle: i2c_master_dev_handle_t
             init(handle: i2c_master_dev_handle_t) {

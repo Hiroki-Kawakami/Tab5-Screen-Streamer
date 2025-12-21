@@ -81,6 +81,7 @@ extension IDF {
                 port: UInt8(port.rawValue),
                 rx_handle: UnsafeMutableRawPointer(channels.rx),
                 tx_handle: UnsafeMutableRawPointer(channels.tx),
+                clk_src: 0
             )
             interface = audio_codec_new_i2s_data(&i2sConfig)
         }

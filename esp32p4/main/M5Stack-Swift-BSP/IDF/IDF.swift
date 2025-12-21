@@ -1,4 +1,4 @@
-class IDF {
+enum IDF {
 
     struct Error: Swift.Error, CustomStringConvertible {
         let rawValue: esp_err_t
