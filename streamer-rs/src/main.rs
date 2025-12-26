@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::io::Write;
 use clap::Parser;
 
 mod capture;
@@ -34,7 +34,7 @@ fn main() {
         panic!("Invalid quality value: {}", q);
     }
 
-    let device = usb_device::open(args.wait_device)
+    let mut device = usb_device::open(args.wait_device)
         .expect("Device Open Failed!");
 
     let config = capture::CaptureConfig {
@@ -46,8 +46,13 @@ fn main() {
         let mut transferred: usize = 0;
         loop {
             let frame = capture_context.get_frame();
-            if let Ok(size) = device.write_bulk(usb_device::EP_OUT, &frame.data[..frame.data_size], Duration::from_secs(1)) {
-                transferred += size;
+            let result: Result<(), std::io::Error> = (|| {
+                device.write_all(&frame.data[..frame.data_size])?;
+                device.flush()?;
+                Ok(())
+            })();
+            if result.is_ok() {
+                transferred += frame.data_size;
                 frames += 1;
             } else {
                 panic!("USB Tx Failed!")
@@ -65,57 +70,47 @@ fn main() {
 }
 
 mod usb_device {
-    use std::{sync::mpsc, time::Duration};
-    use rusb::{DeviceHandle, GlobalContext, UsbContext};
+    use nusb::{MaybeFuture, hotplug::HotplugEvent, io::EndpointWrite, transfer::{Bulk, Out}};
 
     pub const VID: u16 = 0xf055;
     pub const PID: u16 = 0x1118;
     pub const EP_OUT: u8 = 0x01;
 
-    struct HotplugCallback {
-        tx: mpsc::Sender<()>,
-    }
-    impl rusb::Hotplug<rusb::GlobalContext> for HotplugCallback {
-        fn device_arrived(&mut self, device: rusb::Device<rusb::GlobalContext>) {
-            println!("Device connected: {}:{}", device.bus_number(), device.address());
-            let _ = self.tx.send(());
-        }
-        fn device_left(&mut self, _device: rusb::Device<rusb::GlobalContext>) {
-        }
-    }
-
-    fn wait_device_arrived() -> Result<(), rusb::Error> {
-        let ctx = rusb::GlobalContext::default();
-        let (tx, rx) = mpsc::channel::<()>();
-        let callback = HotplugCallback { tx };
-        let reg = rusb::HotplugBuilder::new()
-            .vendor_id(VID)
-            .product_id(PID)
-            .enumerate(true)
-            .register(ctx, Box::new(callback))?;
-        loop {
-            ctx.handle_events(None)?;
-            if let Ok(_) = rx.recv_timeout(Duration::ZERO) {
-                break;
+    fn wait_device_arrived() -> Result<(), nusb::Error> {
+        println!("Waiting device connection...");
+        let watcher = nusb::watch_devices()?;
+        for event in futures_lite::stream::block_on(watcher) {
+            match event {
+                HotplugEvent::Connected(d) => {
+                    if d.product_id() == PID && d.vendor_id() == VID { break }
+                }
+                _ => {}
             }
         }
-        ctx.unregister_callback(reg);
         Ok(())
     }
 
-    pub fn open(wait: bool) -> Result<DeviceHandle<GlobalContext>, rusb::Error> {
-        let mut device = rusb::open_device_with_vid_pid(VID, PID);
-        if wait && device.is_none() {
-            if !rusb::has_hotplug() {
-                panic!("Platform does not support hotplug!");
-            }
+    fn find_device() -> Option<nusb::DeviceInfo> {
+        nusb::list_devices()
+            .wait()
+            .unwrap()
+            .find(|d| d.vendor_id() == VID && d.product_id() == PID)
+    }
+
+    pub fn open(wait: bool) -> Result<EndpointWrite<Bulk>, nusb::Error> {
+        let mut device_info = find_device();
+        if wait && device_info.is_none() {
             wait_device_arrived()?;
-            device = rusb::open_device_with_vid_pid(VID, PID);
+            device_info = find_device();
         }
-        let device = device.expect("Device not found!");
-        let _ = device.detach_kernel_driver(0);
-        device.set_active_configuration(1)?;
-        device.claim_interface(0)?;
-        Ok(device)
+        let device_info = device_info
+            .expect("Device not found!");
+
+        let device = device_info.open().wait().unwrap();
+        let interface = device.claim_interface(0).wait().unwrap();
+        let writer = interface
+            .endpoint::<Bulk, Out>(EP_OUT).unwrap()
+            .writer(8192).with_num_transfers(8);
+        Ok(writer)
     }
 }
