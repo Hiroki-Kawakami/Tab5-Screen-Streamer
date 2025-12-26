@@ -1,10 +1,10 @@
 #include "tusb.h"
+#include "esp_mac.h"
 
-#define USBD_VID            (0x303a) // Espressif
-#define USBD_PID            (0x4020)
-#define USBD_MANUFACTURER   "Espressif Systems"
-#define USBD_PRODUCT        "Espressif Device"
-#define USBD_SERIAL         "123456"
+#define USBD_VID            (0xf055)
+#define USBD_PID            (0x1118)
+#define USBD_MANUFACTURER   "M5Stack"
+#define USBD_PRODUCT        "Tab5 Screen Streamer"
 #define USBD_DESC_LEN       (TUD_CONFIG_DESC_LEN + CFG_TUD_VENDOR * TUD_VENDOR_DESC_LEN)
 #define USBD_DESC_STR_MAX   (32)
 #define USBD_JPEG_STR       "JPEG Stream"
@@ -80,10 +80,11 @@ static uint8_t const descriptor_config[] = {
     TUD_VENDOR_DESCRIPTOR(0, STR_VENDOR_JPEG, USBD_JPEG_EPNUM_OUT, USBD_JPEG_EPNUM_IN, 512)
 };
 
+static char serial[13];
 static const char *descriptor_string[] = {
     [STR_MANUFACTURER] = USBD_MANUFACTURER,
     [STR_PRODUCT     ] = USBD_PRODUCT,
-    [STR_SERIAL      ] = USBD_SERIAL,
+    [STR_SERIAL      ] = serial,
     [STR_VENDOR_JPEG ] = USBD_JPEG_STR,
 };
 
@@ -98,6 +99,12 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     static uint16_t buf[USBD_DESC_STR_MAX];
     uint8_t len;
+
+    if (!serial[0]) {
+        uint8_t mac[6];
+        esp_efuse_mac_get_default(mac);
+        snprintf(serial, sizeof(serial), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
 
     if (index == 0) {
         buf[1] = 0x0409;

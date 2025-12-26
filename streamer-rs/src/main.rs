@@ -68,8 +68,8 @@ mod usb_device {
     use std::{sync::mpsc, time::Duration};
     use rusb::{DeviceHandle, GlobalContext, UsbContext};
 
-    pub const VID: u16 = 0x303a;
-    pub const PID: u16 = 0x4020;
+    pub const VID: u16 = 0xf055;
+    pub const PID: u16 = 0x1118;
     pub const EP_OUT: u8 = 0x01;
 
     struct HotplugCallback {
