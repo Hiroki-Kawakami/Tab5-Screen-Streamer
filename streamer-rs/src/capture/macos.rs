@@ -1,5 +1,5 @@
 use crate::capture::{CaptureConfig, FrameConvertedData};
-use std::{os::raw::c_void, sync::mpsc, thread, time::Duration};
+use std::{os::raw::c_void, sync::mpsc, thread, time::Duration, panic, process};
 use core_foundation::{error::CFError, runloop::CFRunLoopRun};
 use core_media_rs::{cm_time::CMTime, cm_sample_buffer::CMSampleBuffer};
 use screencapturekit::{
@@ -11,7 +11,7 @@ use screencapturekit::{
         SCStream
     }
 };
-use objc2::{class, msg_send};
+use objc2::{class, msg_send, sel};
 use objc2::runtime::AnyObject;
 use objc2::rc::Retained;
 use objc2_foundation::{NSString, NSArray};
@@ -163,6 +163,11 @@ where
     });
 
     // Run Loop
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        default_hook(panic_info);
+        process::exit(1);
+    }));
     unsafe {
         let _ = CGDisplayRegisterReconfigurationCallback(Some(display_settings_changed), std::ptr::null_mut());
         NSApplication::load();
@@ -184,7 +189,8 @@ fn create_filter_from_display_id(display_id: CGDirectDisplayID) -> Result<(SCCon
             }
         }
     }
-    panic!("Target Display not found in Shareable Content!");
+    println!("Target Display not found in Shareable Content!, fallback to first display.");
+    Ok((SCContentFilter::new().with_display_excluding_windows(&SCShareableContent::get()?.displays()[0], &[]), display_id))
 }
 fn start_screen_capture_kit(output: SCStreamOutput, display_id: CGDirectDisplayID) -> Result<SCStream, CFError> {
     let (filter, _selected_display_id) = create_filter_from_display_id(display_id)?;
@@ -251,12 +257,27 @@ impl VirtualDisplay {
         let display: Retained<AnyObject> = unsafe { msg_send![msg_send![display_cls, alloc], initWithDescriptor: &*descriptor] };
 
         let mode_cls = class!(CGVirtualDisplayMode);
+        let arg1_type = (|| {
+            let sel = sel!(initWithWidth:height:refreshRate:);
+            let method = mode_cls.instance_method(sel)?;
+            let encoding = method.argument_type(2)?;
+            Some(encoding.to_str().ok()?.to_owned())
+        })();
+        let is_u32 = if let Some(arg1_type) = arg1_type { arg1_type == "I" } else { false };
         let modes: [Retained<AnyObject>; 2] = [60, 30].map(|framerate| unsafe {
-            msg_send![msg_send![mode_cls, alloc],
-                initWithWidth: resolution.0 as u64,
-                height: resolution.1 as u64,
-                refreshRate: framerate as f64
-            ]
+            if is_u32 {
+                msg_send![msg_send![mode_cls, alloc],
+                    initWithWidth: resolution.0 as u32,
+                    height: resolution.1 as u32,
+                    refreshRate: framerate as f64
+                ]
+            } else {
+                msg_send![msg_send![mode_cls, alloc],
+                    initWithWidth: resolution.0 as u64,
+                    height: resolution.1 as u64,
+                    refreshRate: framerate as f64
+                ]
+            }
         });
         let modes = NSArray::from_retained_slice(&modes);
 
