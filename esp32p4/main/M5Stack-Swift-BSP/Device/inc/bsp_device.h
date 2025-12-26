@@ -5,6 +5,7 @@
 #include "ili9881_init_data.h"
 #include "st7123_init_data.h"
 #include "esp_lcd_touch_gt911.h"
+#include "esp_lcd_touch_st7123.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "usb/usb_host.h"
 
@@ -21,4 +22,9 @@ esp_err_t esp_lcd_dpi_panel_get_frame_buffers(esp_lcd_panel_handle_t panel, uint
 // GT911
 void _ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG(esp_lcd_panel_io_i2c_config_t *ptr) {
     *ptr = (esp_lcd_panel_io_i2c_config_t)ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
+}
+
+// ST7123
+void _ESP_LCD_TOUCH_IO_I2C_ST7123_CONFIG(esp_lcd_panel_io_i2c_config_t *ptr) {
+    *ptr = (esp_lcd_panel_io_i2c_config_t)ESP_LCD_TOUCH_IO_I2C_ST7123_CONFIG();
 }

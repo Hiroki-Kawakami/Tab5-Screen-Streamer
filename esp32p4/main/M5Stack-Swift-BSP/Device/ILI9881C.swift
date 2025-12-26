@@ -3,7 +3,7 @@ class ILI9881C<PixelFormat: Pixel> {
     private let backlight: IDF.LEDControl
     private let phyPowerChannel: esp_ldo_channel_handle_t?
     private let mipiDsiBus: esp_lcd_dsi_bus_handle_t
-    private let io: esp_lcd_panel_io_handle_t
+    let io: esp_lcd_panel_io_handle_t
     let panel: esp_lcd_panel_handle_t
     let size: Size
     let frameBuffers: [UnsafeMutableBufferPointer<PixelFormat>]
@@ -34,7 +34,7 @@ class ILI9881C<PixelFormat: Pixel> {
         var busConfig = esp_lcd_dsi_bus_config_t(
             bus_id: 0,
             num_data_lanes: 2,
-            phy_clk_src: MIPI_DSI_PHY_CLK_SRC_DEFAULT,
+            phy_clk_src: MIPI_DSI_PHY_PLLREF_CLK_SRC_PLL_F20M,
             lane_bit_rate_mbps: rgb888 ? 870 : 800,
         )
         var mipiDsiBus: esp_lcd_dsi_bus_handle_t?

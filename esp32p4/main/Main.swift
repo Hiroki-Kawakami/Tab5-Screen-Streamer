@@ -15,18 +15,10 @@ func main() throws(IDF.Error) {
         pixelFormat: PixelFormat.self,
         frameBufferNum: 3,
     )
-
-    let frameBuffers = tab5.display.frameBuffers
+    try LVGL.begin()
     tab5.display.brightness = 100
-
-    // let multiTouch: MultiTouch = MultiTouch()
-    // multiTouch.task(xCoreID: 1) {
-    //     tab5.touch.waitInterrupt()
-    //     return try! tab5.touch.coordinates
-    // }
-
-    tab5.display.frameBuffers[0].initialize(repeating: PixelFormat(red: 255, green: 0, blue: 0))
-    tab5.display.flush()
+    let controlView = try ControlView(tab5: tab5)
+    let frameBuffers = tab5.display.frameBuffers
 
     try IDF.Error.check(usbd_init());
     Task(name: "TinyUSB", priority: 5, xCoreID: 1) { _ in
@@ -41,46 +33,67 @@ func main() throws(IDF.Error) {
     let jpegDecoder = try IDF.JPEG.Decoder(outputFormat:
         PixelFormat.self == RGB888.self ? .rgb888(elementOrder: .bgr, conversion: .bt601) : .rgb565(elementOrder: .bgr, conversion: .bt601)
     )
-
-    let timer = try IDF.Timer()
     let jpegDecoderQueue = Queue<UnsafeRawBufferPointer>(capacity: 1)!
 
+    let timer = try IDF.Timer()
     Task(name: "Decoder", priority: 15, xCoreID: 1) { _ in
         var frameBufferIndex = 0
         var frameCount = 0
         var start = timer.count
-        for jpegData in jpegDecoderQueue {
+        var decodeDurationMax: UInt64 = 0
+        while true {
+            guard let jpegData = jpegDecoderQueue.receive(timeout: 10) else {
+                if controlView.visible {
+                    LVGL.withLock {
+                        controlView.push(fbIndex: frameBufferIndex)
+                    }
+                }
+                continue
+            }
+
+            let nextFrameBufferIndex = (frameBufferIndex + 1) % frameBuffers.count
+            let decodeStart = timer.count
             guard let _ = try? jpegDecoder.decode(
                 inputBuffer: jpegData,
                 outputBuffer: UnsafeMutableRawBufferPointer(
-                    start: frameBuffers[frameBufferIndex].baseAddress!,
-                    count: frameBuffers[frameBufferIndex].count * MemoryLayout<PixelFormat>.size
+                    start: frameBuffers[nextFrameBufferIndex].baseAddress!,
+                    count: frameBuffers[nextFrameBufferIndex].count * MemoryLayout<PixelFormat>.size
                 )
             ) else {
                 continue
             }
+            let decodeDuration = timer.duration(from: decodeStart)
+            if decodeDuration > decodeDurationMax { decodeDurationMax = decodeDuration }
 
-            tab5.display.flush(fbNum: frameBufferIndex)
-            frameBufferIndex = (frameBufferIndex + 1) % frameBuffers.count
+            if controlView.visible {
+                LVGL.withLock {
+                    controlView.push(fbIndex: nextFrameBufferIndex)
+                }
+            }
+
+            tab5.display.flush(fbNum: nextFrameBufferIndex)
+            frameBufferIndex = nextFrameBufferIndex
 
             frameCount += 1
             let now = timer.count
             if (now - start) >= 1000000 {
-                Log.info("\(frameCount)fps")
+                Log.info("\(frameCount)fps, decode: \(decodeDurationMax)")
                 frameCount = 0
                 start = now
+                decodeDurationMax = 0
             }
-            Task.delay(2)
         }
     }
 
     Task(name: "Recv", priority: 4, xCoreID: 1) { _ in
         var mounted: Bool? = nil
+        var firstFrameReceived = false
         frameLoop: while (true) {
             let deviceMounted = usbd_mounted()
             if mounted != deviceMounted {
                 Log.info("Device mounted: \(deviceMounted)")
                 mounted = deviceMounted
+                controlView.usbMounted = deviceMounted
             }
             if !deviceMounted {
                 Task.delay(100)
@@ -89,6 +102,10 @@ func main() throws(IDF.Error) {
 
             let availableSize = usbd_vendor_available()
             if availableSize < 2 { continue }
+            if !firstFrameReceived {
+                controlView.visible = false
+                firstFrameReceived = true
+            }
 
             var bufferAddress = jpegBuffer[jpegBufferIndex].baseAddress!
             let readSize = usbd_vendor_read(bufferAddress, min(availableSize, 512))

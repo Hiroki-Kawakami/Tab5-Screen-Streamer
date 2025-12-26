@@ -1,11 +1,11 @@
 fileprivate let Log = Logger(tag: "M5StackTab5")
 
 class M5StackTab5<PixelFormat: Pixel> {
-
     static func begin(
         pixelFormat: PixelFormat.Type = RGB565.self,
         frameBufferNum: Int = 1,
         onRefreshDone: (() -> Void)? = nil,
+        touchInterrupt: Bool = true
     ) throws(IDF.Error) -> M5StackTab5 {
         let i2c0 = try IDF.I2C(num: 0, scl: .gpio32, sda: .gpio31)
         let pi4ioe1 = try PI4IO(i2c: i2c0, address: 0x43, pins: (
@@ -39,16 +39,23 @@ class M5StackTab5<PixelFormat: Pixel> {
         let display: Display
         let touch: Touch
         if i2c0.probe(address: 0x55) { // ST7123
-            let st7123 = try ST7123(
+            let st7123Display = try ST7123.Display(
                 backlightGpio: .gpio22,
                 size: Size(width: 720, height: 1280),
                 pixelFormat: pixelFormat,
                 fbNum: frameBufferNum,
                 onRefreshDone: onRefreshDone
             )
-            display = .st7123(st7123)
-            touch = .st7123
-        } else { // ILI9881C + GT911
+            let st7123Touch = try ST7123.Touch(
+                i2c: i2c0,
+                size: (width: 720, height: 1280),
+                int: touchInterrupt ? .gpio23 : nil,
+                rst: nil,
+                sclSpeedHz: 100000
+            )
+            display = .st7123(st7123Display)
+            touch = .st7123(st7123Touch)
+        } else if i2c0.probe(address: 0x14) { // ILI9881C + GT911
             let ili9881c = try ILI9881C(
                 backlightGpio: .gpio22,
                 size: Size(width: 720, height: 1280),
@@ -58,12 +65,14 @@ class M5StackTab5<PixelFormat: Pixel> {
             let gt911 = try GT911(
                 i2c: i2c0,
                 size: (width: 720, height: 1280),
-                int: .gpio23,
+                int: touchInterrupt ? .gpio23 : nil,
                 rst: nil,
                 sclSpeedHz: 100000
             )
             display = .ili9881c(ili9881c)
             touch = .gt911(gt911)
+        } else {
+            throw IDF.Error(ESP_ERR_NOT_FOUND)
         }
 
         // let audio = try Audio(
@@ -118,7 +127,7 @@ class M5StackTab5<PixelFormat: Pixel> {
     // MARK: Display
     enum Display {
         case ili9881c(ILI9881C<PixelFormat>)
-        case st7123(ST7123<PixelFormat>)
+        case st7123(ST7123.Display<PixelFormat>)
 
         var brightness: Int {
             get {
@@ -162,7 +171,23 @@ class M5StackTab5<PixelFormat: Pixel> {
     // MARK: Touch
     enum Touch {
         case gt911(GT911)
-        case st7123
+        case st7123(ST7123.Touch)
+
+        func waitInterrupt() {
+            switch (self) {
+                case .gt911(let gt911): gt911.waitInterrupt()
+                case .st7123(let st7123): st7123.waitInterrupt()
+            }
+        }
+
+        var coordinates: [Point] {
+            get throws(IDF.Error) {
+                switch (self) {
+                    case .gt911(let gt911): try gt911.coordinates
+                    case .st7123(let st7123): try st7123.coordinates
+                }
+            }
+        }
     }
 
 

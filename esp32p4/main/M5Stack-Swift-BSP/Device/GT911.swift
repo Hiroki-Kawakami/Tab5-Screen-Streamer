@@ -1,13 +1,4 @@
 class GT911 {
-    static func reset(pi4io: PI4IO, int: IDF.GPIO.Pin) throws(IDF.Error) {
-        try IDF.GPIO.reset(pin: int)
-        let current = pi4io.output
-        pi4io.output = current & ~(0b11 << 4)
-        Task.delay(100)
-        pi4io.output = current |  (0b11 << 4)
-        Task.delay(100)
-    }
-
     var ioHandle: esp_lcd_panel_io_handle_t
     var handle: esp_lcd_touch_handle_t
     let interrupt: (semaphore: Semaphore, gpio: IDF.GPIO.Pin)?
@@ -72,20 +63,13 @@ class GT911 {
         interrupt?.semaphore.take()
     }
 
-    private var callback: ((GT911) -> Void)? = nil
-    func onInterrupt(callback: @escaping (GT911) -> Void) {
-        self.callback = callback
-    }
-
     var coordinates: [Point] {
         get throws(IDF.Error) {
             try IDF.Error.check(esp_lcd_touch_read_data(handle))
-            return withUnsafeTemporaryAllocation(of: UInt16.self, capacity: 10) { ptr in
-                let touchX = ptr.baseAddress!
-                let touchY = ptr.baseAddress!.advanced(by: 5)
+            return withUnsafeTemporaryAllocation(of: esp_lcd_touch_point_data_t.self, capacity: 5) { ptr in
                 var touchCount: UInt8 = 0
-                esp_lcd_touch_get_coordinates(handle, touchX, touchY, nil, &touchCount, 5)
-                return (0..<Int(touchCount)).map { Point(x: Int(touchX[$0]), y: Int(touchY[$0])) }
+                esp_lcd_touch_get_data(handle, ptr.baseAddress, &touchCount, 5)
+                return (0..<Int(touchCount)).map { Point(x: Int(ptr[$0].x), y: Int(ptr[$0].y)) }
             }
         }
     }

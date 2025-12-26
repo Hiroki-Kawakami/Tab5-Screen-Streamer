@@ -7,11 +7,29 @@ extension IDF {
             case blend
             case fill
 
-            var value: ppa_operation_t {
+            fileprivate var value: ppa_operation_t {
                 switch self {
-                case .srm: return PPA_OPERATION_SRM
-                case .blend: return PPA_OPERATION_BLEND
-                case .fill: return PPA_OPERATION_FILL
+                case .srm: PPA_OPERATION_SRM
+                case .blend: PPA_OPERATION_BLEND
+                case .fill: PPA_OPERATION_FILL
+                }
+            }
+        }
+
+        enum SRMColorMode {
+            case argb8888
+            case rgb888
+            case rgb565
+            case yuv420
+            case yuv444
+
+            fileprivate var value: ppa_srm_color_mode_t {
+                switch self {
+                case .argb8888: PPA_SRM_COLOR_MODE_ARGB8888
+                case .rgb888: PPA_SRM_COLOR_MODE_RGB888
+                case .rgb565: PPA_SRM_COLOR_MODE_RGB565
+                case .yuv420: PPA_SRM_COLOR_MODE_YUV420
+                case .yuv444: PPA_SRM_COLOR_MODE_YUV444
                 }
             }
         }
@@ -22,6 +40,38 @@ extension IDF {
             config.oper_type = operType.value
             try IDF.Error.check(ppa_register_client(&config, &client))
             self.client = client!
+        }
+
+        func srm(
+            input: (buffer: UnsafeRawBufferPointer, size: Size, block: Rect?, colorMode: SRMColorMode),
+            output: (buffer: UnsafeMutableRawBufferPointer, size: Size, block: Rect?, colorMode: SRMColorMode),
+            rotate: Int = 0,
+        ) throws(IDF.Error) {
+            var config = ppa_srm_oper_config_t()
+            config.in.buffer = input.buffer.baseAddress
+            config.in.pic_w = UInt32(input.size.width)
+            config.in.pic_h = UInt32(input.size.height)
+            config.in.block_w = UInt32(input.block?.size.width ?? input.size.width)
+            config.in.block_h = UInt32(input.block?.size.height ?? input.size.height)
+            config.in.block_offset_x = UInt32(input.block?.origin.x ?? 0)
+            config.in.block_offset_y = UInt32(input.block?.origin.y ?? 0)
+            config.in.srm_cm = input.colorMode.value
+            config.out.buffer = output.buffer.baseAddress
+            config.out.buffer_size = UInt32(output.buffer.count)
+            config.out.pic_w = UInt32(output.size.width)
+            config.out.pic_h = UInt32(output.size.height)
+            config.out.block_offset_x = UInt32(output.block?.origin.x ?? 0)
+            config.out.block_offset_y = UInt32(output.block?.origin.y ?? 0)
+            config.out.srm_cm = output.colorMode.value
+            config.rotation_angle = rotate == 90  ? PPA_SRM_ROTATION_ANGLE_90  : rotate == 180 ? PPA_SRM_ROTATION_ANGLE_180 :
+                                    rotate == 270 ? PPA_SRM_ROTATION_ANGLE_270 : PPA_SRM_ROTATION_ANGLE_0
+            config.scale_x = rotate == 90 || rotate == 270 ?
+                Float(output.block?.size.width ?? output.size.width) / Float(input.block?.size.height ?? input.size.height) :
+                Float(output.block?.size.width ?? output.size.width) / Float(input.block?.size.width ?? input.size.width)
+            config.scale_y = rotate == 90 || rotate == 270 ?
+                Float(output.block?.size.height ?? output.size.height) / Float(input.block?.size.width ?? input.size.width) :
+                Float(output.block?.size.height ?? output.size.height) / Float(input.block?.size.height ?? input.size.height)
+            try IDF.Error.check(ppa_do_scale_rotate_mirror(client, &config))
         }
 
         func fitScreen(
