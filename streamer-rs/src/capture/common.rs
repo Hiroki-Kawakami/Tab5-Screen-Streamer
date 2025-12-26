@@ -21,6 +21,21 @@ pub struct Context {
     rx: mpsc::Receiver<FrameConvertedData>,
 }
 
+pub fn check_permission() -> bool {
+    if !scap::is_supported() {
+        println!("Platform not supported!");
+        return false;
+    }
+    if !scap::has_permission() {
+        println!("Permission not granted. Requesting permission...");
+        if !scap::request_permission() {
+            println!("Permission denied");
+            return false;
+        }
+    }
+    return true;
+}
+
 pub fn start<F>(config: CaptureConfig, tx_thread: F)
 where
     F: FnOnce(Context) + Send + 'static,

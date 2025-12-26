@@ -20,6 +20,8 @@ pub struct Context {
     rx: mpsc::Receiver<FrameConvertedData>,
 }
 
+pub fn check_permission() -> bool { true }
+
 pub fn start<F>(config: CaptureConfig, tx_thread: F)
 where
     F: FnOnce(Context) + Send + 'static,

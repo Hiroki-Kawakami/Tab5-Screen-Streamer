@@ -10,21 +10,6 @@ pub struct CaptureConfig {
     pub quality: Option<i32>
 }
 
-pub fn check_permission() -> bool {
-    if !scap::is_supported() {
-        println!("Platform not supported!");
-        return false;
-    }
-    if !scap::has_permission() {
-        println!("Permission not granted. Requesting permission...");
-        if !scap::request_permission() {
-            println!("Permission denied");
-            return false;
-        }
-    }
-    return true;
-}
-
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]

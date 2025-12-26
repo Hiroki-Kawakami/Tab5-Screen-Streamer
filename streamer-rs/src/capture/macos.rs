@@ -36,6 +36,17 @@ unsafe extern "C-unwind" fn display_settings_changed(display: u32, _flags: CGDis
     }
 }
 
+pub fn check_permission() -> bool {
+    if !objc2_core_graphics::CGPreflightScreenCaptureAccess() {
+        println!("Permission not granted. Requesting permission...");
+        if !objc2_core_graphics::CGRequestScreenCaptureAccess() {
+            println!("Permission denied");
+            return false;
+        }
+    }
+    return true;
+}
+
 pub fn start<F>(config: CaptureConfig, tx_thread: F)
 where
     F: FnOnce(Context) + Send + 'static,
