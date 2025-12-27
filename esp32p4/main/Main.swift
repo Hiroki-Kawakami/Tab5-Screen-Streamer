@@ -40,14 +40,29 @@ func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
         var frameCount = 0
         var start = timer.count
         var decodeDurationMax: UInt64 = 0
+        var lastJpegBuffer: UnsafeRawBufferPointer?
+        var prevControlVisible = false
         while true {
-            guard let jpegData = jpegDecoderQueue.receive(timeout: 10) else {
-                if controlView.visible {
+            let jpegData: UnsafeRawBufferPointer
+            if controlView.visible {
+                prevControlVisible = true
+                if let recv = jpegDecoderQueue.receive(timeout: 4) {
+                    jpegData = recv
+                } else {
                     LVGL.withLock {
                         controlView.push(fbIndex: frameBufferIndex)
                     }
+                    continue
                 }
-                continue
+            } else {
+                if let recv = jpegDecoderQueue.receive(timeout: 10) {
+                    jpegData = recv
+                } else if prevControlVisible == true, let last = lastJpegBuffer {
+                    prevControlVisible = false
+                    jpegData = last
+                } else {
+                    continue
+                }
             }
 
             let nextFrameBufferIndex = (frameBufferIndex + 1) % frameBuffers.count
@@ -72,6 +87,7 @@ func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
 
             tab5.display.flush(fbNum: nextFrameBufferIndex)
             frameBufferIndex = nextFrameBufferIndex
+            lastJpegBuffer = jpegData
 
             frameCount += 1
             let now = timer.count
