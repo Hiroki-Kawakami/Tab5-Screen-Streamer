@@ -3,14 +3,13 @@ fileprivate let Log = Logger(tag: "main")
 @_cdecl("app_main")
 func app_main() {
     do {
-        try main()
+        try main(pixelFormat: RGB888.self)
     } catch {
         Log.error("Main Function Exit with Error: \(error)")
     }
 }
 
-func main() throws(IDF.Error) {
-    typealias PixelFormat = RGB888
+func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
     let tab5 = try M5StackTab5.begin(
         pixelFormat: PixelFormat.self,
         frameBufferNum: 3,
@@ -26,7 +25,7 @@ func main() throws(IDF.Error) {
     }
 
     let jpegBufferSize = 512 * 1024
-    let jpegBuffer = [UnsafeMutableBufferPointer<UInt8>]((0...3).map({ _ in
+    let jpegBuffer = [UnsafeMutableBufferPointer<UInt8>]((0..<8).map({ _ in
         Memory.allocate(type: UInt8.self, capacity: jpegBufferSize, capability: .spiram)!
     }))
     var jpegBufferIndex = 0
@@ -36,7 +35,7 @@ func main() throws(IDF.Error) {
     let jpegDecoderQueue = Queue<UnsafeRawBufferPointer>(capacity: 1)!
 
     let timer = try IDF.Timer()
-    Task(name: "Decoder", priority: 15, xCoreID: 1) { _ in
+    Task(name: "Decoder", priority: 15, xCoreID: 0) { _ in
         var frameBufferIndex = 0
         var frameCount = 0
         var start = timer.count
@@ -127,11 +126,8 @@ func main() throws(IDF.Error) {
             }
 
             let jpegDataBuffer = UnsafeRawBufferPointer(start: jpegBuffer[jpegBufferIndex].baseAddress!.advanced(by: 4), count: jpegBuffer[jpegBufferIndex].count - 4)
-            if jpegDecoderQueue.send(jpegDataBuffer, timeout: 0) {
-                jpegBufferIndex = (jpegBufferIndex + 1) % jpegBuffer.count
-            } else {
-                Log.warn("Frame drop!")
-            }
+            jpegDecoderQueue.overwrite(jpegDataBuffer)
+            jpegBufferIndex = (jpegBufferIndex + 1) % jpegBuffer.count
         }
     }
 }

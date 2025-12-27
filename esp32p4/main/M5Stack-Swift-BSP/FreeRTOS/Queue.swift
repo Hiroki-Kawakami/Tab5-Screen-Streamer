@@ -12,13 +12,22 @@ class Queue<T>: Sequence {
         vQueueDelete(queue)
     }
 
-    @discardableResult
-    func send(_ item: T, timeout: UInt32 = portMAX_DELAY) -> Bool {
+    private func genericSend(_ item: T, timeout: UInt32, copyPosition: BaseType_t) -> Bool {
         var item = item
         let res = withUnsafePointer(to: &item) {
-            xQueueGenericSend(queue, $0, timeout, queueSEND_TO_BACK)
+            xQueueGenericSend(queue, $0, timeout, copyPosition)
         }
         return res == pdPASS
+    }
+
+    @discardableResult
+    func send(_ item: T, timeout: UInt32 = portMAX_DELAY) -> Bool {
+        return genericSend(item, timeout: timeout, copyPosition: queueSEND_TO_BACK)
+    }
+
+    @discardableResult
+    func overwrite(_ item: T) -> Bool {
+        return genericSend(item, timeout: 0, copyPosition: queueSEND_TO_BACK)
     }
 
     func receive(timeout: UInt32 = portMAX_DELAY) -> T? {

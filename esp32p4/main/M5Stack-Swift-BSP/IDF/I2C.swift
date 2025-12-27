@@ -23,6 +23,11 @@ extension IDF {
             self.handle = handle!
         }
 
+        func delete() throws(IDF.Error) {
+            try IDF.Error.check(i2c_del_master_bus(handle))
+            Self.i2cPool.give(UInt32(portNumber))
+        }
+
         func probe(address: UInt8, timeoutMs: Int32 = 10) -> Bool {
             return i2c_master_probe(handle, UInt16(address), timeoutMs) == ESP_OK
         }

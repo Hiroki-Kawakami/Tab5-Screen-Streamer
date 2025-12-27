@@ -26,7 +26,6 @@ class ControlView<PixelFormat: Pixel> {
     init(tab5: M5StackTab5<PixelFormat>) throws(IDF.Error) {
         self.guiBuffers = [
             Memory.allocate(type: lv_color_t.self, capacity: 320 * 480, capability: .spiram)!,
-            Memory.allocate(type: lv_color_t.self, capacity: 320 * 480, capability: .spiram)!
         ]
         self.tab5 = tab5
         ppa = try IDF.PPAClient(operType: .srm)
@@ -36,16 +35,9 @@ class ControlView<PixelFormat: Pixel> {
     private func createDisplay() {
         let display = LVGL.Display.createDirectBufferDisplay(
             buffer: guiBuffers[0].baseAddress,
-            // buffer2: guiBuffers[1].baseAddress,
             size: Size(width: 320, height: 480)
         ) { display, buffer in
             self.currentBuffer = buffer
-            // try? self.ppa.srm(
-            //     input: (buffer: UnsafeRawBufferPointer(start: buffer, count: self.guiBuffers[0].count), size: Size(width: 320, height: 480), block: nil, colorMode: .rgb565),
-            //     output: (buffer: UnsafeMutableRawBufferPointer(self.tab5.display.frameBuffers[0]), size: Size(width: 720, height: 1280), block: Rect(x: 0, y: 0, width: 720, height: 480), colorMode: .rgb888),
-            //     rotate: 90
-            // )
-            // self.tab5.display.flush(fbNum: 0)
             display.flushReady()
         }
         display.setDefault()
@@ -107,9 +99,10 @@ class ControlView<PixelFormat: Pixel> {
     }
 
     func push(fbIndex: Int) {
+        let colorMode: IDF.PPAClient.SRMColorMode = MemoryLayout<PixelFormat>.size == 2 ? .rgb565 : .rgb888
         try? ppa.srm(
             input: (buffer: UnsafeRawBufferPointer(start: currentBuffer, count: self.guiBuffers[0].count), size: Size(width: 320, height: 480), block: nil, colorMode: .rgb565),
-            output: (buffer: UnsafeMutableRawBufferPointer(tab5.display.frameBuffers[fbIndex]), size: Size(width: 720, height: 1280), block: Rect(x: 0, y: 0, width: 720, height: 480), colorMode: .rgb888),
+            output: (buffer: UnsafeMutableRawBufferPointer(tab5.display.frameBuffers[fbIndex]), size: Size(width: 720, height: 1280), block: Rect(x: 0, y: 0, width: 720, height: 480), colorMode: colorMode),
             rotate: 90
         )
     }

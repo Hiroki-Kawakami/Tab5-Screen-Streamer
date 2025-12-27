@@ -44,6 +44,13 @@ enum IDF {
                 fatalError("No more resources available")
             }
         }
+
+        mutating func give(_ value: UInt32) {
+            if (used & (1 << value)) == 0 {
+                fatalError("Resource is not taken")
+            }
+            used &= ~(1 << value)
+        }
     }
 }
 
