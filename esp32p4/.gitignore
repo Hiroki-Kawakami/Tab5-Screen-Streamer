@@ -5,3 +5,4 @@ sdkconfig.old
 dependencies.lock
 .vscode
 .DS_Store
+main/M5Stack-Swift-BSP
