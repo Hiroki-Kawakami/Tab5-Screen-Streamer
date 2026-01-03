@@ -19,12 +19,16 @@ func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
     )
     try LVGL.begin()
     tab5.display.brightness = (try? settings.get(type: Int.self, key: "brightness")) ?? 50
-    let controlView = try ControlView(tab5: tab5, settings: settings)
+    let controlView = try ControlView(tab5: tab5) {
+        if !usbd_mounted() {
+            try? settings.set(key: "brightness", value: tab5.display.brightness)
+        }
+    }
     let frameBuffers = tab5.display.frameBuffers
     Task.delay(100)
 
     try IDF.Error.check(usbd_init());
-    Task(name: "TinyUSB", priority: 5, xCoreID: 1) { _ in
+    Task(name: "TinyUSB", priority: 5, xCoreID: 0) { _ in
         usbd_task()
     }
 
@@ -104,7 +108,7 @@ func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
         }
     }
 
-    Task(name: "Recv", priority: 4, xCoreID: 1) { _ in
+    Task(name: "Recv", priority: 4, xCoreID: 0) { _ in
         var mounted: Bool? = nil
         var firstFrameReceived = false
         frameLoop: while (true) {
@@ -113,6 +117,7 @@ func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
                 Log.info("Device mounted: \(deviceMounted)")
                 mounted = deviceMounted
                 controlView.usbMounted = deviceMounted
+                if deviceMounted { Task.delay(300) }
             }
             if !deviceMounted {
                 Task.delay(100)

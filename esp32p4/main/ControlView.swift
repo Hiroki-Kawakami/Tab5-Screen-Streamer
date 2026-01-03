@@ -6,7 +6,7 @@ class ControlView<PixelFormat: Pixel> {
     private var guiBuffers: [UnsafeMutableBufferPointer<lv_color_t>]
     private var tab5: M5StackTab5<PixelFormat>
     private let ppa: IDF.PPAClient
-    private let settings: IDF.NVS
+    private let saveSettings: () -> ()
 
     private var usbStatusRect: LVGL.Object!
     private var usbStatusLabel: LVGL.Label!
@@ -24,13 +24,13 @@ class ControlView<PixelFormat: Pixel> {
         }
     }
 
-    init(tab5: M5StackTab5<PixelFormat>, settings: IDF.NVS) throws(IDF.Error) {
+    init(tab5: M5StackTab5<PixelFormat>, saveSettings: @escaping () -> ()) throws(IDF.Error) {
         self.guiBuffers = [
             Memory.allocate(type: lv_color_t.self, capacity: 320 * 480, capability: .spiram)!,
         ]
         self.tab5 = tab5
         ppa = try IDF.PPAClient(operType: .srm)
-        self.settings = settings
+        self.saveSettings = saveSettings
         LVGL.withLock { createDisplay() }
     }
 
@@ -91,15 +91,20 @@ class ControlView<PixelFormat: Pixel> {
         brightnessSlider.alignTo(base: brightnessLabel, align: .outBottomMid, yOffset: 20)
         brightnessSlider.setRange(min: 1, max: 100)
         brightnessSlider.setValue(Int32(tab5.display.brightness), anim: false)
-        let callbackWrapper = FFI.Wrapper<() -> Void> {
-            let brightness = Int(brightnessSlider.getValue())
-            self.tab5.display.brightness = brightness
-            try? self.settings.set(key: "brightness", value: brightness)
+        let valueChanged = FFI.Wrapper<() -> Void> {
+            self.tab5.display.brightness = Int(brightnessSlider.getValue())
+        }
+        let released = FFI.Wrapper<() -> Void> {
+            self.saveSettings()
         }
         brightnessSlider.addEventCb({ obj in
             let event = LVGL.Event(e: obj!)
             Unmanaged<FFI.Wrapper<() -> Void>>.fromOpaque(event.getUserData()).takeUnretainedValue().value()
-        }, filter: LV_EVENT_VALUE_CHANGED, userData: Unmanaged.passRetained(callbackWrapper).toOpaque())
+        }, filter: .valueChanged, userData: Unmanaged.passRetained(valueChanged).toOpaque())
+        brightnessSlider.addEventCb({ obj in
+            let event = LVGL.Event(e: obj!)
+            Unmanaged<FFI.Wrapper<() -> Void>>.fromOpaque(event.getUserData()).takeUnretainedValue().value()
+        }, filter: .released, userData: Unmanaged.passRetained(released).toOpaque())
     }
 
     func push(fbIndex: Int) {
