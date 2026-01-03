@@ -10,15 +10,18 @@ func app_main() {
 }
 
 func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
+    try IDF.NVS.initialize()
+    let settings = try IDF.NVS(name: "t5ss")
+
     let tab5 = try M5StackTab5.begin(
         pixelFormat: PixelFormat.self,
         frameBufferNum: 3,
     )
     try LVGL.begin()
-    tab5.display.brightness = 100
-    let controlView = try ControlView(tab5: tab5)
+    tab5.display.brightness = (try? settings.get(type: Int.self, key: "brightness")) ?? 50
+    let controlView = try ControlView(tab5: tab5, settings: settings)
     let frameBuffers = tab5.display.frameBuffers
-    frameBuffers[0].initialize(repeating: .black)
+    Task.delay(100)
 
     try IDF.Error.check(usbd_init());
     Task(name: "TinyUSB", priority: 5, xCoreID: 1) { _ in

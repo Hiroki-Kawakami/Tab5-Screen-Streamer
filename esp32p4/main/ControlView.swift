@@ -6,6 +6,7 @@ class ControlView<PixelFormat: Pixel> {
     private var guiBuffers: [UnsafeMutableBufferPointer<lv_color_t>]
     private var tab5: M5StackTab5<PixelFormat>
     private let ppa: IDF.PPAClient
+    private let settings: IDF.NVS
 
     private var usbStatusRect: LVGL.Object!
     private var usbStatusLabel: LVGL.Label!
@@ -23,12 +24,13 @@ class ControlView<PixelFormat: Pixel> {
         }
     }
 
-    init(tab5: M5StackTab5<PixelFormat>) throws(IDF.Error) {
+    init(tab5: M5StackTab5<PixelFormat>, settings: IDF.NVS) throws(IDF.Error) {
         self.guiBuffers = [
             Memory.allocate(type: lv_color_t.self, capacity: 320 * 480, capability: .spiram)!,
         ]
         self.tab5 = tab5
         ppa = try IDF.PPAClient(operType: .srm)
+        self.settings = settings
         LVGL.withLock { createDisplay() }
     }
 
@@ -90,7 +92,9 @@ class ControlView<PixelFormat: Pixel> {
         brightnessSlider.setRange(min: 1, max: 100)
         brightnessSlider.setValue(Int32(tab5.display.brightness), anim: false)
         let callbackWrapper = FFI.Wrapper<() -> Void> {
-            self.tab5.display.brightness = Int(brightnessSlider.getValue())
+            let brightness = Int(brightnessSlider.getValue())
+            self.tab5.display.brightness = brightness
+            try? self.settings.set(key: "brightness", value: brightness)
         }
         brightnessSlider.addEventCb({ obj in
             let event = LVGL.Event(e: obj!)
