@@ -18,6 +18,7 @@ func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
     tab5.display.brightness = 100
     let controlView = try ControlView(tab5: tab5)
     let frameBuffers = tab5.display.frameBuffers
+    frameBuffers[0].initialize(repeating: .black)
 
     try IDF.Error.check(usbd_init());
     Task(name: "TinyUSB", priority: 5, xCoreID: 1) { _ in
@@ -34,7 +35,7 @@ func main<PixelFormat: Pixel>(pixelFormat: PixelFormat.Type) throws(IDF.Error) {
     )
     let jpegDecoderQueue = Queue<UnsafeRawBufferPointer>(capacity: 1)!
 
-    let timer = try IDF.Timer()
+    let timer = try IDF.GeneralPurposeTimer()
     Task(name: "Decoder", priority: 15, xCoreID: 0) { _ in
         var frameBufferIndex = 0
         var frameCount = 0
