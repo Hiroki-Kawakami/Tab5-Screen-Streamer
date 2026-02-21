@@ -5,7 +5,7 @@ idf_component_register(
 )
 
 # Fetch BSP from GitHub if needed
-set(BSP_REPO_TAG "05a52c8fb3e691b32551522778d43069cd6e6d39")
+set(BSP_REPO_TAG "ab3a795ada87d4030a7b3cbe79854fb8a8a514dc")
 set(BSP_LINK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/M5Stack-Swift-BSP")
 if(EXISTS ${BSP_LINK_PATH} AND IS_SYMLINK ${BSP_LINK_PATH})
     get_filename_component(REAL_PATH ${BSP_LINK_PATH} REALPATH)
