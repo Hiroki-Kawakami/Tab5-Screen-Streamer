@@ -1,5 +1,6 @@
 #include "platform_port.hpp"
 #include "esp_log.h"
+#include "jpeg_fullrange_decode.h"
 
 static const char *TAG = "JPEG";
 
@@ -51,7 +52,9 @@ Error JpegDecoder::decode(const void *stream, size_t stream_size,
                           void *output, size_t output_size,
                           size_t *out_size) {
     uint32_t produced = 0;
-    esp_err_t err = jpeg_decoder_process(
+    // Full-range (JFIF) BT.601 YUV->RGB conversion: MJPEG content is full-range,
+    // so the IDF driver's limited-range matrix would under-saturate the image.
+    esp_err_t err = jpeg_decoder_process_full_range(
         decoder_, &cfg_,
         static_cast<const uint8_t *>(stream),
         static_cast<uint32_t>(stream_size),
