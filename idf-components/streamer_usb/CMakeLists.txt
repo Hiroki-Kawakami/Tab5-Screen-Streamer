@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "streamer_usb.c"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES "usb"
+    PRIV_REQUIRES "usb" "esp_timer"
 )
 
 idf_component_get_property(tusb_lib espressif__tinyusb COMPONENT_LIB)

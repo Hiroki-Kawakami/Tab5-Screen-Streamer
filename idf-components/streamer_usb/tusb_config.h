@@ -2,6 +2,7 @@
 
 #include "tusb_option.h"
 #include "sdkconfig.h"
+#include "streamer_usb_uac.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -95,6 +96,12 @@ extern "C" {
 #define CFG_TUD_VENDOR_RX_BUFSIZE 8192
 #define CFG_TUD_VENDOR_TX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
 
+// Endpoint DMA buffer size. MUST match the bulk max packet size declared in the
+// vendor descriptor (512 at high speed). The default is 64, which leaves the
+// per-endpoint DMA buffer too small for HS bulk packets — the controller then
+// writes past it and corrupts whatever follows in memory.
+#define CFG_TUD_VENDOR_EPSIZE     (TUD_OPT_HIGH_SPEED ? 512 : 64)
+
 // DFU macros
 #define CFG_TUD_DFU_XFER_BUFSIZE    CONFIG_TINYUSB_DFU_BUFSIZE
 
@@ -107,6 +114,7 @@ extern "C" {
 #define CFG_TUD_HID                 CONFIG_TINYUSB_HID_COUNT
 #define CFG_TUD_MIDI                CONFIG_TINYUSB_MIDI_COUNT
 #define CFG_TUD_VENDOR              CONFIG_TINYUSB_VENDOR_COUNT
+#define CFG_TUD_AUDIO               1     // UAC 2.0 speaker (see streamer_usb_uac.h)
 #define CFG_TUD_ECM_RNDIS           CONFIG_TINYUSB_NET_MODE_ECM_RNDIS
 #define CFG_TUD_NCM                 CONFIG_TINYUSB_NET_MODE_NCM
 #define CFG_TUD_DFU                 CONFIG_TINYUSB_DFU_MODE_DFU
@@ -118,6 +126,39 @@ extern "C" {
 #define CFG_TUD_NCM_IN_NTB_N          CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT
 #define CFG_TUD_NCM_OUT_NTB_MAX_SIZE  CONFIG_TINYUSB_NCM_OUT_NTB_BUFF_MAX_SIZE
 #define CFG_TUD_NCM_IN_NTB_MAX_SIZE   CONFIG_TINYUSB_NCM_IN_NTB_BUFF_MAX_SIZE
+
+// ------------------------------------------------------------------------
+//                          AUDIO CLASS (UAC 2.0)
+// ------------------------------------------------------------------------
+// One audio function: a 48 kHz / stereo / 16-bit speaker (OUT) with an async
+// feedback endpoint. The *_DESC_LEN macros below come from device/usbd.h and
+// are expanded lazily (when the audio driver / descriptor uses them), so it is
+// fine that usbd.h is not yet included at this point.
+#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN ( \
+      TUD_AUDIO_DESC_IAD_LEN \
+    + TUD_AUDIO_DESC_STD_AC_LEN \
+    + TUD_AUDIO_DESC_CS_AC_LEN \
+    + TUD_AUDIO_DESC_CLK_SRC_LEN \
+    + TUD_AUDIO_DESC_FEATURE_UNIT_TWO_CHANNEL_LEN \
+    + TUD_AUDIO_DESC_INPUT_TERM_LEN \
+    + TUD_AUDIO_DESC_OUTPUT_TERM_LEN \
+    + TUD_AUDIO_DESC_STD_AS_INT_LEN /* alt 0 */ \
+    + TUD_AUDIO_DESC_STD_AS_INT_LEN /* alt 1 */ \
+    + TUD_AUDIO_DESC_CS_AS_INT_LEN \
+    + TUD_AUDIO_DESC_TYPE_I_FORMAT_LEN \
+    + TUD_AUDIO_DESC_STD_AS_ISO_EP_LEN \
+    + TUD_AUDIO_DESC_CS_AS_ISO_EP_LEN )
+
+#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT             1
+#define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ          64
+
+// Speaker = host-to-device = OUT endpoint. Adaptive sync (the device follows
+// the host clock), so no feedback endpoint is needed.
+#define CFG_TUD_AUDIO_ENABLE_EP_OUT               1
+#define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP          0
+
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX        UAC_EP_SZ_OUT
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ     UAC_EP_OUT_SW_BUF_SZ
 
 #ifdef __cplusplus
 }

@@ -1,15 +1,31 @@
 #include "tusb.h"
 #include "esp_mac.h"
+#include "streamer_usb_uac.h"
 
 #define USBD_VID            (0xf055)
 #define USBD_PID            (0x1118)
 #define USBD_MANUFACTURER   "M5Stack"
 #define USBD_PRODUCT        "Tab5 Screen Streamer"
-#define USBD_DESC_LEN       (TUD_CONFIG_DESC_LEN + CFG_TUD_VENDOR * TUD_VENDOR_DESC_LEN)
+#define USBD_DESC_LEN       (TUD_CONFIG_DESC_LEN \
+                             + CFG_TUD_VENDOR * TUD_VENDOR_DESC_LEN \
+                             + CFG_TUD_AUDIO * CFG_TUD_AUDIO_FUNC_1_DESC_LEN)
 #define USBD_DESC_STR_MAX   (32)
 #define USBD_JPEG_STR       "JPEG Stream"
 #define USBD_JPEG_EPNUM_OUT (0x01)
 #define USBD_JPEG_EPNUM_IN  (0x81)
+#define USBD_UAC_CTRL_STR   "Tab5 Speaker"
+#define USBD_UAC_SPK_STR    "Speaker"
+
+// AudioControl feature-unit per-channel control bitmap: mute + volume, RW.
+#define UAC_FU_CTRL ((uint32_t)(AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_MUTE_POS) \
+                   | (uint32_t)(AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_VOLUME_POS))
+
+// Class-Specific AC total length (clock + feature unit + I/O terminals).
+#define UAC_CS_AC_TOTAL_LEN ( \
+      TUD_AUDIO_DESC_CLK_SRC_LEN \
+    + TUD_AUDIO_DESC_FEATURE_UNIT_TWO_CHANNEL_LEN \
+    + TUD_AUDIO_DESC_INPUT_TERM_LEN \
+    + TUD_AUDIO_DESC_OUTPUT_TERM_LEN )
 
 enum {
     STR_0,
@@ -17,6 +33,8 @@ enum {
     STR_PRODUCT,
     STR_SERIAL,
     STR_VENDOR_JPEG,
+    STR_UAC_CTRL,
+    STR_UAC_SPK,
 };
 
 static const tusb_desc_device_t descriptor_dev = {
@@ -24,8 +42,9 @@ static const tusb_desc_device_t descriptor_dev = {
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
 
-#if CFG_TUD_CDC
-    // Use Interface Association Descriptor (IAD) for CDC
+#if CFG_TUD_CDC || CFG_TUD_AUDIO
+    // The UAC (and CDC) functions use an Interface Association Descriptor (IAD),
+    // so the device must be declared as a composite/IAD device.
     // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1)
     .bDeviceClass = TUSB_CLASS_MISC,
     .bDeviceSubClass = MISC_SUBCLASS_COMMON,
@@ -54,8 +73,9 @@ static const tusb_desc_device_qualifier_t descriptor_qualifier = {
     .bDescriptorType = TUSB_DESC_DEVICE_QUALIFIER,
     .bcdUSB = 0x0200,
 
-#if CFG_TUD_CDC
-    // Use Interface Association Descriptor (IAD) for CDC
+#if CFG_TUD_CDC || CFG_TUD_AUDIO
+    // The UAC (and CDC) functions use an Interface Association Descriptor (IAD),
+    // so the device must be declared as a composite/IAD device.
     // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1)
     .bDeviceClass = TUSB_CLASS_MISC,
     .bDeviceSubClass = MISC_SUBCLASS_COMMON,
@@ -74,10 +94,38 @@ static const tusb_desc_device_qualifier_t descriptor_qualifier = {
 
 static uint8_t const descriptor_config[] = {
     // Config Header
-    TUD_CONFIG_DESCRIPTOR(1, 1, STR_0, USBD_DESC_LEN, 0x00, 100),
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, STR_0, USBD_DESC_LEN, 0x00, 100),
 
-    // Vendor Interface
-    TUD_VENDOR_DESCRIPTOR(0, STR_VENDOR_JPEG, USBD_JPEG_EPNUM_OUT, USBD_JPEG_EPNUM_IN, 512)
+    // Vendor Interface (JPEG stream)
+    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, STR_VENDOR_JPEG, USBD_JPEG_EPNUM_OUT, USBD_JPEG_EPNUM_IN, 512),
+
+    // ---- UAC 2.0 stereo speaker (48 kHz / 16-bit) ----
+    /* Standard Interface Association Descriptor (IAD): control + streaming */
+    TUD_AUDIO_DESC_IAD(/*_firstitf*/ ITF_NUM_AUDIO_CONTROL, /*_nitfs*/ 2, /*_stridx*/ 0x00),
+    /* Standard AC Interface Descriptor (4.7.1) */
+    TUD_AUDIO_DESC_STD_AC(/*_itfnum*/ ITF_NUM_AUDIO_CONTROL, /*_nEPs*/ 0x00, /*_stridx*/ STR_UAC_CTRL),
+    /* Class-Specific AC Interface Header Descriptor (4.7.2) */
+    TUD_AUDIO_DESC_CS_AC(/*_bcdADC*/ 0x0200, /*_category*/ AUDIO_FUNC_DESKTOP_SPEAKER, /*_totallen*/ UAC_CS_AC_TOTAL_LEN, /*_ctrl*/ AUDIO_CS_AS_INTERFACE_CTRL_LATENCY_POS),
+    /* Clock Source Descriptor (4.7.2.1): internal fixed clock, freq read-only */
+    TUD_AUDIO_DESC_CLK_SRC(/*_clkid*/ UAC2_ENTITY_CLOCK, /*_attr*/ 3, /*_ctrl*/ 7, /*_assocTerm*/ 0x00, /*_stridx*/ 0x00),
+    /* Input Terminal Descriptor (4.7.2.4): USB streaming in */
+    TUD_AUDIO_DESC_INPUT_TERM(/*_termid*/ UAC2_ENTITY_SPK_INPUT_TERMINAL, /*_termtype*/ AUDIO_TERM_TYPE_USB_STREAMING, /*_assocTerm*/ 0x00, /*_clkid*/ UAC2_ENTITY_CLOCK, /*_nchannelslogical*/ UAC_SPK_CHANNELS, /*_channelcfg*/ AUDIO_CHANNEL_CONFIG_NON_PREDEFINED, /*_idxchannelnames*/ 0x00, /*_ctrl*/ (AUDIO_CTRL_R << AUDIO_IN_TERM_CTRL_CONNECTOR_POS), /*_stridx*/ 0x00),
+    /* Feature Unit Descriptor (4.7.2.8): master + L + R, mute & volume */
+    TUD_AUDIO_DESC_FEATURE_UNIT_TWO_CHANNEL(/*_unitid*/ UAC2_ENTITY_SPK_FEATURE_UNIT, /*_srcid*/ UAC2_ENTITY_SPK_INPUT_TERMINAL, /*_ctrlch0master*/ UAC_FU_CTRL, /*_ctrlch1*/ UAC_FU_CTRL, /*_ctrlch2*/ UAC_FU_CTRL, /*_stridx*/ 0x00),
+    /* Output Terminal Descriptor (4.7.2.5): generic speaker */
+    TUD_AUDIO_DESC_OUTPUT_TERM(/*_termid*/ UAC2_ENTITY_SPK_OUTPUT_TERMINAL, /*_termtype*/ AUDIO_TERM_TYPE_OUT_GENERIC_SPEAKER, /*_assocTerm*/ 0x00, /*_srcid*/ UAC2_ENTITY_SPK_FEATURE_UNIT, /*_clkid*/ UAC2_ENTITY_CLOCK, /*_ctrl*/ 0x0000, /*_stridx*/ 0x00),
+    /* Standard AS Interface Descriptor (4.9.1): Alt 0 - zero-bandwidth */
+    TUD_AUDIO_DESC_STD_AS_INT(/*_itfnum*/ ITF_NUM_AUDIO_STREAMING, /*_altset*/ 0x00, /*_nEPs*/ 0x00, /*_stridx*/ STR_UAC_SPK),
+    /* Standard AS Interface Descriptor (4.9.1): Alt 1 - streaming (1 EP, no feedback) */
+    TUD_AUDIO_DESC_STD_AS_INT(/*_itfnum*/ ITF_NUM_AUDIO_STREAMING, /*_altset*/ 0x01, /*_nEPs*/ 0x01, /*_stridx*/ STR_UAC_SPK),
+    /* Class-Specific AS Interface Descriptor (4.9.2): PCM */
+    TUD_AUDIO_DESC_CS_AS_INT(/*_termid*/ UAC2_ENTITY_SPK_INPUT_TERMINAL, /*_ctrl*/ AUDIO_CTRL_NONE, /*_formattype*/ AUDIO_FORMAT_TYPE_I, /*_formats*/ AUDIO_DATA_FORMAT_TYPE_I_PCM, /*_nchannelsphysical*/ UAC_SPK_CHANNELS, /*_channelcfg*/ AUDIO_CHANNEL_CONFIG_NON_PREDEFINED, /*_stridx*/ 0x00),
+    /* Type I Format Type Descriptor (2.3.1.6) */
+    TUD_AUDIO_DESC_TYPE_I_FORMAT(/*_subslotsize*/ UAC_BYTES_PER_SAMPLE, /*_bitresolution*/ UAC_BIT_RESOLUTION),
+    /* Standard AS ISO Data Endpoint Descriptor (4.10.1.1): OUT, adaptive */
+    TUD_AUDIO_DESC_STD_AS_ISO_EP(/*_ep*/ EPNUM_AUDIO_OUT, /*_attr*/ (TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_ADAPTIVE | TUSB_ISO_EP_ATT_DATA), /*_maxEPsize*/ UAC_EP_SZ_OUT, /*_interval*/ 1),
+    /* Class-Specific AS ISO Data Endpoint Descriptor (4.10.1.2) */
+    TUD_AUDIO_DESC_CS_AS_ISO_EP(/*_attr*/ AUDIO_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, /*_ctrl*/ AUDIO_CTRL_NONE, /*_lockdelayunit*/ AUDIO_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, /*_lockdelay*/ 0x0001),
 };
 
 static char serial[13];
@@ -86,6 +134,8 @@ static const char *descriptor_string[] = {
     [STR_PRODUCT     ] = USBD_PRODUCT,
     [STR_SERIAL      ] = serial,
     [STR_VENDOR_JPEG ] = USBD_JPEG_STR,
+    [STR_UAC_CTRL    ] = USBD_UAC_CTRL_STR,
+    [STR_UAC_SPK     ] = USBD_UAC_SPK_STR,
 };
 
 uint8_t const *tud_descriptor_device_cb(void) {
