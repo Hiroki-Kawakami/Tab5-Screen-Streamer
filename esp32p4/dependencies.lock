@@ -157,6 +157,39 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 0.8.5
+  espressif/tinyusb:
+    component_hash: a40b7f67df6ac254a4afd96c6401cc56f2059ae747d6d7e66b568bca53ad0edc
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    - esp32h4
+    - esp32s31
+    version: 0.19.0~3
+  espressif/usb:
+    component_hash: 4f00ced5663505a368bafcb9bb6b2e4a5033cc5625b8f510755a75baadf4ff1d
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32s31
+    - esp32p4
+    - esp32h4
+    - linux
+    version: 1.4.0
   espressif/usb_host_uac:
     component_hash: 36e1f7cf037a7ec7ea9bb8d5f40f5a39290bc67935c34f9f3dbdbfdd00406488
     dependencies:
@@ -201,9 +234,11 @@ direct_dependencies:
 - espressif/esp_lcd_touch_st7123
 - espressif/esp_lvgl_port
 - espressif/esp_wifi_remote
+- espressif/tinyusb
+- espressif/usb
 - espressif/usb_host_uac
 - espressif/usb_host_uvc
 - idf
-manifest_hash: fc216a861099da32cb85e1f4afd38c2afef76d51349e6e66ceb4a07968f5dd4c
+manifest_hash: 9a72f0eaa92c3e3bb420cb335cdc96c6e40bc0f89dd9cb11abf449365ea28c6e
 target: esp32p4
 version: 2.0.0

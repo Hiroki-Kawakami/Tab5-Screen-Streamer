@@ -4,6 +4,7 @@
 #include "bsp_tab5.h"
 #include "streamer.hpp"
 #include "platform_port.hpp"
+#include "streamer_usb.h"
 
 static const char *TAG = "main";
 
@@ -43,6 +44,12 @@ void init(int fb_num, PixelFormat pixel_format) {
         ESP_LOGE(TAG, "Failed to start LVGL: %s", esp_err_to_name(err));
         assert(0);
     }
+
+    // Initialize streamer_usb
+    streamer_usb_init();
+    xTaskCreatePinnedToCore([](void*){
+        streamer_usb_task();
+    }, "streamer_usb", 4096, NULL, 5, NULL, 0);
 }
 
 void display_set_brightness(int value) {

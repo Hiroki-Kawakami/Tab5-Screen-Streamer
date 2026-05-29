@@ -4,6 +4,7 @@
 #include "preview_screen.hpp"
 #include "esp_lvgl_port.h"
 #include "nvs.hpp"
+#include "streamer_usb.h"
 
 #define GUI_WIDTH        320
 #define GUI_HEIGHT       480
@@ -119,4 +120,12 @@ void streamer_app() {
         screen_manager.push(std::make_unique<PreviewScreen>());
     });
     pf_port::display_set_brightness(50);
+
+    while (true) {
+        if (streamer_usb_mounted()) {
+            printf("USB Mounted!\n");
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
 }
