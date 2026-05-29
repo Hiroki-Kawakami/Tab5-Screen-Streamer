@@ -3,6 +3,7 @@
 
 class PreviewScreen: public Screen {
 public:
+    PreviewScreen();
     virtual void build();
     virtual void onEnter();
 

@@ -120,12 +120,4 @@ void streamer_app() {
         screen_manager.push(std::make_unique<PreviewScreen>());
     });
     pf_port::display_set_brightness(50);
-
-    while (true) {
-        if (streamer_usb_mounted()) {
-            printf("USB Mounted!\n");
-            return;
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
 }
