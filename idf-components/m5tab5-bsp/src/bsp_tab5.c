@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "hal/axi_icm_ll.h"
 #include "misc/bsp_display.h"
 #include "pi4io/pi4io.h"
 #include "ili9881c/ili9881c.h"
@@ -223,6 +224,18 @@ esp_err_t bsp_tab5_init(const bsp_tab5_config_t *config) {
     } else {
         return ESP_ERR_NOT_FOUND;
     }
+
+    // Give the display scanout the highest AXI read priority. The DSI DPI panel
+    // fetches its framebuffer from PSRAM via DW-GDMA; the JPEG decoder writes
+    // decoded frames via DMA2D. At tight (high-bandwidth) DPI timings — e.g.
+    // RGB888 at the reference timing — the two contend for PSRAM and the panel
+    // fetch can lose, causing "can't fetch data from external memory fast
+    // enough" underruns (blue screen). Raising the DW-GDMA read QoS above DMA2D
+    // makes the panel win arbitration so it never underruns; the decoder simply
+    // yields the spare bandwidth. ARQOS/AWQOS are 4-bit (0..15), all default 0.
+    axi_icm_ll_set_dw_gdma_qos_arbiter_prio(0, 0x0, 0xF);  // DSI master port 0: read=max
+    axi_icm_ll_set_dw_gdma_qos_arbiter_prio(1, 0x0, 0xF);  // DSI master port 1: read=max
+    axi_icm_ll_set_dma2d_qos_arbiter_prio(0x4, 0x4);       // JPEG decode (DMA2D): lower
 
     // ES8388 audio codec (speaker output)
     if (!config->audio.disable) {
