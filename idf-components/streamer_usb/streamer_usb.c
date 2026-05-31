@@ -36,6 +36,14 @@ static uint8_t s_spk_buf[UAC_EP_OUT_SW_BUF_SZ];  // scratch for one EP-FIFO drai
 static bool    s_spk_active;
 static TaskHandle_t s_spk_task_handle;
 
+// Set while the USB bus is suspended. On the ESP32-P4's internal PHY (no VBUS
+// sensing) a cable pull is not reported as an unmount — the device only sees
+// the bus go idle and fires tud_suspend_cb. So "connected" must mean mounted
+// AND not suspended, otherwise the panel keeps showing "USB Connected" forever
+// after unplug. During active streaming the host always sends SOF, so suspend
+// only fires on a real disconnect / host sleep.
+static volatile bool s_suspended;
+
 // Decouple the USB receive cadence (a tiny chunk every 125us microframe) from
 // the codec, which prefers larger, less frequent writes. The USB side pushes
 // into this ring; the writer task pulls big chunks out and blocks on I2S. If
@@ -86,7 +94,7 @@ void streamer_usb_task(void) {
     }
 }
 
-bool streamer_usb_mounted(void) { return tud_mounted(); }
+bool streamer_usb_mounted(void) { return tud_mounted() && !s_suspended; }
 
 // Vendor specific class
 uint32_t streamer_usb_vendor_available(void) { return tud_vendor_available(); }
@@ -114,6 +122,7 @@ uint8_t  streamer_usb_audio_bits(void)        { return UAC_BIT_RESOLUTION; }
 // ---------------------------------------------------------------------------
 void tud_mount_cb(void) {
     s_spk_active = false;
+    s_suspended = false;
     ESP_LOGI(TAG, "USB mounted");
 }
 void tud_umount_cb(void) {
@@ -123,8 +132,9 @@ void tud_umount_cb(void) {
 void tud_suspend_cb(bool remote_wakeup_en) {
     (void)remote_wakeup_en;
     s_spk_active = false;
+    s_suspended = true;
 }
-void tud_resume_cb(void) {}
+void tud_resume_cb(void) { s_suspended = false; }
 
 // ---- Clock source (sample rate) ----
 static bool clock_get_request(uint8_t rhport, audio_control_request_t const *request) {
