@@ -42,6 +42,64 @@ constexpr float STEP_MAX = 1.01f;
 
 StreamBufferHandle_t s_tx_buf = nullptr;
 
+// Whether headphones are currently plugged into the 3.5mm jack. Drives the
+// active EQ preset and the mono-mix decision. Updated from the BSP HP-detect
+// callback.
+bool s_hp_connected = false;
+
+// EQ presets. Both target the 3.5mm line-out measurement (rising AC-coupling
+// HPF shape, peak near 12 kHz). For now Speaker and Headphone share the same
+// coefficients — tune separately once each path has been measured on its own.
+constexpr uint32_t kEqFs = 48000;
+
+const audio_eq_biquad_t *speaker_eq_stages(size_t *n) {
+    // 1W / 8Ω small driver. Bass-only lift, mid/high left untouched. The
+    // 80 Hz HPF protects the cone from sub-bass excursion (the driver can't
+    // reproduce it anyway). The 150 Hz peaking sits on top of the shelf to
+    // put extra punch near the driver's Fs, where small speakers actually
+    // radiate efficiently.
+    static const audio_eq_biquad_t stages[] = {
+        audio_eq_design_highpass (kEqFs,  80.0f, 0.707f),
+        audio_eq_design_low_shelf(kEqFs, 300.0f, 0.707f, +7.0f),
+        audio_eq_design_peaking  (kEqFs, 150.0f, 1.20f,  +3.0f),
+    };
+    *n = sizeof(stages) / sizeof(stages[0]);
+    return stages;
+}
+
+const audio_eq_biquad_t *headphone_eq_stages(size_t *n) {
+    static const audio_eq_biquad_t stages[] = {
+        audio_eq_design_highpass (kEqFs,   50.0f, 0.707f),
+        audio_eq_design_low_shelf(kEqFs,  150.0f, 0.707f, +10.0f),
+        audio_eq_design_peaking  (kEqFs, 1000.0f, 0.80f,  -4.0f),
+        audio_eq_design_peaking  (kEqFs, 2500.0f, 1.00f,  -3.0f),
+    };
+    *n = sizeof(stages) / sizeof(stages[0]);
+    return stages;
+}
+
+void apply_active_eq() {
+    size_t n;
+    const audio_eq_biquad_t *stages = s_hp_connected ? headphone_eq_stages(&n)
+                                                     : speaker_eq_stages(&n);
+    bsp_tab5_audio_eq_set_biquads(stages, n);
+}
+
+void apply_active_mono_mix() {
+    // Tab5 wires only L into the speaker amp; mix L+R into both channels so
+    // mono speakers don't drop R-side content. HP jack carries both — keep
+    // stereo there.
+    bsp_tab5_audio_set_mono_mix(!s_hp_connected);
+}
+
+// BSP polls HP_DET ~5 Hz and fires this from the bsp_spk task on change.
+// Only the codec EQ/mix is touched here (no UI), so it's applied inline.
+void headphone_cb(bool inserted, void *) {
+    s_hp_connected = inserted;
+    apply_active_eq();
+    apply_active_mono_mix();
+}
+
 // USB speaker task -> here. Non-blocking push: if the consumer can't keep up
 // (codec write blocking on I2S DMA), drop the tail of this chunk instead of
 // stalling the streamer_usb task. A brief glitch beats backing up the USB
@@ -182,11 +240,16 @@ void consumer_task(void *) {
 void audio_manager_init() {
     // Route UAC speaker audio (48 kHz / stereo / 16-bit from the PC) to the
     // ES8388 codec. The codec is already opened (48k/16/2) and unmuted by
-    // bsp_tab5_init(), so we only set the playback level here. Only the left
-    // channel is wired on the Tab5, so downmix to mono. Start at a sensible
-    // volume in case the host never sets one.
-    bsp_tab5_audio_set_mono_mix(true);
+    // bsp_tab5_init(), so we only set the playback level here. Start at a
+    // sensible volume in case the host never sets one.
     bsp_tab5_audio_set_volume(80);
+
+    // Apply the EQ preset and mono mix that match the current jack state, then
+    // keep them in sync as headphones are plugged/unplugged.
+    s_hp_connected = bsp_tab5_audio_headphone_inserted();
+    apply_active_eq();
+    apply_active_mono_mix();
+    bsp_tab5_audio_set_headphone_callback(headphone_cb, nullptr);
 
     s_tx_buf = xStreamBufferCreate(STREAM_BUF_SIZE, 1);
     if (!s_tx_buf) {
