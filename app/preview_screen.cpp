@@ -6,6 +6,11 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "streamer_usb.h"
+#include "streamer.hpp"
+#include "lvgl.hpp"
+#include "nvs.hpp"
+#include "bsp_tab5.h"
+#include <cstring>
 
 static const char *TAG = "preview";
 
@@ -52,6 +57,31 @@ uint8_t *s_jpeg_buffers[JPEG_BUFFER_NUM] = {};
 // pending frame with the latest, so the decoder never falls behind on stale
 // frames.
 QueueHandle_t s_jpeg_queue = nullptr;
+
+// Persisted settings live in the "dstr" namespace (shared with streamer.cpp,
+// which reads "pixfmt" at boot to pick the framebuffer format).
+NVS settings_nvs("dstr");
+constexpr const char *NVS_KEY_BRIGHTNESS = "brt";     // uint8 1..100
+constexpr const char *NVS_KEY_PIX_FMT    = "pixfmt";  // 0=RGB888, 1=RGB565
+
+uint8_t load_setting(const char *key, uint8_t fallback) {
+    uint8_t v = fallback;
+    if (settings_nvs.get(key, &v) != NVS::Error::OK) v = fallback;
+    return v;
+}
+
+void save_setting(const char *key, uint8_t value) {
+    if (settings_nvs.set(key, value) == NVS::Error::OK) {
+        settings_nvs.commit();
+    }
+}
+
+// Set once in build(); lets the decoder task post status updates back to the
+// LVGL thread without reaching through the screen stack.
+PreviewScreen *s_screen = nullptr;
+// True while video frames are flowing. Owned by the decoder task; build() reads
+// it once to pick the initial status text.
+volatile bool s_connected = false;
 
 // Read exactly `len` bytes into `dst`, blocking on the USB FIFO. Returns false
 // if the device goes away mid-read so the caller can resynchronize.
@@ -252,39 +282,126 @@ void decoder_task(void *) {
     int frame_count = 0;
     int64_t window_start = esp_timer_get_time();
 
+    // `frame` is static and only overwritten on a successful xQueueReceive, so
+    // between frames it still holds the most recent one. Unlike the UVC case the
+    // PC only streams when its screen changes, so we must keep that last JPEG
+    // around: when the user hides the overlay while the screen is static, no new
+    // frame arrives to repaint, and the framebuffer still has the UI painted
+    // over its top band. We re-decode this frame to clear the overlay. The
+    // band pointers stay valid because, with no new frames, the renderer isn't
+    // reusing the ring buffer slot they point into.
     static JpegFrame frame;  // static: too large for the task stack
-    while (true) {
-        if (xQueueReceive(s_jpeg_queue, &frame, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
+    bool have_frame = false;
+    // Whether the overlay was composited into the last flushed framebuffer.
+    // Starts false so the first visible iteration paints the panel.
+    bool last_gui_v = false;
 
-        int next = (fb_index + 1) % FRAME_BUFFER_NUM;
-        uint8_t *fb = (uint8_t *)pf_port::display_get_frame_buffer(next);
-
-        bool ok = true;
+    // Decode every band of `frame` into framebuffer `fb`. Each band is
+    // full-width (x=0, width=720), so it lands at fb + y*stride. Returns false
+    // (and logs) on the first band that fails to decode.
+    auto decode_frame = [&](uint8_t *fb) -> bool {
         for (int i = 0; i < frame.band_count; i++) {
             const JpegBand &band = frame.bands[i];
             uint8_t *dst = fb + (size_t)band.y * stride;
             size_t dst_size = (size_t)band.height * stride;
             if (decoder.decode(band.data, band.size, dst, dst_size, nullptr) != pf_port::Error::Ok) {
                 ESP_LOGW(TAG, "band decode failed (y=%d, %u bytes)", band.y, (unsigned)band.size);
-                ok = false;
-                break;
+                return false;
             }
         }
-        if (!ok) {
-            continue;
+        return true;
+    };
+
+    while (true) {
+        // Short timeout (not portMAX_DELAY) so the GUI overlay keeps refreshing
+        // when no video is arriving: brightness-slider feedback and the
+        // connection status still need to repaint while disconnected/static.
+        bool got_frame = xQueueReceive(s_jpeg_queue, &frame, pdMS_TO_TICKS(33)) == pdTRUE;
+        // Snapshot visibility for the whole iteration so a mid-render flip can't
+        // leave a half-composited framebuffer.
+        bool gui_v = gui_is_visible();
+
+        int next = (fb_index + 1) % FRAME_BUFFER_NUM;
+        uint8_t *fb = (uint8_t *)pf_port::display_get_frame_buffer(next);
+        bool flush_next = false;
+
+        if (got_frame) {
+            have_frame = true;
+            // First frame after a (re)connect: flip the status pill to
+            // "Connected" and auto-hide the overlay so the full image shows.
+            if (!s_connected) {
+                s_connected = true;
+                gui_set_visible(false);
+                gui_v = false;
+                if (s_screen) {
+                    auto scr = s_screen;
+                    lv_async_call([scr]{ scr->set_status_ui(true); });
+                }
+            }
+            if (decode_frame(fb)) {
+                // Overlay the LVGL UI on top of the freshly decoded video. The
+                // top GUI_PANEL_H rows we just decoded get overwritten — the
+                // wasted decode is hidden behind the (blocking) PPA compose and
+                // only happens while the overlay is actually up.
+                if (gui_v) gui_compose(fb);
+                flush_next = true;
+
+                frame_count++;
+                int64_t now = esp_timer_get_time();
+                if (now - window_start >= 1000000) {
+                    ESP_LOGI(TAG, "%d fps", frame_count);
+                    frame_count = 0;
+                    window_start = now;
+                }
+            }
+        } else {
+            // No new frame within the timeout. If the host went away, fall back
+            // to the controls panel with a "Disconnected" status.
+            if (s_connected && !streamer_usb_mounted()) {
+                s_connected = false;
+                gui_set_visible(true);
+                gui_v = true;
+                if (s_screen) {
+                    auto scr = s_screen;
+                    lv_async_call([scr]{ scr->set_status_ui(false); });
+                }
+            }
+
+            if (last_gui_v && !gui_v) {
+                // The overlay was just hidden and no fresh frame is coming. The
+                // on-screen frame still has the UI over its top band, so
+                // re-render the last JPEG in full to reveal the video the panel
+                // was covering. Falls back to black if we never got a frame.
+                if (have_frame) {
+                    flush_next = decode_frame(fb);
+                } else {
+                    memset(fb, 0, (size_t)DISPLAY_HEIGHT * stride);
+                    flush_next = true;
+                }
+            } else if (gui_v) {
+                // Overlay up: repaint so slider drags / status changes stay
+                // responsive. Carry the last decoded video forward under the
+                // panel while connected; clear it once disconnected so a stale
+                // frame doesn't stay frozen behind the controls.
+                size_t video_off  = (size_t)GUI_PANEL_H * stride;
+                size_t video_size = (size_t)(DISPLAY_HEIGHT - GUI_PANEL_H) * stride;
+                if (s_connected && have_frame) {
+                    uint8_t *cur = (uint8_t *)pf_port::display_get_frame_buffer(fb_index);
+                    memcpy(fb + video_off, cur + video_off, video_size);
+                } else {
+                    memset(fb + video_off, 0, video_size);
+                }
+                gui_compose(fb);
+                flush_next = true;
+            }
+            // else: overlay hidden and already hidden — leave the last frame on
+            // screen (the PC will repaint it only when it actually changes).
         }
 
-        pf_port::display_flush(next);
-        fb_index = next;
-
-        frame_count++;
-        int64_t now = esp_timer_get_time();
-        if (now - window_start >= 1000000) {
-            ESP_LOGI(TAG, "%d fps", frame_count);
-            frame_count = 0;
-            window_start = now;
+        if (flush_next) {
+            pf_port::display_flush(next);
+            fb_index = next;
+            last_gui_v = gui_v;
         }
     }
 }
@@ -293,7 +410,75 @@ void decoder_task(void *) {
 
 PreviewScreen::PreviewScreen() {}
 
-void PreviewScreen::build() {}
+void PreviewScreen::set_status_ui(bool connected) {
+    if (!status_container_ || !status_label_) return;
+    lv_obj_set_style_bg_color(status_container_, lv_color_hex(connected ? 0x0EBC00 : 0xC20000), 0);
+    lv_label_set_text(status_label_, connected ? "Connected" : "Disconnected");
+}
+
+// The UI is composited onto the top GUI_PANEL_H rows of every flushed frame
+// (see decoder_task + gui_compose). Input Format and Volume are driven from the
+// PC, so the panel only exposes Brightness and the quality/framerate trade-off.
+void PreviewScreen::build() {
+    s_screen = this;
+
+    lv_obj_set_style_bg_color(root_, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_bg_opa(root_, LV_OPA_COVER, 0);
+    lv_obj_set_flex_flow(root_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(root_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(root_, 20, 0);
+
+    status_container_ = lv_obj_create(root_);
+    lv_obj_remove_style_all(status_container_);
+    lv_obj_set_size(status_container_, LV_PCT(100), 100);
+    lv_obj_set_style_radius(status_container_, 15, 0);
+    lv_obj_set_style_bg_opa(status_container_, LV_OPA_COVER, 0);
+    status_label_ = lv_label_create(status_container_);
+    lv_obj_center(status_label_);
+    lv_obj_set_style_text_color(status_label_, lv_color_white(), 0);
+    lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_20, 0);
+    set_status_ui(s_connected);
+
+    auto br_lbl = lv_label_create(root_);
+    lv_label_set_text(br_lbl, "Brightness");
+    lv_obj_set_width(br_lbl, LV_PCT(100));
+    lv_obj_set_style_margin_top(br_lbl, 20, 0);
+
+    brightness_slider_ = lv_slider_create(root_);
+    lv_obj_set_width(brightness_slider_, LV_PCT(100));
+    lv_slider_set_range(brightness_slider_, 1, 100);
+    lv_slider_set_value(brightness_slider_, load_setting(NVS_KEY_BRIGHTNESS, 50), LV_ANIM_OFF);
+    lv_obj_add_event_fn(brightness_slider_, LV_EVENT_VALUE_CHANGED, [](lv_event_t *e){
+        auto s = (lv_obj_t*)lv_event_get_target(e);
+        pf_port::display_set_brightness(lv_slider_get_value(s));
+    });
+    // Persist only on release so we don't hammer NVS with every drag tick.
+    lv_obj_add_event_fn(brightness_slider_, LV_EVENT_RELEASED, [](lv_event_t *e){
+        auto s = (lv_obj_t*)lv_event_get_target(e);
+        save_setting(NVS_KEY_BRIGHTNESS, (uint8_t)lv_slider_get_value(s));
+    });
+
+    auto pf_lbl = lv_label_create(root_);
+    lv_label_set_text(pf_lbl, "Optimize For");
+    lv_obj_set_width(pf_lbl, LV_PCT(100));
+    lv_obj_set_style_margin_top(pf_lbl, 20, 0);
+
+    auto pf_dd = lv_dropdown_create(root_);
+    lv_obj_set_width(pf_dd, LV_PCT(100));
+    lv_dropdown_set_options_static(pf_dd, "Image Quality\nFramerate");
+    lv_dropdown_set_selected(pf_dd,
+        pf_port::display_pixel_format() == pf_port::PixelFormat::RGB565 ? 1 : 0);
+    // The pixel format is fixed by pf_port::init at boot — switching it requires
+    // re-allocating framebuffers and re-configuring JPEG/PPA. Save and reboot
+    // rather than tear the pipeline down at runtime.
+    lv_obj_add_event_fn(pf_dd, LV_EVENT_VALUE_CHANGED, [](lv_event_t *e){
+        auto d = (lv_obj_t*)lv_event_get_target(e);
+        save_setting(NVS_KEY_PIX_FMT, (uint8_t)lv_dropdown_get_selected(d));
+        bsp_tab5_restart();
+    });
+
+    pf_port::display_set_brightness(lv_slider_get_value(brightness_slider_));
+}
 
 void PreviewScreen::onEnter() {
     if (s_jpeg_queue != nullptr) {
