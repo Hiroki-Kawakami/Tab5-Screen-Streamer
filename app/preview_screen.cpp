@@ -295,6 +295,12 @@ void decoder_task(void *) {
     // Whether the overlay was composited into the last flushed framebuffer.
     // Starts false so the first visible iteration paints the panel.
     bool last_gui_v = false;
+    // Whether the *displayed* buffer's video band is currently black (no source
+    // to show). Lets us blank it once on entry instead of re-memset-ing ~1.7 MB
+    // every 33 ms — that pure-CPU clear starves core 0 / USB audio the same way
+    // the old forward-copy did, and USB audio can already be flowing before the
+    // first JPEG arrives.
+    bool video_is_blanked = false;
 
     // Decode every band of `frame` into framebuffer `fb`. Each band is
     // full-width (x=0, width=720), so it lands at fb + y*stride. Returns false
@@ -345,6 +351,7 @@ void decoder_task(void *) {
                 // only happens while the overlay is actually up.
                 if (gui_v) gui_compose(fb);
                 flush_next = true;
+                video_is_blanked = false;  // this buffer now holds video
 
                 frame_count++;
                 int64_t now = esp_timer_get_time();
@@ -373,26 +380,61 @@ void decoder_task(void *) {
                 // re-render the last JPEG in full to reveal the video the panel
                 // was covering. Falls back to black if we never got a frame.
                 if (have_frame) {
-                    flush_next = decode_frame(fb);
+                    if (decode_frame(fb)) {
+                        flush_next = true;
+                        video_is_blanked = false;
+                    }
                 } else {
                     memset(fb, 0, (size_t)DISPLAY_HEIGHT * stride);
                     flush_next = true;
+                    video_is_blanked = true;
                 }
             } else if (gui_v) {
-                // Overlay up: repaint so slider drags / status changes stay
-                // responsive. Carry the last decoded video forward under the
-                // panel while connected; clear it once disconnected so a stale
-                // frame doesn't stay frozen behind the controls.
-                size_t video_off  = (size_t)GUI_PANEL_H * stride;
-                size_t video_size = (size_t)(DISPLAY_HEIGHT - GUI_PANEL_H) * stride;
+                // Overlay up with no fresh frame. Repaint so slider drags /
+                // status changes stay responsive.
                 if (s_connected && have_frame) {
+                    // The video underneath is static (no new frame) and already
+                    // correct in the *displayed* buffer; only the overlay
+                    // changed. So recomposite the panel in place over that
+                    // buffer instead of rotating to a fresh one and copying the
+                    // video band forward.
+                    //
+                    // That forward-copy used to be a ~1.7 MB (RGB888) pure-CPU
+                    // memcpy every 33 ms. Running at priority 15 on core 0 — the
+                    // same core as TinyUSB's tud_task (prio 5) — it held the
+                    // core for several ms with no yield, so the isochronous UAC
+                    // audio OUT endpoint went unserviced and dropped packets,
+                    // i.e. audible noise. (The got-frame path avoids this: JPEG
+                    // decode and PPA compose are hardware and block-yield the
+                    // core.) gui_compose is PPA (hardware) and yields, so the USB
+                    // audio path keeps flowing.
                     uint8_t *cur = (uint8_t *)pf_port::display_get_frame_buffer(fb_index);
-                    memcpy(fb + video_off, cur + video_off, video_size);
-                } else {
+                    gui_compose(cur);
+                    // cur is already the active scanout buffer, so the overlay
+                    // updates live — no flush, no buffer rotation. The displayed
+                    // buffer still carries the overlay, so keep last_gui_v true
+                    // for the hide transition to fire.
+                    last_gui_v = true;
+                } else if (!video_is_blanked) {
+                    // No video to show (disconnected, or connected but no JPEG
+                    // has arrived yet — USB audio can already be flowing in that
+                    // startup window). Blank the video band ONCE here; doing the
+                    // ~1.7 MB memset every 33 ms is another pure-CPU stall that
+                    // starves core 0 / TinyUSB exactly like the old forward-copy.
+                    size_t video_off  = (size_t)GUI_PANEL_H * stride;
+                    size_t video_size = (size_t)(DISPLAY_HEIGHT - GUI_PANEL_H) * stride;
                     memset(fb + video_off, 0, video_size);
+                    gui_compose(fb);
+                    flush_next = true;
+                    video_is_blanked = true;
+                } else {
+                    // Background is already black on the displayed buffer; just
+                    // recomposite the overlay in place (no memset, no rotation),
+                    // same as the static-video case above.
+                    uint8_t *cur = (uint8_t *)pf_port::display_get_frame_buffer(fb_index);
+                    gui_compose(cur);
+                    last_gui_v = true;
                 }
-                gui_compose(fb);
-                flush_next = true;
             }
             // else: overlay hidden and already hidden — leave the last frame on
             // screen (the PC will repaint it only when it actually changes).
