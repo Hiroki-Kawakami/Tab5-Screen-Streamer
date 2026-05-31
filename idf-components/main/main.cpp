@@ -5,6 +5,7 @@
 #include "streamer.hpp"
 #include "platform_port.hpp"
 #include "streamer_usb.h"
+#include "audio_manager.hpp"
 
 static const char *TAG = "main";
 
@@ -48,24 +49,8 @@ void init(int fb_num, PixelFormat pixel_format) {
     // Initialize streamer_usb
     streamer_usb_init();
 
-    // Route UAC speaker audio (48 kHz / stereo / 16-bit from the PC) to the
-    // ES8388 codec. The codec is already opened (48k/16/2) and unmuted by
-    // bsp_tab5_init(), so we only set the playback level here. Only the left
-    // channel is wired on the Tab5, so downmix to mono. Start at a sensible
-    // volume in case the host never sets one.
-    bsp_tab5_audio_set_mono_mix(true);
-    bsp_tab5_audio_set_volume(80);
-    streamer_usb_audio_set_callbacks(
-        [](const void *pcm, size_t len, void *) {
-            bsp_tab5_audio_write(const_cast<void *>(pcm), len);
-        },
-        [](int volume, void *) {
-            bsp_tab5_audio_set_volume(volume);
-        },
-        [](bool mute, void *) {
-            bsp_tab5_audio_set_mute(mute);
-        },
-        nullptr);
+    // UAC speaker audio pipeline (codec routing + clock-drift resampler).
+    audio_manager_init();
 
     xTaskCreatePinnedToCore([](void*){
         streamer_usb_task();
