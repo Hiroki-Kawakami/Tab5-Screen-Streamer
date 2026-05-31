@@ -79,9 +79,6 @@ void save_setting(const char *key, uint8_t value) {
 // Set once in build(); lets the decoder task post status updates back to the
 // LVGL thread without reaching through the screen stack.
 PreviewScreen *s_screen = nullptr;
-// True while video frames are flowing. Owned by the decoder task; build() reads
-// it once to pick the initial status text.
-volatile bool s_connected = false;
 
 // Read exactly `len` bytes into `dst`, blocking on the USB FIFO. Returns false
 // if the device goes away mid-read so the caller can resynchronize.
@@ -301,6 +298,13 @@ void decoder_task(void *) {
     // the old forward-copy did, and USB audio can already be flowing before the
     // first JPEG arrives.
     bool video_is_blanked = false;
+    // USB mount state, mirrored each iteration. Drives the status pill
+    // ("Connected" the moment the device mounts, not when the first frame
+    // arrives) and, on unplug, brings the panel back.
+    bool mounted = false;
+    // Whether video has started this session. The overlay auto-hides on the
+    // first frame after a (re)connect; reset on unplug to re-arm it.
+    bool video_started = false;
 
     // Decode every band of `frame` into framebuffer `fb`. Each band is
     // full-width (x=0, width=720), so it lands at fb + y*stride. Returns false
@@ -327,22 +331,37 @@ void decoder_task(void *) {
         // leave a half-composited framebuffer.
         bool gui_v = gui_is_visible();
 
+        // Track USB mount transitions independently of video. The status pill
+        // turns "Connected" as soon as the device mounts; on unplug it goes
+        // "Disconnected", the panel comes back, and the first-frame auto-hide is
+        // re-armed for the next connect.
+        bool now_mounted = streamer_usb_mounted();
+        if (now_mounted != mounted) {
+            mounted = now_mounted;
+            if (s_screen) {
+                auto scr = s_screen;
+                lv_async_call([scr, now_mounted]{ scr->set_status_ui(now_mounted); });
+            }
+            if (!mounted) {
+                gui_set_visible(true);
+                gui_v = true;
+                video_started = false;
+                have_frame = false;  // last JPEG's buffers get reused on reconnect
+            }
+        }
+
         int next = (fb_index + 1) % FRAME_BUFFER_NUM;
         uint8_t *fb = (uint8_t *)pf_port::display_get_frame_buffer(next);
         bool flush_next = false;
 
         if (got_frame) {
             have_frame = true;
-            // First frame after a (re)connect: flip the status pill to
-            // "Connected" and auto-hide the overlay so the full image shows.
-            if (!s_connected) {
-                s_connected = true;
+            // First frame of this session: auto-hide the overlay so the full
+            // image shows. Status is already "Connected" from the mount check.
+            if (!video_started) {
+                video_started = true;
                 gui_set_visible(false);
                 gui_v = false;
-                if (s_screen) {
-                    auto scr = s_screen;
-                    lv_async_call([scr]{ scr->set_status_ui(true); });
-                }
             }
             if (decode_frame(fb)) {
                 // Overlay the LVGL UI on top of the freshly decoded video. The
@@ -362,18 +381,7 @@ void decoder_task(void *) {
                 }
             }
         } else {
-            // No new frame within the timeout. If the host went away, fall back
-            // to the controls panel with a "Disconnected" status.
-            if (s_connected && !streamer_usb_mounted()) {
-                s_connected = false;
-                gui_set_visible(true);
-                gui_v = true;
-                if (s_screen) {
-                    auto scr = s_screen;
-                    lv_async_call([scr]{ scr->set_status_ui(false); });
-                }
-            }
-
+            // No new frame within the timeout. (Mount/unmount is handled above.)
             if (last_gui_v && !gui_v) {
                 // The overlay was just hidden and no fresh frame is coming. The
                 // on-screen frame still has the UI over its top band, so
@@ -392,7 +400,7 @@ void decoder_task(void *) {
             } else if (gui_v) {
                 // Overlay up with no fresh frame. Repaint so slider drags /
                 // status changes stay responsive.
-                if (s_connected && have_frame) {
+                if (mounted && have_frame) {
                     // The video underneath is static (no new frame) and already
                     // correct in the *displayed* buffer; only the overlay
                     // changed. So recomposite the panel in place over that
@@ -455,7 +463,7 @@ PreviewScreen::PreviewScreen() {}
 void PreviewScreen::set_status_ui(bool connected) {
     if (!status_container_ || !status_label_) return;
     lv_obj_set_style_bg_color(status_container_, lv_color_hex(connected ? 0x0EBC00 : 0xC20000), 0);
-    lv_label_set_text(status_label_, connected ? "Connected" : "Disconnected");
+    lv_label_set_text(status_label_, connected ? "USB Connected" : "USB Disconnected");
 }
 
 // The UI is composited onto the top GUI_PANEL_H rows of every flushed frame
@@ -479,7 +487,7 @@ void PreviewScreen::build() {
     lv_obj_center(status_label_);
     lv_obj_set_style_text_color(status_label_, lv_color_white(), 0);
     lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_20, 0);
-    set_status_ui(s_connected);
+    set_status_ui(streamer_usb_mounted());
 
     auto br_lbl = lv_label_create(root_);
     lv_label_set_text(br_lbl, "Brightness");
