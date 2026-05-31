@@ -23,9 +23,28 @@ constexpr int FRAME_BUFFER_NUM = 3;
 constexpr size_t JPEG_BUFFER_SIZE = 512 * 1024;
 constexpr int JPEG_BUFFER_NUM = 8;
 
-struct JpegFrame {
-    const uint8_t *data;  // start of the JPEG payload (past the 4-byte header)
+// The PC now streams each frame as a sequence of horizontal JPEG bands. Every
+// band has its own 8-byte header (see renderer_task) carrying its position. We
+// assume (per the PC sender): x == 0 always, width == 720 always, y arrives in
+// increasing order, and the band marked 0x51 ("present") is the last one of a
+// frame; the next band after it restarts at y == 0.
+//
+// Because x == 0 and width == 720 == DISPLAY_WIDTH, a band of `height` rows maps
+// to a contiguous region of the framebuffer starting at row `y`, so each band is
+// decoded straight into `fb + y * stride`.
+constexpr int MAX_BANDS = DISPLAY_HEIGHT / 16;  // smallest band is 16px tall
+
+struct JpegBand {
+    const uint8_t *data;  // JPEG payload (lives inside a ring buffer)
     size_t size;          // payload length in bytes
+    int y;                // destination row offset in pixels
+    int height;           // band height in pixels
+};
+
+// A full frame: the bands accumulated up to (and including) the 0x51 band.
+struct JpegFrame {
+    JpegBand bands[MAX_BANDS];
+    int band_count;
 };
 
 uint8_t *s_jpeg_buffers[JPEG_BUFFER_NUM] = {};
@@ -56,45 +75,113 @@ bool read_exact(uint8_t *dst, size_t len) {
     return true;
 }
 
-// Reads framed JPEGs from USB. Wire format (see send_image.py):
-//   [uint32 LE total-size-including-header][JPEG bytes...]
+// Reads and discards `len` bytes, to keep the byte stream aligned when a band
+// can't be stored. Returns false if the device goes away mid-read.
+bool read_discard(size_t len) {
+    static uint8_t scratch[4096];
+    while (len > 0) {
+        size_t chunk = len < sizeof(scratch) ? len : sizeof(scratch);
+        if (!read_exact(scratch, chunk)) {
+            return false;
+        }
+        len -= chunk;
+    }
+    return true;
+}
+
+// Reads banded JPEGs from USB. Per-band 8-byte header:
+//   byte 0     : type (0x50 = decode only, 0x51 = last band of the frame -> present)
+//   bytes 1..3 : data size, 24-bit little endian = 4 coord bytes + JPEG payload
+//   byte 4     : x / 16        (always 0)
+//   byte 5     : y / 16
+//   byte 6     : width / 16    (always 720/16)
+//   byte 7     : height / 16
+// The renderer accumulates bands into one ring buffer and, on the 0x51 band,
+// hands the assembled frame to the decoder via the capacity-1 overwrite queue.
 void renderer_task(void *) {
     int idx = 0;
+    static JpegFrame frame;  // static: too large for the task stack
+    frame.band_count = 0;
+    size_t write_off = 0;
+    bool frame_ok = true;
+
+    auto reset = [&]() {
+        frame.band_count = 0;
+        write_off = 0;
+        frame_ok = true;
+    };
+
     while (true) {
         if (!streamer_usb_mounted()) {
             vTaskDelay(pdMS_TO_TICKS(100));
+            reset();
             continue;
         }
 
+        // 8-byte per-band header.
+        uint8_t hdr[8];
+        if (!read_exact(hdr, sizeof(hdr))) {
+            reset();
+            continue;
+        }
+        uint8_t type = hdr[0];
+        uint32_t data_size = (uint32_t)hdr[1] | ((uint32_t)hdr[2] << 8) |
+                             ((uint32_t)hdr[3] << 16);
+        int y_px = (int)hdr[5] * 16;
+        int h_px = (int)hdr[7] * 16;
+
+        if ((type != 0x50 && type != 0x51) || data_size < 4) {
+            // Header looks misaligned; nothing reliable to drain, so resync.
+            ESP_LOGW(TAG, "bad band header (type=0x%02x size=%u), resyncing",
+                     type, (unsigned)data_size);
+            reset();
+            continue;
+        }
+        size_t jpeg_len = data_size - 4;
         uint8_t *buf = s_jpeg_buffers[idx];
 
-        // 4-byte little-endian header: total frame size including itself.
-        if (!read_exact(buf, 4)) {
-            continue;
-        }
-        uint32_t frame_total = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
-                               ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
-        if (frame_total <= 4 || frame_total > JPEG_BUFFER_SIZE) {
-            ESP_LOGW(TAG, "invalid frame size %u, resyncing", (unsigned)frame_total);
-            continue;
+        bool fits = frame_ok && jpeg_len > 0 &&
+                    frame.band_count < MAX_BANDS &&
+                    write_off + jpeg_len <= JPEG_BUFFER_SIZE &&
+                    y_px + h_px <= DISPLAY_HEIGHT;
+        if (fits) {
+            if (!read_exact(buf + write_off, jpeg_len)) {
+                reset();
+                continue;
+            }
+            JpegBand &band = frame.bands[frame.band_count++];
+            band.data = buf + write_off;
+            band.size = jpeg_len;
+            band.y = y_px;
+            band.height = h_px;
+            write_off += jpeg_len;
+        } else {
+            // Can't store this band; drop the frame but keep the stream aligned.
+            ESP_LOGW(TAG, "band doesn't fit (len=%u y=%d h=%d), dropping frame",
+                     (unsigned)jpeg_len, y_px, h_px);
+            if (!read_discard(jpeg_len)) {
+                reset();
+                continue;
+            }
+            frame_ok = false;
         }
 
-        // Remaining bytes are the JPEG payload.
-        if (!read_exact(buf + 4, frame_total - 4)) {
-            continue;
+        if (type == 0x51) {
+            if (frame_ok && frame.band_count > 0) {
+                xQueueOverwrite(s_jpeg_queue, &frame);
+                idx = (idx + 1) % JPEG_BUFFER_NUM;
+            }
+            reset();
         }
-
-        JpegFrame frame{buf + 4, frame_total - 4};
-        xQueueOverwrite(s_jpeg_queue, &frame);
-        idx = (idx + 1) % JPEG_BUFFER_NUM;
     }
 }
 
-// Decodes the latest received JPEG straight into the next panel framebuffer
-// and flips to it.
+// Decodes the latest received frame's bands into the next panel framebuffer and
+// flips to it. Each band is full-width (x=0, width=720) so it lands in a
+// contiguous region at `fb + y * stride`.
 void decoder_task(void *) {
     pf_port::PixelFormat pf = pf_port::display_pixel_format();
-    size_t fb_size = (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT * pf_port::bytes_per_pixel(pf);
+    size_t stride = (size_t)DISPLAY_WIDTH * pf_port::bytes_per_pixel(pf);
 
     pf_port::JpegDecoder decoder;
     decoder.setOutputFormat(pf);
@@ -103,16 +190,27 @@ void decoder_task(void *) {
     int frame_count = 0;
     int64_t window_start = esp_timer_get_time();
 
-    JpegFrame frame;
+    static JpegFrame frame;  // static: too large for the task stack
     while (true) {
         if (xQueueReceive(s_jpeg_queue, &frame, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
         int next = (fb_index + 1) % FRAME_BUFFER_NUM;
-        void *fb = pf_port::display_get_frame_buffer(next);
-        if (decoder.decode(frame.data, frame.size, fb, fb_size, nullptr) != pf_port::Error::Ok) {
-            ESP_LOGW(TAG, "jpeg decode failed (%u bytes)", (unsigned)frame.size);
+        uint8_t *fb = (uint8_t *)pf_port::display_get_frame_buffer(next);
+
+        bool ok = true;
+        for (int i = 0; i < frame.band_count; i++) {
+            const JpegBand &band = frame.bands[i];
+            uint8_t *dst = fb + (size_t)band.y * stride;
+            size_t dst_size = (size_t)band.height * stride;
+            if (decoder.decode(band.data, band.size, dst, dst_size, nullptr) != pf_port::Error::Ok) {
+                ESP_LOGW(TAG, "band decode failed (y=%d, %u bytes)", band.y, (unsigned)band.size);
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
             continue;
         }
 
