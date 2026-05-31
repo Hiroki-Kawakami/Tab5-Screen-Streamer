@@ -28,8 +28,15 @@ static streamer_usb_audio_mute_cb_t   s_mute_cb;
 static void                          *s_cb_ctx;
 
 // Feature unit state: index 0 is the master channel, 1..N the logical channels.
+// Seed volume to -10 dB (≈80% in the 0..100 mapping below), matching the codec's
+// startup level — so a GET_CUR before the host sends anything (or right after a
+// re-enumeration) reports a sane value instead of the 0 dB default (= full).
+#define VOLUME_DEFAULT  (-10 * 256)
 static int8_t  s_mute[UAC_SPK_CHANNELS + 1];
-static int16_t s_volume[UAC_SPK_CHANNELS + 1];
+_Static_assert(UAC_SPK_CHANNELS == 2, "s_volume seed below assumes master + 2 channels");
+static int16_t s_volume[UAC_SPK_CHANNELS + 1] = {
+    VOLUME_DEFAULT, VOLUME_DEFAULT, VOLUME_DEFAULT,
+};
 static uint32_t s_sample_rate = UAC_SAMPLE_RATE;
 
 static uint8_t s_spk_buf[UAC_EP_OUT_SW_BUF_SZ];  // scratch for one EP-FIFO drain
@@ -177,8 +184,14 @@ static bool clock_set_request(uint8_t rhport, audio_control_request_t const *req
 static bool feature_unit_get_request(uint8_t rhport, audio_control_request_t const *request) {
     TU_ASSERT(request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT);
 
+    // Bound the channel index: the host can request any channel and the state
+    // arrays only cover master (0) + UAC_SPK_CHANNELS. All entries are mirrored
+    // on SET, so an in-range index always reflects the current value.
+    uint8_t ch = request->bChannelNumber;
+    if (ch > UAC_SPK_CHANNELS) ch = 0;
+
     if (request->bControlSelector == AUDIO_FU_CTRL_MUTE && request->bRequest == AUDIO_CS_REQ_CUR) {
-        audio_control_cur_1_t mute1 = { .bCur = s_mute[request->bChannelNumber] };
+        audio_control_cur_1_t mute1 = { .bCur = s_mute[ch] };
         return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &mute1, sizeof(mute1));
     } else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME) {
         if (request->bRequest == AUDIO_CS_REQ_RANGE) {
@@ -188,7 +201,7 @@ static bool feature_unit_get_request(uint8_t rhport, audio_control_request_t con
             };
             return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &range_vol, sizeof(range_vol));
         } else if (request->bRequest == AUDIO_CS_REQ_CUR) {
-            audio_control_cur_2_t cur_vol = { .bCur = tu_htole16(s_volume[request->bChannelNumber]) };
+            audio_control_cur_2_t cur_vol = { .bCur = tu_htole16(s_volume[ch]) };
             return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &cur_vol, sizeof(cur_vol));
         }
     }
@@ -202,16 +215,24 @@ static bool feature_unit_set_request(uint8_t rhport, audio_control_request_t con
 
     if (request->bControlSelector == AUDIO_FU_CTRL_MUTE) {
         TU_VERIFY(request->wLength == sizeof(audio_control_cur_1_t));
-        s_mute[request->bChannelNumber] = ((audio_control_cur_1_t const *)buf)->bCur;
+        int8_t mute = ((audio_control_cur_1_t const *)buf)->bCur;
+        // Mirror to master + every channel so a later GET_CUR on any channel
+        // (e.g. the host re-reading state on re-enumeration) is consistent.
+        for (int ch = 0; ch <= UAC_SPK_CHANNELS; ch++) s_mute[ch] = mute;
         if (s_mute_cb) {
-            s_mute_cb(s_mute[request->bChannelNumber] != 0, s_cb_ctx);
+            s_mute_cb(mute != 0, s_cb_ctx);
         }
         return true;
     } else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME) {
         TU_VERIFY(request->wLength == sizeof(audio_control_cur_2_t));
-        s_volume[request->bChannelNumber] = ((audio_control_cur_2_t const *)buf)->bCur;
-        int volume_db = s_volume[request->bChannelNumber] / 256;  // -50 .. 0 dB
-        int volume = (volume_db + 50) * 2;                        // -> 0 .. 100
+        int16_t cur = (int16_t)((audio_control_cur_2_t const *)buf)->bCur;
+        // The host may drive volume on the master channel (0) or per channel
+        // (L/R). Mirror the value across all of them so the master never lags
+        // at its 0 dB default — otherwise a re-enumeration that reads back the
+        // master would jump the volume to full. Keep master/channels in sync.
+        for (int ch = 0; ch <= UAC_SPK_CHANNELS; ch++) s_volume[ch] = cur;
+        int volume_db = cur / 256;                 // -50 .. 0 dB
+        int volume = (volume_db + 50) * 2;         // -> 0 .. 100
         if (volume < 0)   volume = 0;
         if (volume > 100) volume = 100;
         if (s_volume_cb) {
