@@ -13,7 +13,7 @@
 #define USBD_JPEG_STR       "JPEG Stream"
 #define USBD_JPEG_EPNUM_OUT (0x01)
 #define USBD_JPEG_EPNUM_IN  (0x81)
-#define USBD_UAC_CTRL_STR   "Tab5 Speaker"
+#define USBD_UAC_CTRL_STR   "M5Stack Tab5"
 #define USBD_UAC_SPK_STR    "M5Stack Tab5"
 
 // AudioControl feature-unit per-channel control bitmap: mute + volume, RW.
@@ -40,7 +40,11 @@ enum {
 static const tusb_desc_device_t descriptor_dev = {
     .bLength = sizeof(descriptor_dev),
     .bDescriptorType = TUSB_DESC_DEVICE,
-    .bcdUSB = 0x0200,
+    // 0x0210: advertise USB >= 2.01 so the host fetches the BOS descriptor, which
+    // carries the Microsoft OS 2.0 platform capability (WCID). That makes Windows
+    // auto-bind WinUSB to the vendor interface only (no Zadig needed), while the
+    // UAC interfaces keep usbaudio.sys and still appear as a playback device.
+    .bcdUSB = 0x0210,
 
 #if CFG_TUD_CDC || CFG_TUD_AUDIO
     // The UAC (and CDC) functions use an Interface Association Descriptor (IAD),
@@ -71,7 +75,7 @@ static const tusb_desc_device_t descriptor_dev = {
 static const tusb_desc_device_qualifier_t descriptor_qualifier = {
     .bLength = sizeof(tusb_desc_device_qualifier_t),
     .bDescriptorType = TUSB_DESC_DEVICE_QUALIFIER,
-    .bcdUSB = 0x0200,
+    .bcdUSB = 0x0210,
 
 #if CFG_TUD_CDC || CFG_TUD_AUDIO
     // The UAC (and CDC) functions use an Interface Association Descriptor (IAD),
@@ -127,6 +131,88 @@ static uint8_t const descriptor_config[] = {
     /* Class-Specific AS ISO Data Endpoint Descriptor (4.10.1.2) */
     TUD_AUDIO_DESC_CS_AS_ISO_EP(/*_attr*/ AUDIO_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, /*_ctrl*/ AUDIO_CTRL_NONE, /*_lockdelayunit*/ AUDIO_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, /*_lockdelay*/ 0x0001),
 };
+
+// ---------------------------------------------------------------------------
+//  Microsoft OS 2.0 descriptors (WCID): auto-load WinUSB on the vendor function
+// ---------------------------------------------------------------------------
+// Without this, a Windows user has to run Zadig to make the vendor interface
+// usable by libusb — and Zadig typically replaces the driver on the whole
+// composite device, which kills the UAC speaker. The MS OS 2.0 descriptor set
+// below targets ONLY ITF_NUM_VENDOR (a Function Subset), telling Windows to bind
+// WinUSB to that interface alone. The audio interfaces are left untouched, so
+// they keep usbaudio.sys and the device still works as a speaker.
+
+// Vendor request code the host uses (via the BOS platform cap) to fetch the set.
+#define MS_OS_20_VENDOR_CODE  0x01
+// Length of the descriptor set below (see TUD_BOS_MS_OS_20_DESCRIPTOR).
+#define MS_OS_20_DESC_LEN     0xB2
+
+static uint8_t const descriptor_bos[] = {
+    // BOS header: 1 device capability (the MS OS 2.0 platform descriptor)
+    TUD_BOS_DESCRIPTOR(TUD_BOS_DESC_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN, 1),
+    TUD_BOS_MS_OS_20_DESCRIPTOR(MS_OS_20_DESC_LEN, MS_OS_20_VENDOR_CODE),
+};
+
+static uint8_t const descriptor_ms_os_20[] = {
+    // Set header: wLength, wDescriptorType, dwWindowsVersion (>= 8.1), wTotalLength
+    U16_TO_U8S_LE(0x000A), U16_TO_U8S_LE(MS_OS_20_SET_HEADER_DESCRIPTOR),
+    U32_TO_U8S_LE(0x06030000), U16_TO_U8S_LE(MS_OS_20_DESC_LEN),
+
+    // Configuration subset header: wLength, wDescriptorType, bConfigValue, bReserved, wTotalLength
+    U16_TO_U8S_LE(0x0008), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_CONFIGURATION),
+    0, 0, U16_TO_U8S_LE(MS_OS_20_DESC_LEN - 0x0A),
+
+    // Function subset header: wLength, wDescriptorType, bFirstInterface, bReserved, wSubsetLength
+    // bFirstInterface = ITF_NUM_VENDOR -> the WinUSB binding applies to it alone.
+    U16_TO_U8S_LE(0x0008), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION),
+    ITF_NUM_VENDOR, 0, U16_TO_U8S_LE(MS_OS_20_DESC_LEN - 0x0A - 0x08),
+
+    // Compatible ID feature: wLength, wDescriptorType, CompatibleID[8]="WINUSB", SubCompatibleID[8]=0
+    U16_TO_U8S_LE(0x0014), U16_TO_U8S_LE(MS_OS_20_FEATURE_COMPATBLE_ID),
+    'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+    // Registry property feature: expose DeviceInterfaceGUIDs so apps can find the
+    // device by GUID. REG_MULTI_SZ (type 7); name "DeviceInterfaceGUIDs"; value is
+    // a double-null-terminated list with one GUID.
+    U16_TO_U8S_LE(MS_OS_20_DESC_LEN - 0x0A - 0x08 - 0x08 - 0x14),
+    U16_TO_U8S_LE(MS_OS_20_FEATURE_REG_PROPERTY),
+    U16_TO_U8S_LE(0x0007), U16_TO_U8S_LE(0x002A), // wPropertyDataType=REG_MULTI_SZ, wPropertyNameLength
+    'D', 0, 'e', 0, 'v', 0, 'i', 0, 'c', 0, 'e', 0, 'I', 0, 'n', 0, 't', 0, 'e', 0,
+    'r', 0, 'f', 0, 'a', 0, 'c', 0, 'e', 0, 'G', 0, 'U', 0, 'I', 0, 'D', 0, 's', 0, 0, 0,
+    U16_TO_U8S_LE(0x0050), // wPropertyDataLength = 80 bytes ("{...}\0\0" in UTF-16LE)
+    '{', 0, '3', 0, 'B', 0, 'D', 0, '7', 0, 'B', 0, 'B', 0, 'F', 0, '0', 0, '-', 0,
+    '6', 0, 'E', 0, 'C', 0, '5', 0, '-', 0, '4', 0, '1', 0, 'B', 0, '0', 0, '-', 0,
+    'A', 0, '1', 0, '5', 0, 'F', 0, '-', 0, '6', 0, '9', 0, '8', 0, 'A', 0, '5', 0,
+    '4', 0, '9', 0, '0', 0, 'F', 0, 'A', 0, '1', 0, 'E', 0, '}', 0, 0, 0, 0, 0,
+};
+
+TU_VERIFY_STATIC(sizeof(descriptor_ms_os_20) == MS_OS_20_DESC_LEN, "MS OS 2.0 descriptor length mismatch");
+
+uint8_t const *tud_descriptor_bos_cb(void) {
+    return descriptor_bos;
+}
+
+// The host issues the MS OS 2.0 request as a vendor control transfer on the
+// device (bRequest = MS_OS_20_VENDOR_CODE, wIndex = 7). TinyUSB routes vendor
+// control requests it does not handle to the vendor class driver's callback.
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request) {
+    // Nothing to do on DATA/ACK stages.
+    if (stage != CONTROL_STAGE_SETUP) {
+        return true;
+    }
+
+    if (request->bmRequestType_bit.type == TUSB_REQ_TYPE_VENDOR &&
+        request->bRequest == MS_OS_20_VENDOR_CODE &&
+        request->wIndex == 7) {
+        // wIndex == 7: "MS OS 2.0 descriptor set" (wTotalLength is at offset 8).
+        uint16_t total_len;
+        memcpy(&total_len, descriptor_ms_os_20 + 8, sizeof(total_len));
+        return tud_control_xfer(rhport, request, (void *)(uintptr_t)descriptor_ms_os_20, total_len);
+    }
+
+    return false; // stall any other vendor request
+}
 
 static char serial[13];
 static const char *descriptor_string[] = {
