@@ -75,18 +75,57 @@ bool read_exact(uint8_t *dst, size_t len) {
     return true;
 }
 
-// Reads and discards `len` bytes, to keep the byte stream aligned when a band
-// can't be stored. Returns false if the device goes away mid-read.
-bool read_discard(size_t len) {
-    static uint8_t scratch[4096];
-    while (len > 0) {
-        size_t chunk = len < sizeof(scratch) ? len : sizeof(scratch);
-        if (!read_exact(scratch, chunk)) {
+// Scans the USB byte stream for the start of a fresh frame and leaves the stream
+// positioned right after that band's 8-byte header (i.e. at its JPEG payload).
+//
+// The stream carries no global sync marker, so once the byte offset drifts (e.g.
+// the PC pauses mid-band and resumes with a brand-new frame) every subsequent
+// 8-byte "header" is read from mid-payload garbage and never realigns on its own.
+// The first band of every frame, however, is unmistakable: type 0x50/0x51, x==0,
+// y==0, width==DISPLAY_WIDTH and a plausible size. We slide a 1-byte-at-a-time
+// window (this is a rare recovery path, so simplicity beats throughput) until it
+// matches, which leaves us byte-aligned to a frame boundary again.
+bool resync_to_frame_start(uint8_t hdr_out[8]) {
+    uint8_t win[8] = {};
+    size_t filled = 0;
+    while (true) {
+        if (!streamer_usb_mounted()) {
             return false;
         }
-        len -= chunk;
+        uint8_t b;
+        if (!read_exact(&b, 1)) {
+            return false;
+        }
+        if (filled < sizeof(win)) {
+            win[filled++] = b;
+            if (filled < sizeof(win)) {
+                continue;
+            }
+        } else {
+            for (size_t i = 0; i < sizeof(win) - 1; i++) {
+                win[i] = win[i + 1];
+            }
+            win[sizeof(win) - 1] = b;
+        }
+
+        uint8_t type = win[0];
+        uint32_t data_size = (uint32_t)win[1] | ((uint32_t)win[2] << 8) |
+                             ((uint32_t)win[3] << 16);
+        int x_px = (int)win[4] * 16;
+        int y_px = (int)win[5] * 16;
+        int w_px = (int)win[6] * 16;
+        int h_px = (int)win[7] * 16;
+        bool first_band = (type == 0x50 || type == 0x51) &&
+                          data_size >= 4 && (data_size - 4) <= JPEG_BUFFER_SIZE &&
+                          x_px == 0 && y_px == 0 && w_px == DISPLAY_WIDTH &&
+                          h_px > 0 && h_px <= DISPLAY_HEIGHT;
+        if (first_band) {
+            for (size_t i = 0; i < sizeof(win); i++) {
+                hdr_out[i] = win[i];
+            }
+            return true;
+        }
     }
-    return true;
 }
 
 // Reads banded JPEGs from USB. Per-band 8-byte header:
@@ -103,27 +142,45 @@ void renderer_task(void *) {
     static JpegFrame frame;  // static: too large for the task stack
     frame.band_count = 0;
     size_t write_off = 0;
-    bool frame_ok = true;
+    // Whether the byte stream is aligned to a band boundary. Starts false so we
+    // lock onto the first real frame instead of assuming we joined cleanly, and
+    // is cleared whenever the framing looks wrong so the next iteration rescans.
+    bool synced = false;
 
     auto reset = [&]() {
         frame.band_count = 0;
         write_off = 0;
-        frame_ok = true;
+    };
+    auto desync = [&]() {
+        reset();
+        synced = false;
     };
 
     while (true) {
         if (!streamer_usb_mounted()) {
             vTaskDelay(pdMS_TO_TICKS(100));
-            reset();
+            desync();
             continue;
         }
 
         // 8-byte per-band header.
         uint8_t hdr[8];
-        if (!read_exact(hdr, sizeof(hdr))) {
+        if (synced) {
+            if (!read_exact(hdr, sizeof(hdr))) {
+                desync();
+                continue;
+            }
+        } else {
+            // Realign to a frame boundary after a stall/corruption, then start a
+            // fresh frame from the band the scan landed on.
+            if (!resync_to_frame_start(hdr)) {
+                desync();
+                continue;
+            }
             reset();
-            continue;
+            synced = true;
         }
+
         uint8_t type = hdr[0];
         uint32_t data_size = (uint32_t)hdr[1] | ((uint32_t)hdr[2] << 8) |
                              ((uint32_t)hdr[3] << 16);
@@ -131,43 +188,48 @@ void renderer_task(void *) {
         int h_px = (int)hdr[7] * 16;
 
         if ((type != 0x50 && type != 0x51) || data_size < 4) {
-            // Header looks misaligned; nothing reliable to drain, so resync.
             ESP_LOGW(TAG, "bad band header (type=0x%02x size=%u), resyncing",
                      type, (unsigned)data_size);
-            reset();
+            desync();
             continue;
         }
         size_t jpeg_len = data_size - 4;
-        uint8_t *buf = s_jpeg_buffers[idx];
 
-        bool fits = frame_ok && jpeg_len > 0 &&
+        bool fits = jpeg_len > 0 &&
                     frame.band_count < MAX_BANDS &&
                     write_off + jpeg_len <= JPEG_BUFFER_SIZE &&
                     y_px + h_px <= DISPLAY_HEIGHT;
-        if (fits) {
-            if (!read_exact(buf + write_off, jpeg_len)) {
-                reset();
-                continue;
-            }
-            JpegBand &band = frame.bands[frame.band_count++];
-            band.data = buf + write_off;
-            band.size = jpeg_len;
-            band.y = y_px;
-            band.height = h_px;
-            write_off += jpeg_len;
-        } else {
-            // Can't store this band; drop the frame but keep the stream aligned.
-            ESP_LOGW(TAG, "band doesn't fit (len=%u y=%d h=%d), dropping frame",
+        if (!fits) {
+            // A band that doesn't fit means the framing is suspect; don't trust
+            // (and drain) a possibly-bogus length — rescan for a frame boundary.
+            ESP_LOGW(TAG, "band doesn't fit (len=%u y=%d h=%d), resyncing",
                      (unsigned)jpeg_len, y_px, h_px);
-            if (!read_discard(jpeg_len)) {
-                reset();
-                continue;
-            }
-            frame_ok = false;
+            desync();
+            continue;
         }
 
+        uint8_t *buf = s_jpeg_buffers[idx];
+        if (!read_exact(buf + write_off, jpeg_len)) {
+            desync();
+            continue;
+        }
+        // Every band's payload is a standalone JPEG, so it must open with the SOI
+        // marker (FF D8). If it doesn't, our byte offset has drifted — resync.
+        if (jpeg_len < 2 || buf[write_off] != 0xFF || buf[write_off + 1] != 0xD8) {
+            ESP_LOGW(TAG, "band payload not JPEG (y=%d), resyncing", y_px);
+            desync();
+            continue;
+        }
+
+        JpegBand &band = frame.bands[frame.band_count++];
+        band.data = buf + write_off;
+        band.size = jpeg_len;
+        band.y = y_px;
+        band.height = h_px;
+        write_off += jpeg_len;
+
         if (type == 0x51) {
-            if (frame_ok && frame.band_count > 0) {
+            if (frame.band_count > 0) {
                 xQueueOverwrite(s_jpeg_queue, &frame);
                 idx = (idx + 1) % JPEG_BUFFER_NUM;
             }
