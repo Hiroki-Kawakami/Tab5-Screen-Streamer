@@ -10,7 +10,7 @@
                              + CFG_TUD_VENDOR * TUD_VENDOR_DESC_LEN \
                              + CFG_TUD_AUDIO * CFG_TUD_AUDIO_FUNC_1_DESC_LEN)
 #define USBD_DESC_STR_MAX   (32)
-#define USBD_JPEG_STR       "JPEG Stream"
+#define USBD_JPEG_STR       "Tab5 JPEG Stream"
 #define USBD_JPEG_EPNUM_OUT (0x01)
 #define USBD_JPEG_EPNUM_IN  (0x81)
 #define USBD_UAC_CTRL_STR   "M5Stack Tab5"
