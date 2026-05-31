@@ -75,6 +75,9 @@ mod usb_device {
     pub const VID: u16 = 0xf055;
     pub const PID: u16 = 0x1118;
     pub const EP_OUT: u8 = 0x01;
+    /// Expected device version (bcdDevice in the USB device descriptor).
+    /// Must match the firmware's `.bcdDevice` in `usb_descriptors.c`.
+    pub const DEVICE_VERSION: u16 = 0x0200;
 
     fn wait_device_arrived() -> Result<(), nusb::Error> {
         println!("Waiting device connection...");
@@ -105,6 +108,17 @@ mod usb_device {
         }
         let device_info = device_info
             .expect("Device not found!");
+
+        let version = device_info.device_version();
+        if version != DEVICE_VERSION {
+            eprintln!(
+                "Device version mismatch: expected 0x{:04X}, found 0x{:04X}.\n\
+                 The PC tool and the Tab5 firmware are out of sync; \
+                 please update them to matching versions.",
+                DEVICE_VERSION, version
+            );
+            std::process::exit(1);
+        }
 
         let device = device_info.open().wait().unwrap();
         let interface = device.claim_interface(0).wait().unwrap();

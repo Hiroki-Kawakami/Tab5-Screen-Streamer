@@ -2,7 +2,7 @@
 name = "tab5-screen-streamer"
 description = "Stream PC Screen Capture to M5Stack Tab5"
 repository = "https://github.com/Hiroki-Kawakami/Tab5-Screen-Streamer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]

@@ -58,7 +58,7 @@ static const tusb_desc_device_t descriptor_dev = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USBD_VID,
     .idProduct = USBD_PID,
-    .bcdDevice = 0x0100,
+    .bcdDevice = 0x0200,
 
     .iManufacturer = STR_MANUFACTURER,
     .iProduct = STR_PRODUCT,
