@@ -279,8 +279,15 @@ bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t fu
     // the host keeps streaming, even if the codec writer is momentarily behind.
     uint16_t n = tud_audio_n_read(func_id, s_spk_buf, sizeof(s_spk_buf));
     if (n > 0 && s_spk_stream) {
-        // Non-blocking: drop the newest data if the ring is full.
-        xStreamBufferSend(s_spk_stream, s_spk_buf, n, 0);
+        // This callback runs in true ISR context (the DWC2 dcd dispatches the
+        // audio xfer-complete via driver->xfer_isr, directly inside the USB
+        // interrupt). So the ISR-safe API is mandatory: the task-level
+        // xStreamBufferSend() reaches vTaskSuspendAll()/xTaskResumeAll() when it
+        // wakes the blocked writer task, which corrupts the FreeRTOS scheduler
+        // state from an ISR and hangs the kernel with no panic output.
+        BaseType_t hpw = pdFALSE;
+        xStreamBufferSendFromISR(s_spk_stream, s_spk_buf, n, &hpw);
+        portYIELD_FROM_ISR(hpw);
     }
     return true;
 }
