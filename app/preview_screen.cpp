@@ -58,9 +58,9 @@ uint8_t *s_jpeg_buffers[JPEG_BUFFER_NUM] = {};
 // frames.
 QueueHandle_t s_jpeg_queue = nullptr;
 
-// Persisted settings live in the "dstr" namespace (shared with streamer.cpp,
+// Persisted settings live in the "t5ss" namespace (shared with streamer.cpp,
 // which reads "pixfmt" at boot to pick the framebuffer format).
-NVS settings_nvs("dstr");
+NVS settings_nvs("t5ss");
 constexpr const char *NVS_KEY_BRIGHTNESS = "brt";     // uint8 1..100
 constexpr const char *NVS_KEY_PIX_FMT    = "pixfmt";  // 0=RGB888, 1=RGB565
 

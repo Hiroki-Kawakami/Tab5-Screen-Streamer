@@ -109,7 +109,7 @@ void streamer_app() {
     pf_port::PixelFormat pf = pf_port::PixelFormat::RGB888;
     uint8_t brightness = 50;
     {
-        NVS nvs("dstr");
+        NVS nvs("t5ss");
         uint8_t v = 0;
         if (nvs.get("pixfmt", &v) == NVS::Error::OK && v == 1) {
             pf = pf_port::PixelFormat::RGB565;
