@@ -43,12 +43,14 @@ If you are prompted to select which screen to display on first launch, please re
 
 ### Windows
 
-You need to install the USB driver using [Zadig](https://zadig.akeo.ie).  
-Launch Zadig, select "Tab5 Screen Streamer", and install the driver.
-
 Download the Windows streamer from the [GitHub Release page](https://github.com/Hiroki-Kawakami/Tab5-Screen-Streamer/releases).  
 Launch tab5-screen-streamer with Tab5 connected, and the screen capture will be transmitted to Tab5.  
 For Windows, only screen mirroring is supported.
+
+> [!NOTE]
+> If you previously installed a driver with [Zadig](https://zadig.akeo.ie) to use a firmware older than v1.0, please uninstall it.  
+> Open Device Manager, find "Tab5 Screen Streamer", right-click it and select "Uninstall device", check "Delete the driver software for this device", then reconnect Tab5.  
+> From v1.0 onward the firmware advertises a WinUSB-compatible (WCID) descriptor, so Windows loads the correct driver automatically and Zadig is no longer needed.
 
 ### Automatic Reconnection After Disconnection
 
