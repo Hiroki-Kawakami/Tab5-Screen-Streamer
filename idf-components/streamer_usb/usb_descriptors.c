@@ -14,7 +14,7 @@
 #define USBD_JPEG_EPNUM_OUT (0x01)
 #define USBD_JPEG_EPNUM_IN  (0x81)
 #define USBD_UAC_CTRL_STR   "Tab5 Speaker"
-#define USBD_UAC_SPK_STR    "Speaker"
+#define USBD_UAC_SPK_STR    "M5Stack Tab5"
 
 // AudioControl feature-unit per-channel control bitmap: mute + volume, RW.
 #define UAC_FU_CTRL ((uint32_t)(AUDIO_CTRL_RW << AUDIO_FEATURE_UNIT_CTRL_MUTE_POS) \
