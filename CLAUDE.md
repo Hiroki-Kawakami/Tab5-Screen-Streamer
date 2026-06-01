@@ -29,14 +29,47 @@ streamed from a PC over USB and displays them on the panel.
 - `app/` — screen/app logic (`streamer.cpp`, `preview_screen.cpp`).
 - `components/` — `lvgl++`, `screen_manager` (the `Screen` base class + lifecycle).
 - `idf-components/streamer_usb/` — USB vendor-class receive API (`streamer_usb_vendor_read`, etc.).
+- `streamer-rs/` — the **PC-side sender** (Rust crate `tab5-screen-streamer`). Captures the
+  screen (ScreenCaptureKit on macOS, windows-capture on Windows, scap on Linux), resizes to
+  720x1280-equivalent, JPEG-encodes via turbojpeg, and streams over USB with `nusb`.
+  - `src/main.rs` — USB device open + the send loop. Opens VID `0xf055` / PID `0x1118`,
+    bulk OUT endpoint `0x01`, and checks `bcdDevice` matches `DEVICE_VERSION` (0x0200) — the
+    PC tool and firmware must be version-matched. The bulk writer uses `.writer(8192)
+    .with_num_transfers(8)` (8 KB per transfer, 8 in-flight URBs), so the PC side already
+    pipelines; receive throughput is gated device-side (see EP DMA buffer note below).
+  - `src/capture/mod.rs` — `encode_split_frame()` builds the wire format (band header below).
+  - `src/capture/{macos,windows,common}.rs` — per-platform capture backends.
 
 ## JPEG streaming wire format (PC → Tab5)
-`send_image.py`: `struct.pack("<I", len(jpeg)+4) + jpeg`
-- First 4 bytes = **little-endian total frame size, including the 4-byte header**.
-  So the JPEG payload length = header value − 4.
+Built by `encode_split_frame()` in `streamer-rs/src/capture/mod.rs`; parsed by
+`renderer_task` in `app/preview_screen.cpp`. **Not** a single JPEG per frame — each frame is
+split into `SPLIT_COUNT = 16` horizontal bands (in the device's portrait orientation), and
+each band is independently JPEG-encoded and prefixed with an **8-byte band header**:
+- byte 0     : **type / sync** — `0x50` = decode only, `0x51` = last band of the frame → decode then present (flip framebuffer)
+- bytes 1..3 : **data size**, 24-bit little-endian = the 4 coordinate bytes + JPEG payload length.
+  So **JPEG payload length = data_size − 4** (`COORD_SIZE`).
+- byte 4     : x / 16  (always 0 — bands are full-width)
+- byte 5     : y / 16
+- byte 6     : width / 16  (always 720/16)
+- byte 7     : height / 16
+Landscape captures (`src_width > src_height`) are rotated 270° so the device always receives a
+portrait image; each band is one source strip rotated independently.
 - `preview_screen.cpp` splits receive (renderer task) from decode + framebuffer write
-  (decoder task). It uses 8 ring input buffers (512KB each, PSRAM) and a capacity-1
-  `xQueueOverwrite`, so the decoder always processes only the newest frame.
+  (decoder task). The renderer accumulates a frame's 16 bands into one of 8 ring input buffers
+  (512KB each, PSRAM) and, on the `0x51` band, hands the assembled frame to the decoder via a
+  capacity-1 `xQueueOverwrite`, so the decoder always processes only the newest frame.
+- The stream carries no global sync marker. After a stall/corruption `resync_to_frame_start()`
+  slides a 1-byte window until it finds a plausible first band (type 0x50/0x51, x==0, y==0,
+  width==720) to re-align to a frame boundary.
+
+## USB receive throughput (EP DMA buffer)
+The bulk OUT max packet size is 512 (HS), fixed in the vendor descriptor. Throughput is **not**
+limited by that but by `CFG_TUD_VENDOR_EPSIZE` in `idf-components/streamer_usb/tusb_config.h` —
+the size of one OUT DMA transfer. DWC2 in DMA mode receives multiple 512-byte packets back-to-back
+into that buffer in a single transfer (`tu_edpt_stream_read_xfer` caps the xfer length at
+`ep_bufsize`), so 512 there meant one re-arm per packet (~80 Mbps ceiling). It is set to **4096**
+(8 packets/transfer) with `CFG_TUD_VENDOR_RX_BUFSIZE = 32768` to keep the host bursting. EPSIZE
+must stay a multiple of 512 and ≥ 512 (a smaller buffer overflows the per-EP DMA region).
 
 ## Full-range JPEG color conversion
 - **Why**: the IDF `jpeg_decoder_process` does YUV→RGB with **limited-range BT.601** (Y∈[16,235]),
