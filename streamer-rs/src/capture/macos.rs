@@ -1,32 +1,54 @@
+// The CGDisplayStream API is deprecated in favour of ScreenCaptureKit, but it is
+// intentionally used here as a lighter-weight capture path. Silence the warnings.
+#![allow(deprecated)]
+
 use crate::capture::{CaptureConfig, FrameConvertedData};
-use core_foundation::{error::CFError, runloop::CFRunLoopRun};
-use core_media_rs::{cm_sample_buffer::CMSampleBuffer, cm_time::CMTime};
-use dispatch2::DispatchQueue;
+use block2::RcBlock;
+use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send, sel};
 use objc2_app_kit::NSApplication;
-use objc2_core_foundation::CGSize;
+use objc2_core_foundation::{
+    CFBoolean, CFDictionary, CFNumber, CFRunLoop, CFString, CFType, CGSize,
+};
 use objc2_core_graphics::{
-    CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayIsInMirrorSet,
-    CGDisplayMirrorsDisplay, CGDisplayRegisterReconfigurationCallback,
+    kCGDisplayStreamMinimumFrameTime, kCGDisplayStreamShowCursor, CGDirectDisplayID,
+    CGDisplayChangeSummaryFlags, CGDisplayIsInMirrorSet, CGDisplayMirrorsDisplay,
+    CGDisplayRegisterReconfigurationCallback, CGDisplayStream, CGDisplayStreamFrameStatus,
+    CGDisplayStreamUpdate, CGError, CGGetActiveDisplayList,
 };
 use objc2_foundation::{NSArray, NSString};
-use screencapturekit::{
-    output::LockTrait,
-    shareable_content::SCShareableContent,
-    stream::{
-        SCStream,
-        configuration::{SCStreamConfiguration, pixel_format::PixelFormat},
-        content_filter::SCContentFilter,
-        output_trait::SCStreamOutputTrait,
-        output_type::SCStreamOutputType,
-    },
-};
+use objc2_io_surface::{IOSurfaceLockOptions, IOSurfaceRef};
+use objc2_core_foundation::CFRetained;
 use std::{os::raw::c_void, panic, process, sync::mpsc, thread, time::Duration};
 
 const BUF_SIZE: usize = 512 * 1024;
 const JPEG_QUALITY_LEVELS: [i32; 7] = [20, 30, 40, 50, 60, 70, 80];
+
+/// Output frame size requested from the display stream. Matches the device panel
+/// (the captured display is scaled into this buffer, preserving aspect ratio).
+const OUTPUT_WIDTH: usize = 1280;
+const OUTPUT_HEIGHT: usize = 720;
+
+/// CoreVideo/CoreMedia-style four-character pixel format code for packed BGRA8888.
+const PIXEL_FORMAT_BGRA: i32 = fourcc(b"BGRA");
+
+const fn fourcc(code: &[u8; 4]) -> i32 {
+    ((code[0] as i32) << 24)
+        | ((code[1] as i32) << 16)
+        | ((code[2] as i32) << 8)
+        | (code[3] as i32)
+}
+
+/// A single captured frame, copied out of the stream's IOSurface into a tightly
+/// packed BGRA buffer (`width * height * 4` bytes, no row padding) so it can be
+/// handed to another thread and fed directly to `encode_split_frame`.
+struct CapturedFrame {
+    data: Vec<u8>,
+    width: usize,
+    height: usize,
+}
 
 pub struct Context {
     rx: mpsc::Receiver<FrameConvertedData>,
@@ -66,16 +88,18 @@ where
 
     // Capture Thread
     thread::spawn(move || {
-        let (capt_tx, capt_rx) = mpsc::sync_channel::<CMSampleBuffer>(1);
+        let (capt_tx, capt_rx) = mpsc::sync_channel::<CapturedFrame>(1);
 
         let (display_id, _virtual_display) = if let Some(i) = config.display {
-            let contents = SCShareableContent::get().expect("Failed to get display list.");
-            (contents.displays()[i].display_id(), None)
+            let displays = active_display_list();
+            (
+                *displays.get(i).expect("Selected display index out of range."),
+                None,
+            )
         } else {
             let virtual_display = VirtualDisplay::new("M5Stack Tab5", (1280, 720), (110.0, 62.0));
             (virtual_display.get_id(), Some(virtual_display))
         };
-        let output = SCStreamOutput { tx: capt_tx };
         let mut compressor =
             turbojpeg::Compressor::new().expect("Failed to create turbojpeg Compressor");
         let mut transformer =
@@ -93,27 +117,22 @@ where
             .expect("set jpeg subsamp failed!");
 
         loop {
-            let stream = start_screen_capture_kit(output.clone(), display_id)
-                .expect("Failed to start ScreenCaptureKit!");
+            let (stream, _queue, _handler) =
+                start_display_stream(capt_tx.clone(), display_id)
+                    .expect("Failed to start CGDisplayStream!");
 
             let mut compress_buffer: [u8; BUF_SIZE] = [0; BUF_SIZE];
             let mut frames = 0;
             let mut start = std::time::Instant::now();
             let mut last = std::time::Instant::now();
             loop {
-                let sample_buffer = capt_rx.recv_timeout(Duration::from_millis(100));
+                let frame = capt_rx.recv_timeout(Duration::from_millis(100));
                 if unsafe { DISPLAY_UPDATED } {
                     break;
                 }
-                let sample_buffer = match sample_buffer {
-                    Ok(sb) => sb,
+                let frame = match frame {
+                    Ok(f) => f,
                     Err(_) => continue,
-                };
-
-                let pixel_buffer = if let Ok(pb) = sample_buffer.get_pixel_buffer() {
-                    pb
-                } else {
-                    continue;
                 };
 
                 frames += 1;
@@ -126,21 +145,14 @@ where
                     None
                 };
 
-                let size = (pixel_buffer.get_width(), pixel_buffer.get_height());
-                let data = if let Ok(d) = pixel_buffer.lock() {
-                    d
-                } else {
-                    continue;
-                };
-
                 let mut converted =
                     unsafe { Box::<[u8]>::new_uninit_slice(BUF_SIZE).assume_init() };
                 let size = crate::capture::encode_split_frame(
                     &mut compressor,
                     &mut transformer,
-                    data.0.as_slice(),
-                    size.0 as usize,
-                    size.1 as usize,
+                    &frame.data,
+                    frame.width,
+                    frame.height,
                     turbojpeg::PixelFormat::BGRA,
                     &mut compress_buffer,
                     &mut converted,
@@ -170,7 +182,7 @@ where
                 last = std::time::Instant::now();
             }
             println!("Display Settings Changed, Reopening Stream...");
-            let _ = stream.stop_capture();
+            let _ = CGDisplayStream::stop(Some(&stream));
             thread::sleep(Duration::from_millis(100));
             unsafe {
                 DISPLAY_UPDATED = false;
@@ -194,76 +206,135 @@ where
             std::ptr::null_mut(),
         );
         NSApplication::load();
-        CFRunLoopRun();
     }
+    CFRunLoop::run();
 }
 
-fn create_filter_from_display_id(
-    display_id: CGDirectDisplayID,
-) -> Result<(SCContentFilter, CGDirectDisplayID), CFError> {
-    for d in SCShareableContent::get()?.displays() {
-        if d.display_id() == display_id {
-            return Ok((
-                SCContentFilter::new().with_display_excluding_windows(&d, &[]),
-                display_id,
-            ));
-        }
+/// Enumerate the currently active displays in the same order CoreGraphics reports
+/// them, so a `--display N` index stays stable.
+fn active_display_list() -> Vec<CGDirectDisplayID> {
+    let mut count: u32 = 0;
+    unsafe {
+        CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count);
     }
+    let mut displays = vec![0 as CGDirectDisplayID; count as usize];
+    unsafe {
+        CGGetActiveDisplayList(count, displays.as_mut_ptr(), &mut count);
+    }
+    displays.truncate(count as usize);
+    displays
+}
+
+/// If `display_id` is mirroring another display, capture the display it mirrors;
+/// otherwise capture it directly.
+fn capture_source_display(display_id: CGDirectDisplayID) -> CGDirectDisplayID {
     if CGDisplayIsInMirrorSet(display_id) {
-        let mirrored_id = CGDisplayMirrorsDisplay(display_id);
-        for d in SCShareableContent::get()?.displays() {
-            if d.display_id() == mirrored_id {
-                return Ok((
-                    SCContentFilter::new().with_display_excluding_windows(&d, &[]),
-                    mirrored_id,
-                ));
-            }
+        let mirrored = CGDisplayMirrorsDisplay(display_id);
+        if mirrored != 0 {
+            return mirrored;
         }
     }
-    println!("Target Display not found in Shareable Content!, fallback to first display.");
-    Ok((
-        SCContentFilter::new()
-            .with_display_excluding_windows(&SCShareableContent::get()?.displays()[0], &[]),
-        display_id,
-    ))
+    display_id
 }
-fn start_screen_capture_kit(
-    output: SCStreamOutput,
+
+/// Build the CGDisplayStream property dictionary: cap the frame rate at ~60fps and
+/// keep the cursor embedded in the captured frames.
+fn stream_properties() -> CFRetained<CFDictionary<CFType, CFType>> {
+    let key_min_frame_time: &CFString = unsafe { kCGDisplayStreamMinimumFrameTime };
+    let key_show_cursor: &CFString = unsafe { kCGDisplayStreamShowCursor };
+
+    let min_frame_time = CFNumber::new_f64(1.0 / 60.0);
+    let show_cursor = CFBoolean::new(true);
+
+    CFDictionary::<CFType, CFType>::from_slices(
+        &[key_min_frame_time.as_ref(), key_show_cursor.as_ref()],
+        &[min_frame_time.as_ref(), show_cursor.as_ref()],
+    )
+}
+
+/// The frame-available handler block. Closes over the IOSurface copy logic; held
+/// alive (along with the dispatch queue) for as long as the stream runs.
+type FrameHandler = RcBlock<
+    dyn Fn(CGDisplayStreamFrameStatus, u64, *mut IOSurfaceRef, *const CGDisplayStreamUpdate),
+>;
+
+fn start_display_stream(
+    tx: mpsc::SyncSender<CapturedFrame>,
     display_id: CGDirectDisplayID,
-) -> Result<SCStream, CFError> {
-    let (filter, _selected_display_id) = create_filter_from_display_id(display_id)?;
+) -> Option<(CFRetained<CGDisplayStream>, DispatchRetained<DispatchQueue>, FrameHandler)> {
+    // Watch the originally selected display for reconfiguration, but capture from
+    // the display it mirrors (if any).
     unsafe { DISPLAY_WATCH = Some(display_id) };
+    let source_display = capture_source_display(display_id);
 
-    let config = SCStreamConfiguration::new()
-        .set_width(1280)?
-        .set_height(720)?
-        .set_minimum_frame_interval(&CMTime {
-            value: 1,
-            timescale: 60,
-            flags: 0,
-            epoch: 0,
-        })?
-        .set_pixel_format(PixelFormat::BGRA)?
-        .set_captures_audio(false)?;
+    let handler: FrameHandler = RcBlock::new(
+        move |status: CGDisplayStreamFrameStatus,
+              _display_time: u64,
+              surface: *mut IOSurfaceRef,
+              _update: *const CGDisplayStreamUpdate| {
+            if status != CGDisplayStreamFrameStatus::FrameComplete || surface.is_null() {
+                return;
+            }
+            let surface = unsafe { &*surface };
 
-    let mut stream = SCStream::new(&filter, &config);
-    stream.add_output_handler(output, SCStreamOutputType::Screen);
-    stream.start_capture()?;
-    Ok(stream)
-}
+            let mut seed: u32 = 0;
+            // Read-only lock; bail if the surface couldn't be mapped.
+            if unsafe { surface.lock(IOSurfaceLockOptions::ReadOnly, &mut seed) } != 0 {
+                return;
+            }
 
-#[derive(Clone)]
-struct SCStreamOutput {
-    tx: mpsc::SyncSender<CMSampleBuffer>,
-}
-impl SCStreamOutputTrait for SCStreamOutput {
-    fn did_output_sample_buffer(
-        &self,
-        sample_buffer: CMSampleBuffer,
-        _of_type: SCStreamOutputType,
-    ) {
-        let _ = self.tx.try_send(sample_buffer);
+            let width = surface.width();
+            let height = surface.height();
+            let bytes_per_row = surface.bytes_per_row();
+            let base = surface.base_address().as_ptr() as *const u8;
+            let row_bytes = width * 4;
+
+            let mut data = vec![0u8; row_bytes * height];
+            unsafe {
+                if bytes_per_row == row_bytes {
+                    std::ptr::copy_nonoverlapping(base, data.as_mut_ptr(), row_bytes * height);
+                } else {
+                    // IOSurface rows may be padded; repack into tightly packed rows.
+                    for y in 0..height {
+                        std::ptr::copy_nonoverlapping(
+                            base.add(y * bytes_per_row),
+                            data.as_mut_ptr().add(y * row_bytes),
+                            row_bytes,
+                        );
+                    }
+                }
+                let _ = surface.unlock(IOSurfaceLockOptions::ReadOnly, &mut seed);
+            }
+
+            let _ = tx.try_send(CapturedFrame {
+                data,
+                width,
+                height,
+            });
+        },
+    );
+
+    let properties = stream_properties();
+    let queue = DispatchQueue::new("com.tab5.screen-streamer.capture", None);
+
+    let stream = unsafe {
+        CGDisplayStream::with_dispatch_queue(
+            source_display,
+            OUTPUT_WIDTH,
+            OUTPUT_HEIGHT,
+            PIXEL_FORMAT_BGRA,
+            Some(properties.as_ref()),
+            &queue,
+            RcBlock::as_ptr(&handler),
+        )
+    }?;
+
+    if CGDisplayStream::start(Some(&stream)) != CGError::Success {
+        return None;
     }
+
+    // Keep the queue and handler block alive for the lifetime of the stream.
+    Some((stream, queue, handler))
 }
 
 impl Context {
