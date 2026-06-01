@@ -94,14 +94,14 @@ esp_err_t st7123_lcd_init(const st7123_lcd_config_t *config, st7123_lcd_t *lcd) 
     esp_lcd_dpi_panel_config_t dpi_config = {
         .virtual_channel = 0,
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
-        .dpi_clock_freq_mhz = 70,
+        .dpi_clock_freq_mhz = 75,
         .pixel_format = rgb888 ? LCD_COLOR_PIXEL_FORMAT_RGB888 : LCD_COLOR_PIXEL_FORMAT_RGB565,
         .num_fbs = state->fb_num,
         .video_timing = {
             .h_size = config->size.width,
             .v_size = config->size.height,
             .hsync_pulse_width = 2,
-            .hsync_back_porch = 40,
+            .hsync_back_porch = 140,
             .hsync_front_porch = 40,
             .vsync_pulse_width = 2,
             .vsync_back_porch = 8,
