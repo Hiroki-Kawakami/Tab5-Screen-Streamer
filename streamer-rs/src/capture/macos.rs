@@ -75,6 +75,18 @@ where
             let virtual_display = VirtualDisplay::new("M5Stack Tab5", (1280, 720), (110.0, 62.0));
             (virtual_display.get_id(), Some(virtual_display))
         };
+
+        // Publish the target display geometry for touch injection. The capture
+        // is always forced to 1280x720 (landscape), so the device-side image is
+        // always rotated 270° (see encode_split_frame / PROTOCOL.md).
+        let bounds = core_graphics::display::CGDisplay::new(display_id).bounds();
+        crate::input::set_geometry(crate::input::Geometry {
+            origin_x: bounds.origin.x,
+            origin_y: bounds.origin.y,
+            width: bounds.size.width,
+            height: bounds.size.height,
+            rotate: true,
+        });
         let output = SCStreamOutput { tx: capt_tx };
         let mut compressor =
             turbojpeg::Compressor::new().expect("Failed to create turbojpeg Compressor");

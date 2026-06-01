@@ -6,11 +6,26 @@
 #include "esp_timer.h"
 #include "esp_private/usb_phy.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "tusb.h"
+#include <string.h>
 
 const static char *TAG = "USBDevice";
+
+// ---------------------------------------------------------------------------
+// Vendor IN (device -> host) transmit queue
+// ---------------------------------------------------------------------------
+// tud_vendor_write() must only run from the USB task (TinyUSB is not
+// thread-safe). Producers (e.g. the touch task) enqueue a copy of their message
+// here; the USB task drains it after each tud_task() and does the actual write.
+typedef struct {
+    uint8_t len;
+    uint8_t data[STREAMER_USB_VENDOR_MSG_MAX];
+} vendor_tx_msg_t;
+#define VENDOR_TX_QUEUE_LEN 8
+static QueueHandle_t s_vendor_tx_queue;
 
 // ---------------------------------------------------------------------------
 // UAC 2.0 speaker state
@@ -86,6 +101,8 @@ esp_err_t streamer_usb_init(void) {
     ESP_RETURN_ON_ERROR(usb_new_phy(&phy_conf, &phy_hdl), TAG, "Install USB PHY failed");
 
     s_sample_rate = UAC_SAMPLE_RATE;
+    s_vendor_tx_queue = xQueueCreate(VENDOR_TX_QUEUE_LEN, sizeof(vendor_tx_msg_t));
+    ESP_RETURN_ON_FALSE(s_vendor_tx_queue != NULL, ESP_ERR_NO_MEM, TAG, "Failed to create vendor tx queue");
     s_spk_stream = xStreamBufferCreate(SPK_STREAM_SZ, 1);
     ESP_RETURN_ON_FALSE(s_spk_stream != NULL, ESP_ERR_NO_MEM, TAG, "Failed to create spk stream");
     BaseType_t ok = xTaskCreatePinnedToCore(uac_spk_task, "uac_spk", 4096, NULL, 6,
@@ -95,9 +112,25 @@ esp_err_t streamer_usb_init(void) {
     tusb_init();
     return ESP_OK;
 }
+// Drain the vendor IN queue and write each message to the host. Runs in the USB
+// task so all tud_vendor_* calls stay single-threaded.
+static void vendor_tx_drain(void) {
+    if (!s_vendor_tx_queue) return;
+    vendor_tx_msg_t msg;
+    while (xQueueReceive(s_vendor_tx_queue, &msg, 0) == pdTRUE) {
+        if (!tud_mounted()) continue;  // discard while detached
+        tud_vendor_write(msg.data, msg.len);
+        tud_vendor_write_flush();
+    }
+}
+
 void streamer_usb_task(void) {
     while (true) {
-        tud_task();
+        // Bounded timeout (vs the default UINT32_MAX) so the loop also wakes to
+        // flush queued vendor IN messages (touch reports) within a few ms even
+        // when no USB event is pending.
+        tud_task_ext(5, false);
+        vendor_tx_drain();
     }
 }
 
@@ -106,6 +139,18 @@ bool streamer_usb_mounted(void) { return tud_mounted() && !s_suspended; }
 // Vendor specific class
 uint32_t streamer_usb_vendor_available(void) { return tud_vendor_available(); }
 uint32_t streamer_usb_vendor_read(void *buffer, uint32_t bufsize) { return tud_vendor_read(buffer, bufsize); }
+
+bool streamer_usb_vendor_write(const void *data, uint32_t len) {
+    if (!s_vendor_tx_queue || len == 0 || len > STREAMER_USB_VENDOR_MSG_MAX) {
+        return false;
+    }
+    vendor_tx_msg_t msg;
+    msg.len = (uint8_t)len;
+    memcpy(msg.data, data, len);
+    // Non-blocking: drop the message if the queue is backed up (the host isn't
+    // draining). Touch reports are snapshots, so a dropped one self-heals.
+    return xQueueSend(s_vendor_tx_queue, &msg, 0) == pdTRUE;
+}
 
 // ---------------------------------------------------------------------------
 // UAC 2.0 audio (speaker) public API

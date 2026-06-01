@@ -31,7 +31,18 @@ inline size_t bytes_per_pixel(PixelFormat pf) {
 void display_set_brightness(int value);
 void *display_get_frame_buffer(int fb_index);
 void display_flush(int fb_index);
-std::optional<std::tuple<int, int>> touch_get_point();
+
+// One capacitive-touch contact in native panel coordinates (720x1280 portrait).
+struct TouchPoint {
+    uint8_t id;  // GT911 track id, stable while a finger stays down
+    int x;       // 0..719
+    int y;       // 0..1279
+};
+// Read up to `max_points` current contacts into `points`; returns the count
+// (0..max_points). Must be the only caller of the touch controller — the read
+// clears the controller's data-ready state, so a second concurrent reader would
+// steal samples.
+int touch_read(TouchPoint *points, int max_points);
 
 void *psram_malloc(size_t size);
 void *psram_malloc_dma(size_t size);

@@ -62,7 +62,9 @@ static const tusb_desc_device_t descriptor_dev = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USBD_VID,
     .idProduct = USBD_PID,
-    .bcdDevice = 0x0200,
+    // 0x0300: video + audio + touch reverse channel (see PROTOCOL.md). The PC
+    // tool gates on an exact match of this value (DEVICE_VERSION in main.rs).
+    .bcdDevice = 0x0300,
 
     .iManufacturer = STR_MANUFACTURER,
     .iProduct = STR_PRODUCT,

@@ -5,6 +5,7 @@
 #include "esp_lvgl_port.h"
 #include "nvs.hpp"
 #include "streamer_usb.h"
+#include "touch_input.hpp"
 
 #define GUI_WIDTH        320
 #define GUI_HEIGHT       480
@@ -55,32 +56,15 @@ static void lvgl_setup() {
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_user_data(indev, NULL);
     lv_indev_set_read_cb(indev, [](lv_indev_t *indev, lv_indev_data_t *data){
-        // A press whose sole purpose is to toggle visibility (show/hide) is
-        // "consumed" so that the same press doesn't also click a widget.
-        static bool prev_pressed = false;
-        static bool press_consumed = false;
+        // The touch_input task is the sole reader of the panel; it publishes the
+        // primary contact here and forwards the rest to the PC. The overlay is
+        // toggled by a 3-finger gesture (in touch_input), so this callback only
+        // feeds LVGL while the overlay is actually visible.
+        int px = 0, py = 0;
+        bool pressed = touch_input::primary(&px, &py);
+        bool in_region = pressed && px < (int)GUI_PANEL_W && py < (int)GUI_PANEL_H;
 
-        auto touch = pf_port::touch_get_point();
-        bool pressed = touch.has_value();
-        int px = pressed ? std::get<0>(touch.value()) : 0;
-        int py = pressed ? std::get<1>(touch.value()) : 0;
-        bool in_region = pressed && px < GUI_PANEL_W && py < GUI_PANEL_H;
-
-        if (pressed && !prev_pressed) {
-            if (!gui_visible) {
-                gui_visible = true;
-                press_consumed = true;
-            } else if (!in_region) {
-                gui_visible = false;
-                press_consumed = true;
-            } else {
-                press_consumed = false;
-            }
-        }
-        if (!pressed) press_consumed = false;
-        prev_pressed = pressed;
-
-        if (pressed && !press_consumed && gui_visible && in_region) {
+        if (pressed && gui_visible && in_region) {
             // PPA ANGLE_90 is CCW per-block (camera/LVGL top-left lands at
             // panel bottom-left, etc.). With GUI_SCALE applied:
             //   px = ly * GUI_SCALE
@@ -118,6 +102,7 @@ void streamer_app() {
     }
     pf_port::init(3, pf);
     lvgl_setup();
+    touch_input::start();
     lv_async_call([](){
         screen_manager.push(std::make_unique<PreviewScreen>());
     });

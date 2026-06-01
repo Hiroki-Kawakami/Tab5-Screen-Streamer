@@ -69,13 +69,19 @@ void display_flush(int fb_index) {
     bsp_tab5_display_flush(fb_index);
 }
 
-std::optional<std::tuple<int, int>> touch_get_point() {
-    esp_lcd_touch_point_data_t touch;
-    int touch_num = bsp_tab5_touch_read(&touch, 1);
-    if (touch_num > 0) {
-        return std::make_tuple(touch.x, touch.y);
+int touch_read(TouchPoint *points, int max_points) {
+    if (max_points <= 0) return 0;
+    if (max_points > 5) max_points = 5;
+    esp_lcd_touch_point_data_t raw[5];
+    int n = bsp_tab5_touch_read(raw, (uint8_t)max_points);
+    if (n < 0) n = 0;
+    if (n > max_points) n = max_points;
+    for (int i = 0; i < n; i++) {
+        points[i].id = raw[i].track_id;
+        points[i].x = raw[i].x;
+        points[i].y = raw[i].y;
     }
-    return std::nullopt;
+    return n;
 }
 
 void *psram_malloc(size_t size) {

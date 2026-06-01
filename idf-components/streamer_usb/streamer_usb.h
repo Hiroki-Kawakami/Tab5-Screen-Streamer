@@ -19,6 +19,13 @@ bool streamer_usb_mounted(void);
 uint32_t streamer_usb_vendor_available(void);
 uint32_t streamer_usb_vendor_read(void *buffer, uint32_t bufsize);
 
+// Queue one message (<= STREAMER_USB_VENDOR_MSG_MAX bytes) for the vendor IN
+// endpoint (device -> host). Thread-safe: the message is copied into a queue and
+// actually written from the USB task, so this may be called from any task. The
+// message is dropped (returns false) if it is too large or the queue is full.
+#define STREAMER_USB_VENDOR_MSG_MAX 64
+bool streamer_usb_vendor_write(const void *data, uint32_t len);
+
 // ---- UAC 2.0 audio (speaker) ----
 // PCM received from the host. Fixed format: 48 kHz, stereo, 16-bit LE,
 // interleaved L/R. `pcm`/`len` is one chunk (see streamer_usb_audio_*()).
