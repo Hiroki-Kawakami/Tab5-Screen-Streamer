@@ -92,15 +92,23 @@ extern "C" {
 #define CFG_TUD_MIDI_RX_BUFSIZE     64
 #define CFG_TUD_MIDI_TX_BUFSIZE     64
 
-// Vendor FIFO size of TX and RX
-#define CFG_TUD_VENDOR_RX_BUFSIZE 8192
+// Vendor FIFO size of TX and RX. The RX FIFO must comfortably exceed the EP DMA
+// buffer (below) so the host can keep bursting while the renderer task drains
+// the previous transfer — otherwise the FIFO fills, the next read_xfer can't be
+// prepared at full size, and throughput collapses back to packet-by-packet.
+#define CFG_TUD_VENDOR_RX_BUFSIZE 32768
 #define CFG_TUD_VENDOR_TX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
 
-// Endpoint DMA buffer size. MUST match the bulk max packet size declared in the
-// vendor descriptor (512 at high speed). The default is 64, which leaves the
-// per-endpoint DMA buffer too small for HS bulk packets — the controller then
-// writes past it and corrupts whatever follows in memory.
-#define CFG_TUD_VENDOR_EPSIZE     (TUD_OPT_HIGH_SPEED ? 512 : 64)
+// Endpoint DMA buffer size = how many bytes one OUT transfer can absorb. This is
+// NOT the bulk max packet size (that stays 512, fixed in the vendor descriptor):
+// it just has to be >= and a multiple of the max packet size. DWC2 in DMA mode
+// receives multiple 512-byte packets back-to-back into this buffer in a single
+// transfer (tu_edpt_stream_read_xfer caps the xfer length at ep_bufsize), so a
+// larger value lets the host burst whole microframes instead of stalling on a
+// re-arm after every 512 bytes. 4096 = 8 packets/transfer → ~8x fewer re-arms.
+// (The default 64 was too small even for one packet — the controller would write
+// past it and corrupt adjacent memory; that's why it must stay >= 512.)
+#define CFG_TUD_VENDOR_EPSIZE     (TUD_OPT_HIGH_SPEED ? 4096 : 64)
 
 // DFU macros
 #define CFG_TUD_DFU_XFER_BUFSIZE    CONFIG_TINYUSB_DFU_BUFSIZE
