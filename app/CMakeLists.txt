@@ -10,4 +10,4 @@ file(GLOB_RECURSE APP_SRCS ${APP_GLOB_FLAGS}
 idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS "."
-    REQUIRES bsp ui_framework)
+    REQUIRES bsp ui_framework usb_device)

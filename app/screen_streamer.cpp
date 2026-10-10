@@ -10,10 +10,12 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "screens/home_screen.hpp"
+#include "usb_device.hpp"
 
 static const char *TAG = "screen_streamer";
 
 static lv_display_t *s_display;
+static std::unique_ptr<usb_device::Device> s_usb;
 
 static esp_err_t display_init() {
     lvgl_port_cfg_t config = {
@@ -45,6 +47,18 @@ static esp_err_t display_init() {
     return display_manager.create_display(display_config, &s_display);
 }
 
+static void usb_init() {
+    usb_device::DeviceConfig config;
+    config.info.vendor_id = 0xf055;
+    config.info.product_id = 0x1118;
+    config.info.bcd_device = 0x0300;
+    config.info.manufacturer = "M5Stack";
+    config.info.product = "Tab5 Screen Streamer";
+    s_usb = std::make_unique<usb_device::Device>(std::move(config));
+    esp_err_t err = s_usb->start();
+    if (err != ESP_OK) ESP_LOGW(TAG, "usb device: %s", esp_err_to_name(err));
+}
+
 void app_entry() {
     bsp_config_t bsp_config = {};
     bsp_config.display.pixel_format = BSP_PIXEL_FORMAT_RGB565;
@@ -57,6 +71,7 @@ void app_entry() {
         ESP_LOGE(TAG, "display init: %s", esp_err_to_name(err));
         return;
     }
+    usb_init();
 
     lv_async_call([] {
         screen_manager.load(std::make_shared<HomeScreen>());
