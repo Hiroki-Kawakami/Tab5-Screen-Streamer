@@ -159,7 +159,7 @@ struct PlayOptions {
     encoding: Encoding,
     front: bool,
     blit: bool,
-    rotation: u32,
+    rotation: Option<u32>,
     quality: u32,
 }
 
@@ -289,8 +289,13 @@ fn frame_messages(
     messages
 }
 
-fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
-    let info = session.info()?;
+struct Stream {
+    layout: Layout,
+    source: Source,
+    content: (u32, u32, u32, u32),
+}
+
+fn start_stream(options: &PlayOptions, info: &Info, rotation: u32) -> Result<Stream> {
     let panel = (info.panel_width as u32, info.panel_height as u32);
     let size = options.input.probe()?;
     let layout = if options.blit {
@@ -298,14 +303,9 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
         if max.0 < 16 || max.1 < 16 {
             return Err("the device takes no DRAW_BLIT".into());
         }
-        Layout::blit(size, options.rotation, panel, max)?
+        Layout::blit(size, rotation, panel, max)?
     } else {
-        Layout::direct(
-            size,
-            options.rotation,
-            panel,
-            info.direct_align.max(1) as u32,
-        )
+        Layout::direct(size, rotation, panel, info.direct_align.max(1) as u32)
     };
     let output = match options.encoding {
         Encoding::Jpeg => Output::Jpeg {
@@ -313,7 +313,7 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
         },
         Encoding::Raw | Encoding::Lz4 => Output::Raw(info.pixel_format),
     };
-    let mut source = Source::spawn(
+    let source = Source::spawn(
         &options.input,
         &layout,
         panel.0,
@@ -323,7 +323,7 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     let content = layout.content(panel.0);
     let frame = layout.frame(panel.0);
     println!(
-        "{}x{} as {}x{} -> {}x{} at {},{}, {} {:?} into {}",
+        "{}x{} as {}x{} -> {}x{} at {},{}, rotation {rotation}, {} {:?} {:?} into {}",
         size.0,
         size.1,
         frame.0,
@@ -334,13 +334,51 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
         content.1,
         if options.blit { "BLIT" } else { "DIRECT" },
         options.encoding,
+        info.pixel_format,
         if options.front {
             "FRONT"
         } else {
             "BACK + SWAP"
         }
     );
+    Ok(Stream {
+        layout,
+        source,
+        content,
+    })
+}
 
+/// Applies a device event; true when the stream has to start over.
+fn apply(event: Event, info: &mut Info, swaps: &mut VecDeque<u32>, options: &PlayOptions) -> bool {
+    match event {
+        Event::SwapDone { seq } => {
+            while swaps.front().is_some_and(|&s| s <= seq) {
+                swaps.pop_front();
+            }
+            false
+        }
+        Event::Orientation(orientation) => {
+            println!("orientation {orientation}");
+            info.orientation = orientation as u8;
+            options.rotation.is_none()
+        }
+        Event::Format { format, epoch } => {
+            println!("pixel format {format:?}, epoch {epoch}");
+            info.pixel_format = format;
+            info.epoch = epoch;
+            true
+        }
+        event => {
+            report(&event);
+            false
+        }
+    }
+}
+
+fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
+    let mut info = session.info()?;
+    let rotation_of = |info: &Info| options.rotation.unwrap_or(info.orientation as u32);
+    let mut stream = start_stream(&options, &info, rotation_of(&info))?;
     let limit = info.max_message[protocol::VIDEO] as usize;
     let target = if options.front {
         Target::Front
@@ -356,32 +394,27 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     let mut stats_frames = 0u32;
     let mut stats_bytes = 0usize;
 
-    while let Some(frame) = source.next_frame()? {
-        if !options.front {
-            loop {
-                let wait = if swaps.len() >= window {
-                    TIMEOUT
-                } else {
-                    Duration::ZERO
-                };
-                match session.events.recv_timeout(wait) {
-                    Ok(Event::SwapDone { seq }) => {
-                        while swaps.front().is_some_and(|&s| s <= seq) {
-                            swaps.pop_front();
-                        }
-                    }
-                    Ok(event) => report(&event),
-                    Err(RecvTimeoutError::Timeout) if swaps.len() >= window => {
-                        return Err("no SWAP_DONE".into())
-                    }
-                    Err(RecvTimeoutError::Timeout) => break,
-                    Err(RecvTimeoutError::Disconnected) => return Err("control in closed".into()),
+    while let Some(frame) = stream.source.next_frame()? {
+        let mut restart = false;
+        loop {
+            let wait = if !options.front && swaps.len() >= window {
+                TIMEOUT
+            } else {
+                Duration::ZERO
+            };
+            match session.events.recv_timeout(wait) {
+                Ok(event) => restart |= apply(event, &mut info, &mut swaps, &options),
+                Err(RecvTimeoutError::Timeout) if wait > Duration::ZERO => {
+                    return Err("no SWAP_DONE".into())
                 }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return Err("control in closed".into()),
             }
-        } else {
-            while let Ok(event) = session.events.try_recv() {
-                report(&event);
-            }
+        }
+        if restart {
+            stream = start_stream(&options, &info, rotation_of(&info))?;
+            first = true;
+            continue;
         }
         let now = Instant::now();
         if next_frame > now {
@@ -391,10 +424,12 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
 
         let mut batch = Batch::new(limit);
         if !options.front || first {
-            letterbox(session, &mut batch, target, &info, content)?;
+            letterbox(session, &mut batch, target, &info, stream.content)?;
         }
         first = false;
-        for (kind, payload) in frame_messages(&layout, options.encoding, target, &info, &frame) {
+        for (kind, payload) in
+            frame_messages(&stream.layout, options.encoding, target, &info, &frame)
+        {
             let seq = session.next_video_seq();
             batch.push(protocol::message(kind, seq, info.epoch, &payload))?;
         }
@@ -455,7 +490,7 @@ commands:
     --encoding jpeg|raw|lz4  default jpeg
     --front                  draw into FRONT without swapping
     --blit                   send the source as is; the device rotates and scales
-    --rotate <0-3>           counter-clockwise quarter turns
+    --rotate <0-3>|auto      counter-clockwise quarter turns, or the device's
     --quality <2-31>         ffmpeg mjpeg -q:v, default 4
     --format <fmt>           ffmpeg input format, e.g. lavfi
     --loop                   repeat the input
@@ -475,7 +510,7 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
         encoding: Encoding::Jpeg,
         front: false,
         blit: false,
-        rotation: 0,
+        rotation: Some(0),
         quality: 4,
     };
     let mut args = args.iter();
@@ -491,7 +526,12 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
             }
             "--front" => options.front = true,
             "--blit" => options.blit = true,
-            "--rotate" => options.rotation = args.next()?.parse().ok().filter(|r| *r < 4)?,
+            "--rotate" => {
+                options.rotation = match args.next()?.as_str() {
+                    "auto" => None,
+                    value => Some(value.parse().ok().filter(|r| *r < 4)?),
+                }
+            }
             "--quality" => options.quality = args.next()?.parse().ok()?,
             "--format" => options.input.format = Some(args.next()?.clone()),
             "--loop" => options.input.looped = true,

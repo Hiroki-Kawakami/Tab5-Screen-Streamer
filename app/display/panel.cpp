@@ -26,6 +26,9 @@ static constexpr size_t kLz4Window = 65536;
 static constexpr int kStrips = 2;
 
 static lv_display_t *s_ui;
+static SemaphoreHandle_t s_lock;
+static PanelFormatListener s_format_listener;
+static void *s_format_listener_arg;
 static uint8_t *s_strips[kStrips];
 static size_t s_strip_bytes;
 static jpeg_ppa_pipeline_handle_t s_pipeline;
@@ -79,6 +82,8 @@ static void wait_strip(int index) {
 
 esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes) {
     s_ui = ui;
+    s_lock = xSemaphoreCreateMutex();
+    if (!s_lock) return ESP_ERR_NO_MEM;
     s_strip_bytes = sram_bytes / kStrips;
     for (int i = 0; i < kStrips; i++) {
         s_strips[i] = sram + i * s_strip_bytes;
@@ -114,15 +119,7 @@ esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes) {
     return err;
 }
 
-void panel_acquire() {
-    lv_lock();
-    display_manager.set_visible(s_ui, false);
-    lv_unlock();
-    bsp_display_wait_draw();
-    // A partial LVGL display always presents framebuffer 0.
-    s_front = 0;
-    s_acquired = true;
-
+static void create_pipeline() {
     jpeg_ppa_pipeline_cfg_t config = {};
     config.strip_bufs[0] = s_strips[0];
     config.strip_bufs[1] = s_strips[1];
@@ -138,18 +135,81 @@ void panel_acquire() {
     }
 }
 
+static void delete_pipeline() {
+    if (!s_pipeline) return;
+    jpeg_ppa_pipeline_del(s_pipeline);
+    s_pipeline = nullptr;
+}
+
+static void set_ui_visible(bool visible) {
+    lv_lock();
+    display_manager.set_visible(s_ui, visible);
+    lv_unlock();
+    if (!visible) bsp_display_wait_draw();
+}
+
+void panel_lock() {
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+}
+
+void panel_unlock() {
+    xSemaphoreGive(s_lock);
+}
+
+void panel_acquire() {
+    set_ui_visible(false);
+    // A partial LVGL display always presents framebuffer 0.
+    s_front = 0;
+    s_acquired = true;
+    create_pipeline();
+}
+
 void panel_release() {
-    if (s_pipeline) {
-        jpeg_ppa_pipeline_del(s_pipeline);
-        s_pipeline = nullptr;
-    }
+    delete_pipeline();
     // The UI's partial blits land in the framebuffer last presented, then
     // present 0; anything else on screen would hide them.
     display_manager.present(0);
     s_acquired = false;
+    set_ui_visible(true);
+}
+
+esp_err_t panel_set_format(bsp_pixel_format_t format) {
+    panel_lock();
+    if (format == s_format) {
+        panel_unlock();
+        return ESP_OK;
+    }
+    if (s_acquired) {
+        delete_pipeline();
+    } else {
+        set_ui_visible(false);
+    }
+    esp_err_t err = bsp_display_reconfigure(format, 0);
     lv_lock();
-    display_manager.set_visible(s_ui, true);
+    display_manager.set_color_format(s_ui);
     lv_unlock();
+    s_format = bsp_display_get_pixel_format();
+    s_stride = s_size.width * bsp_pixel_format_bytes(s_format);
+    if (s_acquired) {
+        s_front = 0;
+        create_pipeline();
+    } else {
+        set_ui_visible(true);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reconfigure: %s", esp_err_to_name(err));
+    } else if (s_format_listener) {
+        s_format_listener(s_format, s_format_listener_arg);
+    }
+    panel_unlock();
+    return err;
+}
+
+void panel_set_format_listener(PanelFormatListener listener, void *arg) {
+    panel_lock();
+    s_format_listener = listener;
+    s_format_listener_arg = arg;
+    panel_unlock();
 }
 
 bool panel_acquired() {

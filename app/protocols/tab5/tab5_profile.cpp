@@ -32,6 +32,9 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
 Tab5Profile::Tab5Profile() : video_(std::make_unique<Tab5Video>(events_)) {}
 
 Tab5Profile::~Tab5Profile() {
+    bsp_imu_set_orientation_cb(nullptr, nullptr);
+    bsp_imu_set_orientation_enabled(false);
+    panel_set_format_listener(nullptr, nullptr);
     video_.reset();
     heap_caps_free(control_transfer_.buffer);
     for (Slot *slot : slots_) {
@@ -92,9 +95,34 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     video.unconfigured = [this] { video_unconfigured(); };
     video_vendor_ = std::make_shared<usb_device::Vendor>(std::move(video));
 
+    const bsp_imu_orientation_t orientation = bsp_imu_get_orientation();
+    if (orientation >= BSP_IMU_ORIENTATION_ROTATION_0 &&
+        orientation <= BSP_IMU_ORIENTATION_ROTATION_270) {
+        orientation_ = orientation;
+    }
+    bsp_imu_set_orientation_cb(orientation_changed, this);
+    err = bsp_imu_set_orientation_enabled(true);
+    if (err != ESP_OK) ESP_LOGW(TAG, "orientation tracking: %s", esp_err_to_name(err));
+    panel_set_format_listener(format_changed, this);
+
     err = device.add(control_);
     if (err == ESP_OK) err = device.add(video_vendor_);
     return err;
+}
+
+void Tab5Profile::orientation_changed(bsp_imu_orientation_t orientation, void *arg) {
+    auto *self = static_cast<Tab5Profile *>(arg);
+    if (orientation < BSP_IMU_ORIENTATION_ROTATION_0 ||
+        orientation > BSP_IMU_ORIENTATION_ROTATION_270 || orientation == self->orientation_) {
+        return;
+    }
+    self->orientation_ = orientation;
+    const tab5::ByteEvent event = {static_cast<uint8_t>(orientation), {}};
+    self->events_.send(tab5::Type::Orientation, 0, &event, sizeof(event));
+}
+
+void Tab5Profile::format_changed(bsp_pixel_format_t format, void *arg) {
+    static_cast<Tab5Profile *>(arg)->video_->format_changed(format);
 }
 
 void Tab5Profile::control_configured() {
@@ -142,9 +170,8 @@ void Tab5Profile::send_info(uint32_t seq) {
     info.protocol_version = tab5::kProtocolVersion;
     info.panel_width = size.width;
     info.panel_height = size.height;
-    info.pixel_format = static_cast<uint8_t>(panel_format() == BSP_PIXEL_FORMAT_RGB888
-                                                 ? tab5::PixelFormat::Rgb888
-                                                 : tab5::PixelFormat::Rgb565);
+    info.pixel_format = static_cast<uint8_t>(tab5_pixel_format(panel_format()));
+    info.orientation = orientation_;
     info.framebuffers = panel_framebuffers();
     info.swap_window = Tab5Video::kSwapWindow;
     info.direct_align = Tab5Video::kDirectAlign;

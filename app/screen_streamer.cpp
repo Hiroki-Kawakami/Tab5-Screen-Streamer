@@ -65,6 +65,19 @@ static bool harness_mode(int argc, const char *const *argv, void *) {
     lv_async_call([screen] { screen_manager.load(screen); });
     return true;
 }
+
+static bool harness_format(int argc, const char *const *argv, void *) {
+    if (argc != 2) return false;
+    bsp_pixel_format_t format;
+    if (strcmp(argv[1], "rgb565") == 0) {
+        format = BSP_PIXEL_FORMAT_RGB565;
+    } else if (strcmp(argv[1], "rgb888") == 0) {
+        format = BSP_PIXEL_FORMAT_RGB888;
+    } else {
+        return false;
+    }
+    return panel_set_format(format) == ESP_OK;
+}
 #endif
 
 void app_entry() {
@@ -86,6 +99,7 @@ void app_entry() {
     if (err != ESP_OK) ESP_LOGE(TAG, "usb init: %s", esp_err_to_name(err));
 #ifdef CONFIG_HARNESS
     harness_register("mode", harness_mode, nullptr);
+    harness_register("format", harness_format, nullptr);
 #endif
 
     lv_async_call([] {

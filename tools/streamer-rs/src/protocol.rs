@@ -7,6 +7,8 @@ pub const GET_INFO: u8 = 0x01;
 pub const INFO: u8 = 0x81;
 pub const SWAP_DONE: u8 = 0x82;
 pub const ERROR: u8 = 0x83;
+pub const ORIENTATION: u8 = 0x84;
+pub const FORMAT: u8 = 0x85;
 pub const DRAW_DIRECT: u8 = 0x10;
 pub const DRAW_BLIT: u8 = 0x11;
 pub const FILL: u8 = 0x12;
@@ -73,6 +75,8 @@ pub enum Event {
     Info(Info),
     SwapDone { seq: u32 },
     Error { seq: u32, channel: u8, code: u8 },
+    Orientation(u32),
+    Format { format: PixelFormat, epoch: u32 },
     Other,
 }
 
@@ -149,15 +153,19 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
 }
 
+fn pixel_format(value: u8) -> Option<PixelFormat> {
+    match value {
+        1 => Some(PixelFormat::Rgb565),
+        2 => Some(PixelFormat::Rgb888),
+        _ => None,
+    }
+}
+
 fn parse_info(p: &[u8]) -> Option<Info> {
     if p.len() < 72 {
         return None;
     }
-    let pixel_format = match p[6] {
-        1 => PixelFormat::Rgb565,
-        2 => PixelFormat::Rgb888,
-        _ => return None,
-    };
+    let pixel_format = pixel_format(p[6])?;
     Some(Info {
         protocol_version: u16_at(p, 0),
         panel_width: u16_at(p, 2),
@@ -184,6 +192,7 @@ pub fn parse_events(data: &[u8]) -> Vec<Event> {
     while pos + HEADER_BYTES <= data.len() {
         let kind = data[pos + 2];
         let seq = u32_at(data, pos + 8);
+        let epoch = u32_at(data, pos + 12);
         let length = u32_at(data, pos + 4) as usize;
         if u16_at(data, pos) != MAGIC || pos + HEADER_BYTES + length > data.len() {
             break;
@@ -200,6 +209,11 @@ pub fn parse_events(data: &[u8]) -> Vec<Event> {
                 seq,
                 channel: payload[0],
                 code: payload[1],
+            },
+            ORIENTATION if !payload.is_empty() => Event::Orientation(payload[0] as u32),
+            FORMAT if !payload.is_empty() => match pixel_format(payload[0]) {
+                Some(format) => Event::Format { format, epoch },
+                None => continue,
             },
             _ => Event::Other,
         };

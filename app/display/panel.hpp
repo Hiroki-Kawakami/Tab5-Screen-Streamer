@@ -23,8 +23,17 @@ bsp_size_t panel_size();
 bsp_pixel_format_t panel_format();
 int panel_framebuffers();
 
-/* The rest runs on one task; drawing and swapping only between acquire and
- * release. */
+/* Rebuilds the panel in `format`, waiting for panel_unlock(); from any task
+ * but the LVGL one. Every framebuffer is undefined afterwards. The listener
+ * runs inside, before drawing resumes. */
+using PanelFormatListener = void (*)(bsp_pixel_format_t format, void *arg);
+esp_err_t panel_set_format(bsp_pixel_format_t format);
+void panel_set_format_listener(PanelFormatListener listener, void *arg);
+
+/* The rest runs on one task, holding the lock; drawing and swapping only
+ * between acquire and release. */
+void panel_lock();
+void panel_unlock();
 void panel_acquire();
 void panel_release();
 bool panel_acquired();

@@ -19,6 +19,8 @@ enum class Type : uint8_t {
     Info = 0x81,
     SwapDone = 0x82,
     Error = 0x83,
+    Orientation = 0x84,
+    Format = 0x85,
     DrawDirect = 0x10,
     DrawBlit = 0x11,
     Fill = 0x12,
@@ -76,6 +78,11 @@ struct __attribute__((packed)) ErrorEvent {
     uint8_t channel;
     uint8_t code;
     uint16_t reserved;
+};
+
+struct __attribute__((packed)) ByteEvent {
+    uint8_t value;
+    uint8_t reserved[3];
 };
 
 struct __attribute__((packed)) SwapDoneEvent {

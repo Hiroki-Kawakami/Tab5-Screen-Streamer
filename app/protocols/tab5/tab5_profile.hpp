@@ -6,7 +6,9 @@
  */
 
 #pragma once
+#include <atomic>
 #include <memory>
+#include "bsp.h"
 #include "freertos/FreeRTOS.h"
 #include "tab5_events.hpp"
 #include "tab5_video.hpp"
@@ -34,6 +36,8 @@ private:
     void submit(Slot *slot);
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
     void send_info(uint32_t seq);
+    static void orientation_changed(bsp_imu_orientation_t orientation, void *arg);
+    static void format_changed(bsp_pixel_format_t format, void *arg);
 
     Tab5Events events_;
     std::unique_ptr<Tab5Video> video_;
@@ -43,4 +47,5 @@ private:
     Slot *slots_[kSlots] = {};
     portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
     bool video_active_ = false;
+    std::atomic<uint8_t> orientation_ = 0;
 };

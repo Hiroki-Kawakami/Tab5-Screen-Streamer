@@ -62,7 +62,24 @@ void Tab5Video::task(void *arg) {
     vTaskDelete(nullptr);
 }
 
+tab5::PixelFormat tab5_pixel_format(bsp_pixel_format_t format) {
+    return format == BSP_PIXEL_FORMAT_RGB888 ? tab5::PixelFormat::Rgb888
+                                             : tab5::PixelFormat::Rgb565;
+}
+
+void Tab5Video::format_changed(bsp_pixel_format_t format) {
+    const uint32_t epoch = ++epoch_;
+    const tab5::ByteEvent event = {static_cast<uint8_t>(tab5_pixel_format(format)), {}};
+    events_.send(tab5::Type::Format, 0, &event, sizeof(event), epoch);
+}
+
 void Tab5Video::run(const Item &item) {
+    panel_lock();
+    execute_item(item);
+    panel_unlock();
+}
+
+void Tab5Video::execute_item(const Item &item) {
     if (item.op != Op::Transfer) {
         if (panel_acquired()) {
             panel_release();
