@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "screens/home_screen.hpp"
 #include "usb_device.hpp"
+#include "usb_test.hpp"
 
 static const char *TAG = "screen_streamer";
 
@@ -54,7 +55,9 @@ static void usb_init() {
     config.info.bcd_device = 0x0300;
     config.info.manufacturer = "M5Stack";
     config.info.product = "Tab5 Screen Streamer";
+    config.info.ms_os_20 = true;
     s_usb = std::make_unique<usb_device::Device>(std::move(config));
+    s_usb->add(usb_test_function());
     esp_err_t err = s_usb->start();
     if (err != ESP_OK) ESP_LOGW(TAG, "usb device: %s", esp_err_to_name(err));
 }

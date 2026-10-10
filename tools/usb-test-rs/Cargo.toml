@@ -1,0 +1,8 @@
+[package]
+name = "usb-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nusb = "0.2.7"
