@@ -9,6 +9,7 @@
 #include <mutex>
 #include "esp_log.h"
 #include "harness.h"
+#include "sdkconfig.h"
 #include "stream/legacy_stream_profile.hpp"
 #include "usb_profile.hpp"
 #include "usb_test_profile.hpp"
