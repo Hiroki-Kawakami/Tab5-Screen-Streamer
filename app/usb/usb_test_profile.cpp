@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
-#include "usb_test.hpp"
+#include "usb_test_profile.hpp"
 #include <algorithm>
 #include <cstring>
 #include "esp_heap_caps.h"
@@ -164,14 +164,28 @@ static bool control(const usb_device::ControlRequest &request, uint8_t *data, si
     }
 }
 
-std::shared_ptr<usb_device::Function> usb_test_function() {
+UsbTestProfile::~UsbTestProfile() {
+    s_vendor.reset();
+}
+
+usb_device::DeviceInfo UsbTestProfile::info() const {
+    usb_device::DeviceInfo info;
+    info.vendor_id = 0xf055;
+    info.product_id = 0x0000;
+    info.bcd_device = 0x0100;
+    info.manufacturer = "M5Stack";
+    info.product = "Tab5 USB Test";
+    info.ms_os_20 = true;
+    return info;
+}
+
+esp_err_t UsbTestProfile::add_functions(usb_device::Device &device) {
     usb_device::Vendor::Config config;
     config.name = "Tab5 USB Test";
     config.winusb = true;
-    config.device_interface_guid = "{3BD7BBF0-6EC5-41B0-A15F-698A5490FA1E}";
     config.configured = [] { start(kModeLoopback, kDefaultTransferKb); };
     config.unconfigured = [] { s_generation++; };
     config.control = control;
     s_vendor = std::make_shared<usb_device::Vendor>(std::move(config));
-    return s_vendor;
+    return device.add(s_vendor);
 }

@@ -7,7 +7,7 @@ use nusb::transfer::{
 use nusb::{Endpoint, Interface, MaybeFuture};
 
 const VENDOR_ID: u16 = 0xf055;
-const PRODUCT_ID: u16 = 0x1118;
+const PRODUCT_ID: u16 = 0x0000;
 const EP_OUT: u8 = 0x01;
 const EP_IN: u8 = 0x81;
 
