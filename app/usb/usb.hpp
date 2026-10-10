@@ -7,10 +7,12 @@
 #include "esp_err.h"
 
 enum class UsbProfileId {
-    LegacyStream,
+    Tab5,
     Test,
 };
 
-void usb_init();
-/* Re-enumerates as the given profile; blocks for the disconnect. */
-esp_err_t usb_switch_profile(UsbProfileId id);
+esp_err_t usb_init();
+/* Both return at once; the switch runs on the USB task, stopping the current
+ * device first. After usb_stop() the PHY is off. */
+void usb_start(UsbProfileId id);
+void usb_stop();

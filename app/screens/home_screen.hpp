@@ -4,9 +4,9 @@
  */
 
 #pragma once
-#include "screen_manager.hpp"
+#include "widgets.hpp"
 
-class HomeScreen : public Screen {
+class HomeScreen : public NavigationScreen {
 public:
     void build() override;
 };

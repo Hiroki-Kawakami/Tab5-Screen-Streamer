@@ -4,62 +4,77 @@
  */
 
 #include "usb.hpp"
-#include <cstring>
 #include <memory>
-#include <mutex>
 #include "esp_log.h"
-#include "harness.h"
-#include "sdkconfig.h"
-#include "stream/legacy_stream_profile.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "protocols/tab5/tab5_profile.hpp"
 #include "usb_profile.hpp"
 #include "usb_test_profile.hpp"
 
 static const char *TAG = "usb";
 
-static std::mutex s_lock;
+static constexpr int kTaskPriority = 5;
+static constexpr uint32_t kTaskStackBytes = 4096;
+static constexpr int kQueueLength = 4;
+
+struct Request {
+    bool start;
+    UsbProfileId id;
+};
+
+static QueueHandle_t s_requests;
 static std::unique_ptr<usb_device::Device> s_device;
 static std::unique_ptr<UsbProfile> s_profile;
 
 static std::unique_ptr<UsbProfile> make_profile(UsbProfileId id) {
     switch (id) {
-        case UsbProfileId::LegacyStream: return std::make_unique<LegacyStreamProfile>();
-        case UsbProfileId::Test:         return std::make_unique<UsbTestProfile>();
+        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>();
+        case UsbProfileId::Test: return std::make_unique<UsbTestProfile>();
     }
     return nullptr;
 }
 
-esp_err_t usb_switch_profile(UsbProfileId id) {
-    std::lock_guard<std::mutex> guard(s_lock);
-    s_device.reset();
+static void start(UsbProfileId id) {
     s_profile = make_profile(id);
-
     usb_device::DeviceConfig config;
     config.info = s_profile->info();
     s_device = std::make_unique<usb_device::Device>(std::move(config));
     esp_err_t err = s_profile->add_functions(*s_device);
     if (err == ESP_OK) err = s_device->start();
-    if (err != ESP_OK) ESP_LOGW(TAG, "usb device: %s", esp_err_to_name(err));
-    return err;
-}
-
-#ifdef CONFIG_HARNESS
-static bool harness_command(int argc, const char *const *argv, void *) {
-    if (argc != 2) return false;
-    UsbProfileId id;
-    if (strcmp(argv[1], "legacy") == 0) {
-        id = UsbProfileId::LegacyStream;
-    } else if (strcmp(argv[1], "test") == 0) {
-        id = UsbProfileId::Test;
-    } else {
-        return false;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "usb device: %s", esp_err_to_name(err));
+        s_device.reset();
+        s_profile.reset();
     }
-    return usb_switch_profile(id) == ESP_OK;
 }
-#endif
 
-void usb_init() {
-#ifdef CONFIG_HARNESS
-    harness_register("usb-profile", harness_command, nullptr);
-#endif
-    usb_switch_profile(UsbProfileId::LegacyStream);
+static void usb_task(void *) {
+    Request request;
+    while (true) {
+        xQueueReceive(s_requests, &request, portMAX_DELAY);
+        s_device.reset();
+        s_profile.reset();
+        if (request.start) start(request.id);
+    }
+}
+
+esp_err_t usb_init() {
+    s_requests = xQueueCreate(kQueueLength, sizeof(Request));
+    if (!s_requests) return ESP_ERR_NO_MEM;
+    if (xTaskCreate(usb_task, "usb", kTaskStackBytes, nullptr, kTaskPriority, nullptr) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+void usb_start(UsbProfileId id) {
+    const Request request = {true, id};
+    xQueueSend(s_requests, &request, portMAX_DELAY);
+}
+
+void usb_stop() {
+    const Request request = {false, UsbProfileId::Tab5};
+    xQueueSend(s_requests, &request, portMAX_DELAY);
 }

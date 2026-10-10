@@ -1,0 +1,64 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Hiroki Kawakami
+ */
+
+#pragma once
+#include <cstdint>
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "protocol.hpp"
+
+class Tab5Events;
+
+/* Runs video endpoint transfers in order on its own task. The panel is taken
+ * at the first message and given back by end(). */
+class Tab5Video {
+public:
+    using Done = void (*)(void *context);
+
+    static constexpr int kSwapWindow = 2;
+    static constexpr int kDirectAlign = 16;
+
+    explicit Tab5Video(Tab5Events &events) : events_(events) {}
+    ~Tab5Video();
+    esp_err_t start();
+    uint32_t epoch() const { return epoch_; }
+
+    /* `done` runs on the video task once the data is no longer read. */
+    void submit(const uint8_t *data, uint32_t length, Done done, void *context);
+    void end();
+
+private:
+    enum class Op : uint8_t { Transfer, End, Quit };
+
+    struct Item {
+        Op op;
+        const uint8_t *data;
+        uint32_t length;
+        Done done;
+        void *context;
+    };
+
+    static void task(void *arg);
+    void run(const Item &item);
+    void execute(const tab5::MsgHeader &header, const uint8_t *payload);
+    void draw_direct(const tab5::MsgHeader &header, const uint8_t *payload);
+    void fill(const tab5::MsgHeader &header, const uint8_t *payload);
+    void swap(const tab5::MsgHeader &header);
+    void count(uint32_t bytes);
+
+    Tab5Events &events_;
+    QueueHandle_t queue_ = nullptr;
+    SemaphoreHandle_t exited_ = nullptr;
+    uint32_t epoch_ = 0;
+
+    int64_t stats_start_us_ = 0;
+    uint64_t stats_bytes_ = 0;
+    uint32_t stats_swaps_ = 0;
+    uint32_t stats_jpegs_ = 0;
+    int64_t stats_jpeg_us_ = 0;
+    int64_t stats_busy_us_ = 0;
+};
