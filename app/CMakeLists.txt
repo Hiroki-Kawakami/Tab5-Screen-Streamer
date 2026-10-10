@@ -10,4 +10,4 @@ file(GLOB_RECURSE APP_SRCS ${APP_GLOB_FLAGS}
 idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS "."
-    REQUIRES bsp esp_timer harness jpeg_decode_enhanced ui_framework usb_device)
+    REQUIRES bsp esp_mm esp_timer harness jpeg_decode_enhanced lz4_block ui_framework usb_device)

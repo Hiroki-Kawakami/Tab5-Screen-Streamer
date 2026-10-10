@@ -1,4 +1,5 @@
 mod link;
+mod lz4;
 mod protocol;
 mod source;
 mod usbip;
@@ -192,7 +193,7 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
         Encoding::Jpeg => Output::Jpeg {
             quality: options.quality,
         },
-        Encoding::Raw => Output::Raw(info.pixel_format),
+        Encoding::Raw | Encoding::Lz4 => Output::Raw(info.pixel_format),
     };
     let mut source = Source::spawn(
         &options.input,
@@ -225,7 +226,11 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     };
     let frame_interval = Duration::from_secs_f64(1.0 / info.max_fps.max(1) as f64);
     let row_bytes = panel.0 as usize * info.pixel_format.bytes();
-    let band_rows = ((limit - protocol::HEADER_BYTES - 6) / row_bytes) as u32 / align * align;
+    let room = limit - protocol::HEADER_BYTES - 6;
+    let mut band_rows = (room / row_bytes) as u32 / align * align;
+    while lz4::max_compressed(band_rows as usize * row_bytes) > room {
+        band_rows -= align;
+    }
     let mut swaps: VecDeque<u32> = VecDeque::new();
     let mut next_frame = Instant::now();
     let mut first = true;
@@ -298,14 +303,22 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
                     &payload,
                 ))?;
             }
-            Encoding::Raw => {
+            encoding => {
                 let mut row = 0;
                 while row < geometry.height {
                     let rows = band_rows.min(geometry.height - row);
-                    let data = &frame[row as usize * row_bytes..(row + rows) as usize * row_bytes];
+                    let pixels =
+                        &frame[row as usize * row_bytes..(row + rows) as usize * row_bytes];
+                    let compressed;
+                    let data = if encoding == Encoding::Lz4 {
+                        compressed = lz4::compress(pixels);
+                        &compressed[..]
+                    } else {
+                        pixels
+                    };
                     let payload = protocol::draw_direct(
                         target,
-                        Encoding::Raw,
+                        encoding,
                         (geometry.y + row) as u16,
                         rows as u16,
                         data,
@@ -375,7 +388,7 @@ commands:
   info                       print the device's INFO
   fill <rrggbb>              fill the panel with a color
   play [options] <input>     stream a video through ffmpeg
-    --encoding jpeg|raw      default jpeg
+    --encoding jpeg|raw|lz4  default jpeg
     --front                  draw into FRONT without swapping
     --rotate <0-3>           counter-clockwise quarter turns
     --quality <2-31>         ffmpeg mjpeg -q:v, default 4
@@ -406,6 +419,7 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
                 options.encoding = match args.next()?.as_str() {
                     "jpeg" => Encoding::Jpeg,
                     "raw" => Encoding::Raw,
+                    "lz4" => Encoding::Lz4,
                     _ => return None,
                 }
             }

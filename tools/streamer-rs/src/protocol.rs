@@ -23,6 +23,7 @@ pub enum Target {
 pub enum Encoding {
     Jpeg = 0,
     Raw = 1,
+    Lz4 = 2,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

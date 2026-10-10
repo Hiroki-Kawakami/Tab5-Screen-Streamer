@@ -9,6 +9,10 @@
 #include "esp_log.h"
 #include "jpeg_decode_enhanced.h"
 #include "lvgl.hpp"
+#include "lz4_block.h"
+#ifdef ESP_PLATFORM
+#include "esp_cache.h"
+#endif
 
 static const char *TAG = "panel";
 
@@ -160,6 +164,24 @@ esp_err_t panel_write_rows(PanelBuffer buffer, int y, int height, const uint8_t 
     config.scale_y = 1.0f;
     config.mode = PPA_TRANS_MODE_BLOCKING;
     return ppa_do_scale_rotate_mirror(s_copy, &config);
+}
+
+esp_err_t panel_write_lz4_rows(PanelBuffer buffer, int y, int height, const uint8_t *lz4,
+                               uint32_t bytes) {
+    if (!rows_valid(y, height) || y % kRowAlign || height % kRowAlign) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t *dst = framebuffer(buffer) + y * s_stride;
+    const size_t size = height * s_stride;
+    const ptrdiff_t written = lz4_block_decompress(lz4, bytes, dst, size);
+#ifdef ESP_PLATFORM
+    esp_cache_msync(dst, size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+#endif
+    if (written != (ptrdiff_t)size) {
+        ESP_LOGW(TAG, "lz4 at %d: %d of %u bytes", y, (int)written, (unsigned)size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return ESP_OK;
 }
 
 esp_err_t panel_decode_rows(PanelBuffer buffer, int y, int height, const uint8_t *jpeg,

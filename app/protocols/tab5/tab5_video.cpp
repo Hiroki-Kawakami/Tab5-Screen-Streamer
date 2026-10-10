@@ -165,6 +165,12 @@ void Tab5Video::draw_direct(const tab5::MsgHeader &header, const uint8_t *payloa
             }
             panel_write_rows(buffer, draw.y, draw.height, data);
             return;
+        case tab5::Encoding::Lz4:
+            if (header.epoch != epoch_) return;
+            if (panel_write_lz4_rows(buffer, draw.y, draw.height, data, bytes) != ESP_OK) {
+                fail(ErrorCode::DecodeFailed);
+            }
+            return;
         default:
             return fail(ErrorCode::Unsupported);
     }

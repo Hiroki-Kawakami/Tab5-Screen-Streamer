@@ -149,7 +149,8 @@ void Tab5Profile::send_info(uint32_t seq) {
     info.swap_window = Tab5Video::kSwapWindow;
     info.direct_align = Tab5Video::kDirectAlign;
     info.encodings = 1u << static_cast<int>(tab5::Encoding::Jpeg) |
-                     1u << static_cast<int>(tab5::Encoding::Raw);
+                     1u << static_cast<int>(tab5::Encoding::Raw) |
+                     1u << static_cast<int>(tab5::Encoding::Lz4);
     info.max_message[static_cast<int>(tab5::Channel::Control)] = kControlBytes;
     info.max_message[static_cast<int>(tab5::Channel::Video)] = kSlotBytes;
     info.epoch = video_->epoch();

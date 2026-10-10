@@ -30,6 +30,9 @@ void panel_swap();
 esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888);
 /* Full-width rows in the panel's format. */
 esp_err_t panel_write_rows(PanelBuffer buffer, int y, int height, const uint8_t *pixels);
+/* The same rows as one LZ4 block; `y` and `height` are multiples of 16. */
+esp_err_t panel_write_lz4_rows(PanelBuffer buffer, int y, int height, const uint8_t *lz4,
+                               uint32_t bytes);
 /* A JPEG of exactly panel width by `height`; `y` and `height` are multiples
  * of 16. */
 esp_err_t panel_decode_rows(PanelBuffer buffer, int y, int height, const uint8_t *jpeg,
