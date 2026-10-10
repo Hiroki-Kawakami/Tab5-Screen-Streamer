@@ -20,6 +20,13 @@
 
 static const char *TAG = "screen_streamer";
 
+static constexpr size_t kSharedSramBytes = 245760;
+
+// The main display's draw buffers, which the panel takes as JPEG and LZ4
+// strip buffers while the display is hidden. Internal RAM: .bss stays out of
+// PSRAM.
+alignas(64) static uint8_t s_shared_sram[kSharedSramBytes];
+
 static lv_display_t *s_display;
 
 static esp_err_t display_init() {
@@ -34,21 +41,11 @@ static esp_err_t display_init() {
     esp_err_t err = lvgl_port_init(&config);
     if (err != ESP_OK) return err;
 
-    const bsp_size_t panel = bsp_display_get_size();
-    const size_t long_edge = panel.width > panel.height ? panel.width : panel.height;
-    const size_t buffer_size = long_edge * 24 *
-        bsp_pixel_format_bytes(bsp_display_get_pixel_format());
-
     DisplayManagerConfig display_config = {};
     display_config.render_mode = DisplayRenderMode::Partial;
-    display_config.buffer.buffer_size = buffer_size;
-    for (auto &buffer : display_config.buffer.buffers) {
-        buffer = heap_caps_aligned_alloc(64, buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        if (!buffer) {
-            ESP_LOGE(TAG, "no internal memory for a %u byte draw buffer", (unsigned)buffer_size);
-            return ESP_ERR_NO_MEM;
-        }
-    }
+    display_config.buffer.buffers[0] = s_shared_sram;
+    display_config.buffer.buffers[1] = s_shared_sram + kSharedSramBytes / 2;
+    display_config.buffer.buffer_size = kSharedSramBytes / 2;
     return display_manager.create_display(display_config, &s_display);
 }
 
@@ -83,7 +80,7 @@ void app_entry() {
         ESP_LOGE(TAG, "display init: %s", esp_err_to_name(err));
         return;
     }
-    err = panel_init(s_display);
+    err = panel_init(s_display, s_shared_sram, kSharedSramBytes);
     if (err != ESP_OK) ESP_LOGE(TAG, "panel init: %s", esp_err_to_name(err));
     err = usb_init();
     if (err != ESP_OK) ESP_LOGE(TAG, "usb init: %s", esp_err_to_name(err));

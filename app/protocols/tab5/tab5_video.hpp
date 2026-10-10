@@ -21,6 +21,7 @@ public:
 
     static constexpr int kSwapWindow = 2;
     static constexpr int kDirectAlign = 16;
+    static constexpr int kBlitMaxSize = 1280;
 
     explicit Tab5Video(Tab5Events &events) : events_(events) {}
     ~Tab5Video();
@@ -46,6 +47,7 @@ private:
     void run(const Item &item);
     void execute(const tab5::MsgHeader &header, const uint8_t *payload);
     void draw_direct(const tab5::MsgHeader &header, const uint8_t *payload);
+    void draw_blit(const tab5::MsgHeader &header, const uint8_t *payload);
     void fill(const tab5::MsgHeader &header, const uint8_t *payload);
     void swap(const tab5::MsgHeader &header);
     void count(uint32_t bytes);

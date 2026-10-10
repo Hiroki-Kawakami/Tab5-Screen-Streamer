@@ -124,7 +124,7 @@ void Tab5Video::execute(const tab5::MsgHeader &header, const uint8_t *payload) {
             swap(header);
             return;
         case tab5::Type::DrawBlit:
-            events_.error(Channel::Video, ErrorCode::Unsupported, header.seq);
+            draw_blit(header, payload);
             return;
         default:
             events_.error(Channel::Video, ErrorCode::Malformed, header.seq);
@@ -173,6 +173,65 @@ void Tab5Video::draw_direct(const tab5::MsgHeader &header, const uint8_t *payloa
             return;
         default:
             return fail(ErrorCode::Unsupported);
+    }
+}
+
+static bool pixel_format(uint8_t value, bsp_pixel_format_t *format) {
+    switch (static_cast<tab5::PixelFormat>(value)) {
+        case tab5::PixelFormat::Rgb565: *format = BSP_PIXEL_FORMAT_RGB565; return true;
+        case tab5::PixelFormat::Rgb888: *format = BSP_PIXEL_FORMAT_RGB888; return true;
+    }
+    return false;
+}
+
+void Tab5Video::draw_blit(const tab5::MsgHeader &header, const uint8_t *payload) {
+    const auto fail = [&](ErrorCode code) { events_.error(Channel::Video, code, header.seq); };
+    tab5::DrawBlit draw;
+    if (header.length < sizeof(draw)) return fail(ErrorCode::Malformed);
+    memcpy(&draw, payload, sizeof(draw));
+    if (draw.target > static_cast<uint8_t>(tab5::Target::Back) || draw.rotation > 3 ||
+        !draw.src_w || !draw.src_h || !draw.dst_w || !draw.dst_h) {
+        return fail(ErrorCode::Malformed);
+    }
+    if (draw.src_w > kBlitMaxSize || draw.src_h > kBlitMaxSize) return fail(ErrorCode::TooLarge);
+    const bsp_size_t size = panel_size();
+    if (draw.dst_x + draw.dst_w > size.width || draw.dst_y + draw.dst_h > size.height) {
+        return fail(ErrorCode::OutOfBounds);
+    }
+
+    PanelBlit blit = {};
+    blit.buffer = static_cast<PanelBuffer>(draw.target);
+    blit.source = {draw.src_w, draw.src_h};
+    blit.rotation = static_cast<bsp_rotation_t>(draw.rotation);
+    blit.area = {{draw.dst_x, draw.dst_y}, {draw.dst_w, draw.dst_h}};
+    const uint8_t *data = payload + sizeof(draw);
+    const uint32_t bytes = header.length - sizeof(draw);
+    const auto encoding = static_cast<tab5::Encoding>(draw.encoding);
+    if (encoding != tab5::Encoding::Jpeg && !pixel_format(draw.src_format, &blit.format)) {
+        return fail(ErrorCode::Unsupported);
+    }
+
+    esp_err_t err;
+    switch (encoding) {
+        case tab5::Encoding::Jpeg:
+            err = panel_blit_jpeg(blit, data, bytes);
+            break;
+        case tab5::Encoding::Raw:
+            if (bytes != draw.src_w * draw.src_h * bsp_pixel_format_bytes(blit.format)) {
+                return fail(ErrorCode::Malformed);
+            }
+            err = panel_blit(blit, data);
+            break;
+        case tab5::Encoding::Lz4:
+            err = panel_blit_lz4(blit, data, bytes);
+            break;
+        default:
+            return fail(ErrorCode::Unsupported);
+    }
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        fail(ErrorCode::Unsupported);
+    } else if (err != ESP_OK) {
+        fail(ErrorCode::DecodeFailed);
     }
 }
 

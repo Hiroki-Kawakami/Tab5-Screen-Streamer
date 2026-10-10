@@ -56,6 +56,15 @@ struct __attribute__((packed)) DrawDirect {
     uint16_t height;
 };
 
+struct __attribute__((packed)) DrawBlit {
+    uint8_t target;
+    uint8_t encoding;
+    uint8_t src_format;
+    uint8_t rotation;
+    uint16_t src_w, src_h;
+    uint16_t dst_x, dst_y, dst_w, dst_h;
+};
+
 struct __attribute__((packed)) Fill {
     uint8_t target;
     uint8_t reserved;

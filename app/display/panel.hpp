@@ -7,6 +7,7 @@
  */
 
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include "bsp.h"
 #include "esp_err.h"
@@ -14,7 +15,9 @@
 
 enum class PanelBuffer : uint8_t { Front, Back };
 
-esp_err_t panel_init(lv_display_t *ui);
+/* `sram` is the two draw buffers of `ui`, back to back, borrowed while it is
+ * hidden. */
+esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes);
 
 bsp_size_t panel_size();
 bsp_pixel_format_t panel_format();
@@ -37,3 +40,18 @@ esp_err_t panel_write_lz4_rows(PanelBuffer buffer, int y, int height, const uint
  * of 16. */
 esp_err_t panel_decode_rows(PanelBuffer buffer, int y, int height, const uint8_t *jpeg,
                             uint32_t bytes);
+
+/* `source` rotated counter-clockwise by `rotation`, then scaled to `area`;
+ * each axis scales by a whole number of sixteenths, ESP_ERR_NOT_SUPPORTED
+ * otherwise. `format` is that of RAW and LZ4 sources. */
+struct PanelBlit {
+    PanelBuffer buffer;
+    bsp_size_t source;
+    bsp_pixel_format_t format;
+    bsp_rotation_t rotation;
+    bsp_rect_t area;
+};
+
+esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels);
+esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t bytes);
+esp_err_t panel_blit_jpeg(const PanelBlit &blit, const uint8_t *jpeg, uint32_t bytes);

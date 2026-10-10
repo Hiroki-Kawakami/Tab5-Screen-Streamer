@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use link::{InPipe, Link, OutPipe};
 use protocol::{Encoding, Event, Info, Target};
-use source::{Input, Output, Source};
+use source::{Input, Layout, Output, Source};
 
 const IN_BYTES: usize = 512;
 const IN_QUEUE: usize = 2;
@@ -158,37 +158,155 @@ struct PlayOptions {
     input: Input,
     encoding: Encoding,
     front: bool,
+    blit: bool,
     rotation: u32,
     quality: u32,
 }
 
+/// Fills the panel around `content` (x, y, w, h) in black.
 fn letterbox(
     session: &mut Session,
     batch: &mut Batch,
     target: Target,
     info: &Info,
-    y: u32,
-    height: u32,
+    content: (u32, u32, u32, u32),
 ) -> Result<()> {
-    let width = info.panel_width;
-    let bottom = y + height;
-    for (top, rows) in [(0, y), (bottom, info.panel_height as u32 - bottom)] {
-        if rows == 0 {
+    let (pw, ph) = (info.panel_width as u32, info.panel_height as u32);
+    let (x, y, w, h) = content;
+    let rects = [
+        (0, 0, pw, y),
+        (0, y + h, pw, ph - y - h),
+        (0, y, x, h),
+        (x + w, y, pw - x - w, h),
+    ];
+    for (rx, ry, rw, rh) in rects {
+        if rw == 0 || rh == 0 {
             continue;
         }
-        let payload = protocol::fill(target, 0, top as u16, width, rows as u16, 0);
+        let payload = protocol::fill(target, rx as u16, ry as u16, rw as u16, rh as u16, 0);
         let seq = session.next_video_seq();
         batch.push(protocol::message(protocol::FILL, seq, info.epoch, &payload))?;
     }
     Ok(())
 }
 
+/// Rows of `row_bytes` per message, in multiples of 16, that fit `limit` even
+/// when LZ4 cannot shrink them.
+fn band_rows(limit: usize, header: usize, row_bytes: usize) -> u32 {
+    let room = limit - protocol::HEADER_BYTES - header;
+    let mut rows = (room / row_bytes) as u32 / 16 * 16;
+    while rows > 16 && lz4::max_compressed(rows as usize * row_bytes) > room {
+        rows -= 16;
+    }
+    rows
+}
+
+fn encode(encoding: Encoding, pixels: &[u8]) -> Vec<u8> {
+    match encoding {
+        Encoding::Lz4 => lz4::compress(pixels),
+        _ => pixels.to_vec(),
+    }
+}
+
+/// Where source rows [row, row + rows) of a blit land: the same strip of the
+/// rotated, scaled source.
+fn blit_band(layout: &Layout, row: u32, rows: u32) -> (u32, u32, u32, u32) {
+    let Layout::Blit {
+        rotation,
+        scale,
+        area: (x, y, w, h),
+        ..
+    } = *layout
+    else {
+        unreachable!()
+    };
+    let start = row * scale / 16;
+    let extent = rows * scale / 16;
+    match rotation {
+        1 => (x + start, y, extent, h),
+        2 => (x, y + h - start - extent, w, extent),
+        3 => (x + w - start - extent, y, extent, h),
+        _ => (x, y + start, w, extent),
+    }
+}
+
+fn frame_messages(
+    layout: &Layout,
+    encoding: Encoding,
+    target: Target,
+    info: &Info,
+    frame: &[u8],
+) -> Vec<(u8, Vec<u8>)> {
+    let limit = info.max_message[protocol::VIDEO] as usize;
+    let panel_width = info.panel_width as u32;
+    let (width, height) = layout.frame(panel_width);
+    let row_bytes = width as usize * info.pixel_format.bytes();
+    let pixels =
+        |row: u32, rows: u32| &frame[row as usize * row_bytes..(row + rows) as usize * row_bytes];
+    let mut messages = Vec::new();
+    match *layout {
+        Layout::Direct { y, .. } => {
+            if encoding == Encoding::Jpeg {
+                let payload =
+                    protocol::draw_direct(target, encoding, y as u16, height as u16, frame);
+                return vec![(protocol::DRAW_DIRECT, payload)];
+            }
+            let band = band_rows(limit, protocol::DRAW_DIRECT_BYTES, row_bytes);
+            let mut row = 0;
+            while row < height {
+                let rows = band.min(height - row);
+                let data = encode(encoding, pixels(row, rows));
+                let payload =
+                    protocol::draw_direct(target, encoding, (y + row) as u16, rows as u16, &data);
+                messages.push((protocol::DRAW_DIRECT, payload));
+                row += rows;
+            }
+        }
+        Layout::Blit { rotation, area, .. } => {
+            let mut blit = protocol::Blit {
+                target,
+                encoding,
+                format: info.pixel_format,
+                rotation,
+                source: (width, height),
+                area,
+            };
+            if encoding == Encoding::Jpeg {
+                return vec![(protocol::DRAW_BLIT, protocol::draw_blit(&blit, frame))];
+            }
+            let band = band_rows(limit, protocol::DRAW_BLIT_BYTES, row_bytes);
+            let mut row = 0;
+            while row < height {
+                let rows = band.min(height - row);
+                blit.source = (width, rows);
+                blit.area = blit_band(layout, row, rows);
+                let data = encode(encoding, pixels(row, rows));
+                messages.push((protocol::DRAW_BLIT, protocol::draw_blit(&blit, &data)));
+                row += rows;
+            }
+        }
+    }
+    messages
+}
+
 fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     let info = session.info()?;
-    let align = info.direct_align.max(1) as u32;
     let panel = (info.panel_width as u32, info.panel_height as u32);
     let size = options.input.probe()?;
-    let geometry = source::fit(size, options.rotation, panel, align);
+    let layout = if options.blit {
+        let max = (info.blit_max_width as u32, info.blit_max_height as u32);
+        if max.0 < 16 || max.1 < 16 {
+            return Err("the device takes no DRAW_BLIT".into());
+        }
+        Layout::blit(size, options.rotation, panel, max)?
+    } else {
+        Layout::direct(
+            size,
+            options.rotation,
+            panel,
+            info.direct_align.max(1) as u32,
+        )
+    };
     let output = match options.encoding {
         Encoding::Jpeg => Output::Jpeg {
             quality: options.quality,
@@ -197,19 +315,24 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     };
     let mut source = Source::spawn(
         &options.input,
-        &geometry,
+        &layout,
         panel.0,
-        options.rotation,
         info.max_fps.max(1) as u32,
         output,
     )?;
+    let content = layout.content(panel.0);
+    let frame = layout.frame(panel.0);
     println!(
-        "{}x{} -> {}x{} at y {}, {:?} into {}",
+        "{}x{} as {}x{} -> {}x{} at {},{}, {} {:?} into {}",
         size.0,
         size.1,
-        panel.0,
-        geometry.height,
-        geometry.y,
+        frame.0,
+        frame.1,
+        content.2,
+        content.3,
+        content.0,
+        content.1,
+        if options.blit { "BLIT" } else { "DIRECT" },
         options.encoding,
         if options.front {
             "FRONT"
@@ -224,13 +347,8 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     } else {
         Target::Back
     };
+    let window = info.swap_window.max(1) as usize;
     let frame_interval = Duration::from_secs_f64(1.0 / info.max_fps.max(1) as f64);
-    let row_bytes = panel.0 as usize * info.pixel_format.bytes();
-    let room = limit - protocol::HEADER_BYTES - 6;
-    let mut band_rows = (room / row_bytes) as u32 / align * align;
-    while lz4::max_compressed(band_rows as usize * row_bytes) > room {
-        band_rows -= align;
-    }
     let mut swaps: VecDeque<u32> = VecDeque::new();
     let mut next_frame = Instant::now();
     let mut first = true;
@@ -241,22 +359,19 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     while let Some(frame) = source.next_frame()? {
         if !options.front {
             loop {
-                match session.events.recv_timeout(
-                    if swaps.len() >= info.swap_window.max(1) as usize {
-                        TIMEOUT
-                    } else {
-                        Duration::ZERO
-                    },
-                ) {
+                let wait = if swaps.len() >= window {
+                    TIMEOUT
+                } else {
+                    Duration::ZERO
+                };
+                match session.events.recv_timeout(wait) {
                     Ok(Event::SwapDone { seq }) => {
                         while swaps.front().is_some_and(|&s| s <= seq) {
                             swaps.pop_front();
                         }
                     }
                     Ok(event) => report(&event),
-                    Err(RecvTimeoutError::Timeout)
-                        if swaps.len() >= info.swap_window.max(1) as usize =>
-                    {
+                    Err(RecvTimeoutError::Timeout) if swaps.len() >= window => {
                         return Err("no SWAP_DONE".into())
                     }
                     Err(RecvTimeoutError::Timeout) => break,
@@ -276,63 +391,12 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
 
         let mut batch = Batch::new(limit);
         if !options.front || first {
-            letterbox(
-                session,
-                &mut batch,
-                target,
-                &info,
-                geometry.y,
-                geometry.height,
-            )?;
+            letterbox(session, &mut batch, target, &info, content)?;
         }
         first = false;
-        match options.encoding {
-            Encoding::Jpeg => {
-                let payload = protocol::draw_direct(
-                    target,
-                    Encoding::Jpeg,
-                    geometry.y as u16,
-                    geometry.height as u16,
-                    &frame,
-                );
-                let seq = session.next_video_seq();
-                batch.push(protocol::message(
-                    protocol::DRAW_DIRECT,
-                    seq,
-                    info.epoch,
-                    &payload,
-                ))?;
-            }
-            encoding => {
-                let mut row = 0;
-                while row < geometry.height {
-                    let rows = band_rows.min(geometry.height - row);
-                    let pixels =
-                        &frame[row as usize * row_bytes..(row + rows) as usize * row_bytes];
-                    let compressed;
-                    let data = if encoding == Encoding::Lz4 {
-                        compressed = lz4::compress(pixels);
-                        &compressed[..]
-                    } else {
-                        pixels
-                    };
-                    let payload = protocol::draw_direct(
-                        target,
-                        encoding,
-                        (geometry.y + row) as u16,
-                        rows as u16,
-                        data,
-                    );
-                    let seq = session.next_video_seq();
-                    batch.push(protocol::message(
-                        protocol::DRAW_DIRECT,
-                        seq,
-                        info.epoch,
-                        &payload,
-                    ))?;
-                    row += rows;
-                }
-            }
+        for (kind, payload) in frame_messages(&layout, options.encoding, target, &info, &frame) {
+            let seq = session.next_video_seq();
+            batch.push(protocol::message(kind, seq, info.epoch, &payload))?;
         }
         if !options.front {
             let seq = session.next_video_seq();
@@ -390,6 +454,7 @@ commands:
   play [options] <input>     stream a video through ffmpeg
     --encoding jpeg|raw|lz4  default jpeg
     --front                  draw into FRONT without swapping
+    --blit                   send the source as is; the device rotates and scales
     --rotate <0-3>           counter-clockwise quarter turns
     --quality <2-31>         ffmpeg mjpeg -q:v, default 4
     --format <fmt>           ffmpeg input format, e.g. lavfi
@@ -409,6 +474,7 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
         },
         encoding: Encoding::Jpeg,
         front: false,
+        blit: false,
         rotation: 0,
         quality: 4,
     };
@@ -424,6 +490,7 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
                 }
             }
             "--front" => options.front = true,
+            "--blit" => options.blit = true,
             "--rotate" => options.rotation = args.next()?.parse().ok().filter(|r| *r < 4)?,
             "--quality" => options.quality = args.next()?.parse().ok()?,
             "--format" => options.input.format = Some(args.next()?.clone()),

@@ -197,8 +197,10 @@ SWAP
 - **`DRAW_BLIT`** draws anything else: a rectangle narrower than the panel, a
   source in another pixel format, rotated or scaled. The source is rotated
   first; `dst_w` and `dst_h` are the size after rotation, and differing from
-  the rotated source size scales it. `src_w` and `src_h` are at most
-  `blit_max_width` and `blit_max_height`.
+  the rotated source size scales it. Each axis scales by a whole number of
+  sixteenths (`dst_w` = rotated width × n / 16, likewise for the height);
+  any other size is answered with `EV_ERROR` (unsupported). `src_w` and
+  `src_h` are at most `blit_max_width` and `blit_max_height`.
 - **`FILL`** paints a solid rectangle, such as letterbox bars. The color is
   RGB888 whatever the panel format.
 - Commands are executed in order and never dropped, except for the epoch

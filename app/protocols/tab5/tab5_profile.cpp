@@ -148,6 +148,8 @@ void Tab5Profile::send_info(uint32_t seq) {
     info.framebuffers = panel_framebuffers();
     info.swap_window = Tab5Video::kSwapWindow;
     info.direct_align = Tab5Video::kDirectAlign;
+    info.blit_max_width = Tab5Video::kBlitMaxSize;
+    info.blit_max_height = Tab5Video::kBlitMaxSize;
     info.encodings = 1u << static_cast<int>(tab5::Encoding::Jpeg) |
                      1u << static_cast<int>(tab5::Encoding::Raw) |
                      1u << static_cast<int>(tab5::Encoding::Lz4);

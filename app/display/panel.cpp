@@ -4,10 +4,14 @@
  */
 
 #include "panel.hpp"
+#include <algorithm>
 #include "display_manager.hpp"
 #include "driver/ppa.h"
+#include "esp_attr.h"
 #include "esp_log.h"
-#include "jpeg_decode_enhanced.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "jpeg_ppa_pipeline.h"
 #include "lvgl.hpp"
 #include "lz4_block.h"
 #ifdef ESP_PLATFORM
@@ -17,11 +21,18 @@
 static const char *TAG = "panel";
 
 static constexpr int kRowAlign = 16;
+static constexpr uint32_t kScaleDenominator = 16;
+static constexpr size_t kLz4Window = 65536;
+static constexpr int kStrips = 2;
 
 static lv_display_t *s_ui;
-static jpeg_enh_strip_decoder_handle_t s_decoder;
+static uint8_t *s_strips[kStrips];
+static size_t s_strip_bytes;
+static jpeg_ppa_pipeline_handle_t s_pipeline;
 static ppa_client_handle_t s_fill;
 static ppa_client_handle_t s_copy;
+static SemaphoreHandle_t s_strip_done[kStrips];
+static bool s_strip_busy[kStrips];
 
 static bsp_size_t s_size;
 static bsp_pixel_format_t s_format;
@@ -39,8 +50,41 @@ static bool rows_valid(int y, int height) {
     return y >= 0 && height > 0 && y + height <= s_size.height;
 }
 
-esp_err_t panel_init(lv_display_t *ui) {
+static ppa_srm_color_mode_t srm_mode(bsp_pixel_format_t format) {
+    return format == BSP_PIXEL_FORMAT_RGB888 ? PPA_SRM_COLOR_MODE_RGB888
+                                             : PPA_SRM_COLOR_MODE_RGB565;
+}
+
+static ppa_srm_rotation_angle_t srm_angle(bsp_rotation_t rotation) {
+    switch (rotation) {
+        case BSP_ROTATION_90: return PPA_SRM_ROTATION_ANGLE_90;
+        case BSP_ROTATION_180: return PPA_SRM_ROTATION_ANGLE_180;
+        case BSP_ROTATION_270: return PPA_SRM_ROTATION_ANGLE_270;
+        default: return PPA_SRM_ROTATION_ANGLE_0;
+    }
+}
+
+static bool IRAM_ATTR strip_done(ppa_client_handle_t, ppa_event_data_t *, void *user_data) {
+    if (!user_data) return false;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(static_cast<SemaphoreHandle_t>(user_data), &woken);
+    return woken == pdTRUE;
+}
+
+static void wait_strip(int index) {
+    if (!s_strip_busy[index]) return;
+    xSemaphoreTake(s_strip_done[index], portMAX_DELAY);
+    s_strip_busy[index] = false;
+}
+
+esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes) {
     s_ui = ui;
+    s_strip_bytes = sram_bytes / kStrips;
+    for (int i = 0; i < kStrips; i++) {
+        s_strips[i] = sram + i * s_strip_bytes;
+        s_strip_done[i] = xSemaphoreCreateBinary();
+        if (!s_strip_done[i]) return ESP_ERR_NO_MEM;
+    }
     s_size = bsp_display_get_size();
     s_format = bsp_display_get_pixel_format();
     s_stride = s_size.width * bsp_pixel_format_bytes(s_format);
@@ -53,24 +97,18 @@ esp_err_t panel_init(lv_display_t *ui) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    jpeg_enh_strip_decoder_cfg_t config = {};
-    config.decode.output_format = s_format == BSP_PIXEL_FORMAT_RGB888
-        ? JPEG_DECODE_OUT_FORMAT_RGB888 : JPEG_DECODE_OUT_FORMAT_RGB565;
-    config.decode.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
-    config.decode.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
-    config.decode.yuv_full_range = true;
-    esp_err_t err = jpeg_enh_strip_decoder_new(&config, &s_decoder);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "jpeg decoder: %s", esp_err_to_name(err));
-        return err;
-    }
-
     ppa_client_config_t client = {};
     client.oper_type = PPA_OPERATION_FILL;
-    err = ppa_register_client(&client, &s_fill);
+    esp_err_t err = ppa_register_client(&client, &s_fill);
     if (err == ESP_OK) {
         client.oper_type = PPA_OPERATION_SRM;
+        client.max_pending_trans_num = kStrips;
         err = ppa_register_client(&client, &s_copy);
+    }
+    if (err == ESP_OK) {
+        ppa_event_callbacks_t callbacks = {};
+        callbacks.on_trans_done = strip_done;
+        err = ppa_client_register_event_callbacks(s_copy, &callbacks);
     }
     if (err != ESP_OK) ESP_LOGE(TAG, "ppa client: %s", esp_err_to_name(err));
     return err;
@@ -84,9 +122,27 @@ void panel_acquire() {
     // A partial LVGL display always presents framebuffer 0.
     s_front = 0;
     s_acquired = true;
+
+    jpeg_ppa_pipeline_cfg_t config = {};
+    config.strip_bufs[0] = s_strips[0];
+    config.strip_bufs[1] = s_strips[1];
+    config.strip_buf_size = s_strip_bytes;
+    config.strip_color_mode = srm_mode(s_format);
+    config.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+    config.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+    config.yuv_full_range = true;
+    esp_err_t err = jpeg_ppa_pipeline_new(&config, &s_pipeline);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "jpeg pipeline: %s", esp_err_to_name(err));
+        s_pipeline = nullptr;
+    }
 }
 
 void panel_release() {
+    if (s_pipeline) {
+        jpeg_ppa_pipeline_del(s_pipeline);
+        s_pipeline = nullptr;
+    }
     // The UI's partial blits land in the framebuffer last presented, then
     // present 0; anything else on screen would hide them.
     display_manager.present(0);
@@ -144,26 +200,9 @@ esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888) {
 
 esp_err_t panel_write_rows(PanelBuffer buffer, int y, int height, const uint8_t *pixels) {
     if (!rows_valid(y, height)) return ESP_ERR_INVALID_ARG;
-    const ppa_srm_color_mode_t mode = s_format == BSP_PIXEL_FORMAT_RGB888
-        ? PPA_SRM_COLOR_MODE_RGB888 : PPA_SRM_COLOR_MODE_RGB565;
-    ppa_srm_oper_config_t config = {};
-    config.in.buffer = pixels;
-    config.in.pic_w = s_size.width;
-    config.in.pic_h = height;
-    config.in.block_w = s_size.width;
-    config.in.block_h = height;
-    config.in.srm_cm = mode;
-    config.out.buffer = framebuffer(buffer);
-    config.out.buffer_size = s_stride * s_size.height;
-    config.out.pic_w = s_size.width;
-    config.out.pic_h = s_size.height;
-    config.out.block_offset_y = y;
-    config.out.srm_cm = mode;
-    config.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
-    config.scale_x = 1.0f;
-    config.scale_y = 1.0f;
-    config.mode = PPA_TRANS_MODE_BLOCKING;
-    return ppa_do_scale_rotate_mirror(s_copy, &config);
+    const PanelBlit blit = {buffer, {s_size.width, height}, s_format, BSP_ROTATION_0,
+                            {{0, y}, {s_size.width, height}}};
+    return panel_blit(blit, pixels);
 }
 
 esp_err_t panel_write_lz4_rows(PanelBuffer buffer, int y, int height, const uint8_t *lz4,
@@ -189,9 +228,10 @@ esp_err_t panel_decode_rows(PanelBuffer buffer, int y, int height, const uint8_t
     if (!rows_valid(y, height) || y % kRowAlign || height % kRowAlign) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!s_pipeline) return ESP_ERR_INVALID_STATE;
     jpeg_enh_frame_info_t info = {};
-    esp_err_t err = jpeg_enh_decoder_process(s_decoder, jpeg, bytes,
-                                             framebuffer(buffer) + y * s_stride,
+    esp_err_t err = jpeg_enh_decoder_process(jpeg_ppa_pipeline_get_decoder(s_pipeline), jpeg,
+                                             bytes, framebuffer(buffer) + y * s_stride,
                                              height * s_stride, &info);
     if (err == ESP_OK && (info.origin_w != (uint32_t)s_size.width ||
                           info.origin_h != (uint32_t)height)) {
@@ -200,6 +240,143 @@ esp_err_t panel_decode_rows(PanelBuffer buffer, int y, int height, const uint8_t
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "jpeg at %d: %s, %ux%u", y, esp_err_to_name(err),
                  (unsigned)info.origin_w, (unsigned)info.origin_h);
+    }
+    return err;
+}
+
+/* Sixteenths each input axis scales by; ESP_ERR_NOT_SUPPORTED when `area` is
+ * not a whole number of sixteenths of the rotated source. */
+static esp_err_t blit_scale(const PanelBlit &blit, uint32_t *scale_x, uint32_t *scale_y) {
+    const bsp_rect_t &area = blit.area;
+    if (blit.source.width <= 0 || blit.source.height <= 0 || area.origin.x < 0 ||
+        area.origin.y < 0 || area.size.width <= 0 || area.size.height <= 0 ||
+        area.origin.x + area.size.width > s_size.width ||
+        area.origin.y + area.size.height > s_size.height) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const bool transposed = blit.rotation == BSP_ROTATION_90 || blit.rotation == BSP_ROTATION_270;
+    const uint32_t out_x = (transposed ? area.size.height : area.size.width) * kScaleDenominator;
+    const uint32_t out_y = (transposed ? area.size.width : area.size.height) * kScaleDenominator;
+    if (out_x % blit.source.width || out_y % blit.source.height) return ESP_ERR_NOT_SUPPORTED;
+    *scale_x = out_x / blit.source.width;
+    *scale_y = out_y / blit.source.height;
+    return *scale_x && *scale_y ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+}
+
+/* Source rows [row, row + rows) as their own block, placed where they land
+ * in the rotated, scaled source. */
+static ppa_srm_oper_config_t strip_config(const PanelBlit &blit, uint32_t scale_x,
+                                          uint32_t scale_y, const void *pixels, int row,
+                                          int rows) {
+    const bsp_rect_t &area = blit.area;
+    const int start = row * scale_y / kScaleDenominator;
+    const int extent = rows * scale_y / kScaleDenominator;
+    int x = area.origin.x;
+    int y = area.origin.y;
+    switch (blit.rotation) {
+        case BSP_ROTATION_90: x += start; break;
+        case BSP_ROTATION_180: y += area.size.height - start - extent; break;
+        case BSP_ROTATION_270: x += area.size.width - start - extent; break;
+        default: y += start; break;
+    }
+
+    ppa_srm_oper_config_t config = {};
+    config.in.buffer = pixels;
+    config.in.pic_w = blit.source.width;
+    config.in.pic_h = rows;
+    config.in.block_w = blit.source.width;
+    config.in.block_h = rows;
+    config.in.srm_cm = srm_mode(blit.format);
+    config.out.buffer = framebuffer(blit.buffer);
+    config.out.buffer_size = s_stride * s_size.height;
+    config.out.pic_w = s_size.width;
+    config.out.pic_h = s_size.height;
+    config.out.block_offset_x = x;
+    config.out.block_offset_y = y;
+    config.out.srm_cm = srm_mode(s_format);
+    config.rotation_angle = srm_angle(blit.rotation);
+    config.scale_x = (float)scale_x / kScaleDenominator;
+    config.scale_y = (float)scale_y / kScaleDenominator;
+    config.mode = PPA_TRANS_MODE_BLOCKING;
+    return config;
+}
+
+esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels) {
+    uint32_t scale_x, scale_y;
+    esp_err_t err = blit_scale(blit, &scale_x, &scale_y);
+    if (err != ESP_OK) return err;
+    const ppa_srm_oper_config_t config =
+        strip_config(blit, scale_x, scale_y, pixels, 0, blit.source.height);
+    return ppa_do_scale_rotate_mirror(s_copy, &config);
+}
+
+esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t bytes) {
+    uint32_t scale_x, scale_y;
+    esp_err_t err = blit_scale(blit, &scale_x, &scale_y);
+    if (err != ESP_OK) return err;
+    const size_t row_bytes = blit.source.width * bsp_pixel_format_bytes(blit.format);
+    const int strip_rows = s_strip_bytes / row_bytes / kRowAlign * kRowAlign;
+    // Every match reaches back at most 64 KiB, so a whole strip before the
+    // one being written is all the history it needs.
+    if (strip_rows * row_bytes < kLz4Window) return ESP_ERR_NOT_SUPPORTED;
+
+    lz4_stream_t stream;
+    lz4_stream_init(&stream, lz4, bytes);
+    size_t previous = 0;
+    int strip = 0;
+    for (int row = 0; row < blit.source.height && err == ESP_OK; row += strip_rows) {
+        const int rows = std::min(strip_rows, blit.source.height - row);
+        const size_t size = rows * row_bytes;
+        wait_strip(strip);
+        const ptrdiff_t written = lz4_stream_decompress(&stream, s_strips[strip], size,
+                                                        s_strips[strip ^ 1], previous);
+        if (written != (ptrdiff_t)size) {
+            err = ESP_ERR_INVALID_SIZE;
+            break;
+        }
+        previous = size;
+        ppa_srm_oper_config_t config =
+            strip_config(blit, scale_x, scale_y, s_strips[strip], row, rows);
+        config.mode = PPA_TRANS_MODE_NON_BLOCKING;
+        config.user_data = s_strip_done[strip];
+        s_strip_busy[strip] = true;
+        err = ppa_do_scale_rotate_mirror(s_copy, &config);
+        if (err != ESP_OK) s_strip_busy[strip] = false;
+        strip ^= 1;
+    }
+    for (int i = 0; i < kStrips; i++) wait_strip(i);
+    if (err == ESP_OK && !lz4_stream_finished(&stream)) err = ESP_ERR_INVALID_SIZE;
+    if (err != ESP_OK) ESP_LOGW(TAG, "lz4 blit: %s", esp_err_to_name(err));
+    return err;
+}
+
+esp_err_t panel_blit_jpeg(const PanelBlit &blit, const uint8_t *jpeg, uint32_t bytes) {
+    uint32_t scale_x, scale_y;
+    esp_err_t err = blit_scale(blit, &scale_x, &scale_y);
+    if (err != ESP_OK) return err;
+    if (!s_pipeline) return ESP_ERR_INVALID_STATE;
+
+    jpeg_ppa_output_t out = {};
+    out.buffer = framebuffer(blit.buffer);
+    out.buffer_size = s_stride * s_size.height;
+    out.pic_w = s_size.width;
+    out.pic_h = s_size.height;
+    out.color_mode = srm_mode(s_format);
+    jpeg_ppa_transform_t transform = {};
+    transform.rotation = srm_angle(blit.rotation);
+    transform.scale_x = (float)scale_x / kScaleDenominator;
+    transform.scale_y = (float)scale_y / kScaleDenominator;
+    transform.out_offset_x = blit.area.origin.x;
+    transform.out_offset_y = blit.area.origin.y;
+    jpeg_enh_frame_info_t info = {};
+    err = jpeg_ppa_pipeline_process(s_pipeline, jpeg, bytes, &out, &transform, &info);
+    if (err == ESP_OK && (info.origin_w != (uint32_t)blit.source.width ||
+                          info.origin_h != (uint32_t)blit.source.height)) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "jpeg blit: %s, %ux%u", esp_err_to_name(err), (unsigned)info.origin_w,
+                 (unsigned)info.origin_h);
     }
     return err;
 }

@@ -8,6 +8,7 @@ pub const INFO: u8 = 0x81;
 pub const SWAP_DONE: u8 = 0x82;
 pub const ERROR: u8 = 0x83;
 pub const DRAW_DIRECT: u8 = 0x10;
+pub const DRAW_BLIT: u8 = 0x11;
 pub const FILL: u8 = 0x12;
 pub const SWAP: u8 = 0x13;
 
@@ -33,6 +34,13 @@ pub enum PixelFormat {
 }
 
 impl PixelFormat {
+    pub fn wire(self) -> u8 {
+        match self {
+            PixelFormat::Rgb565 => 1,
+            PixelFormat::Rgb888 => 2,
+        }
+    }
+
     pub fn bytes(self) -> usize {
         match self {
             PixelFormat::Rgb565 => 2,
@@ -92,6 +100,34 @@ pub fn draw_direct(
     out.push(encoding as u8);
     out.extend_from_slice(&y.to_le_bytes());
     out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+pub const DRAW_DIRECT_BYTES: usize = 6;
+pub const DRAW_BLIT_BYTES: usize = 16;
+
+pub struct Blit {
+    pub target: Target,
+    pub encoding: Encoding,
+    pub format: PixelFormat,
+    pub rotation: u32,
+    pub source: (u32, u32),
+    pub area: (u32, u32, u32, u32),
+}
+
+pub fn draw_blit(blit: &Blit, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(DRAW_BLIT_BYTES + data.len());
+    out.extend_from_slice(&[
+        blit.target as u8,
+        blit.encoding as u8,
+        blit.format.wire(),
+        blit.rotation as u8,
+    ]);
+    let (x, y, w, h) = blit.area;
+    for value in [blit.source.0, blit.source.1, x, y, w, h] {
+        out.extend_from_slice(&(value as u16).to_le_bytes());
+    }
     out.extend_from_slice(data);
     out
 }

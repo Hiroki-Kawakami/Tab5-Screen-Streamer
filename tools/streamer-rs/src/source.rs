@@ -1,4 +1,4 @@
-//! Frames from ffmpeg, fitted to the panel width.
+//! Frames from ffmpeg, fitted to the panel.
 
 use std::io::Read;
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -17,11 +17,25 @@ pub enum Output {
     Raw(PixelFormat),
 }
 
-/// The decoded frame is panel width by `height`, placed at row `y`.
-pub struct Geometry {
-    pub scaled_width: u32,
-    pub height: u32,
-    pub y: u32,
+/// Where frames land on the panel.
+pub enum Layout {
+    /// Panel-wide rows, `height` tall from row `y`; ffmpeg rotates, scales and
+    /// pads the source.
+    Direct {
+        scaled_width: u32,
+        height: u32,
+        y: u32,
+        rotation: u32,
+    },
+    /// `width` x `height` frames the device rotates by `rotation` and scales by
+    /// `scale` / 16 into `area` (x, y, w, h).
+    Blit {
+        width: u32,
+        height: u32,
+        rotation: u32,
+        scale: u32,
+        area: (u32, u32, u32, u32),
+    },
 }
 
 impl Input {
@@ -60,30 +74,107 @@ impl Input {
     }
 }
 
-pub fn fit(source: (u32, u32), rotation: u32, panel: (u32, u32), align: u32) -> Geometry {
-    let (sw, sh) = if rotation % 2 == 1 {
-        (source.1, source.0)
-    } else {
-        source
-    };
-    let (pw, ph) = panel;
-    let scale = (pw as f64 / sw as f64).min(ph as f64 / sh as f64);
-    let scaled_width = (((sw as f64 * scale).round() as u32) / 2 * 2).clamp(2, pw);
-    let height = (((sh as f64 * scale) / align as f64).round() as u32 * align)
-        .clamp(align, ph / align * align);
-    Geometry {
-        scaled_width,
-        height,
-        y: (ph - height) / 2 / align * align,
-    }
-}
-
 fn rotate_filter(rotation: u32) -> Option<&'static str> {
     match rotation % 4 {
         1 => Some("transpose=2"),
         2 => Some("hflip,vflip"),
         3 => Some("transpose=1"),
         _ => None,
+    }
+}
+
+fn rotated(size: (u32, u32), rotation: u32) -> (u32, u32) {
+    if rotation % 2 == 1 {
+        (size.1, size.0)
+    } else {
+        size
+    }
+}
+
+impl Layout {
+    pub fn direct(source: (u32, u32), rotation: u32, panel: (u32, u32), align: u32) -> Self {
+        let (sw, sh) = rotated(source, rotation);
+        let (pw, ph) = panel;
+        let scale = (pw as f64 / sw as f64).min(ph as f64 / sh as f64);
+        let scaled_width = (((sw as f64 * scale).round() as u32) / 2 * 2).clamp(2, pw);
+        let height = (((sh as f64 * scale) / align as f64).round() as u32 * align)
+            .clamp(align, ph / align * align);
+        Layout::Direct {
+            scaled_width,
+            height,
+            y: (ph - height) / 2 / align * align,
+            rotation,
+        }
+    }
+
+    /// Shrinks the source to fit `max` on both sides in multiples of 16, so any
+    /// whole number of sixteenths scales it to whole pixels.
+    pub fn blit(
+        source: (u32, u32),
+        rotation: u32,
+        panel: (u32, u32),
+        max: (u32, u32),
+    ) -> Result<Self, String> {
+        let shrink = (max.0 as f64 / source.0 as f64)
+            .min(max.1 as f64 / source.1 as f64)
+            .min(1.0);
+        let side = |length: u32, limit: u32| {
+            (((length as f64 * shrink / 16.0).round() as u32) * 16).clamp(16, limit / 16 * 16)
+        };
+        let (width, height) = (side(source.0, max.0), side(source.1, max.1));
+        let (rw, rh) = rotated((width, height), rotation);
+        let (pw, ph) = panel;
+        let scale = (16 * pw / rw).min(16 * ph / rh);
+        if scale == 0 {
+            return Err(format!("{rw}x{rh} does not fit the panel"));
+        }
+        let (dw, dh) = (rw * scale / 16, rh * scale / 16);
+        Ok(Layout::Blit {
+            width,
+            height,
+            rotation,
+            scale,
+            area: ((pw - dw) / 2, (ph - dh) / 2, dw, dh),
+        })
+    }
+
+    /// The decoded frame's size.
+    pub fn frame(&self, panel_width: u32) -> (u32, u32) {
+        match *self {
+            Layout::Direct { height, .. } => (panel_width, height),
+            Layout::Blit { width, height, .. } => (width, height),
+        }
+    }
+
+    /// The panel area the frames cover (x, y, w, h).
+    pub fn content(&self, panel_width: u32) -> (u32, u32, u32, u32) {
+        match *self {
+            Layout::Direct { height, y, .. } => (0, y, panel_width, height),
+            Layout::Blit { area, .. } => area,
+        }
+    }
+
+    fn filter(&self, panel_width: u32) -> String {
+        let mut filters: Vec<String> = Vec::new();
+        match *self {
+            Layout::Direct {
+                scaled_width,
+                height,
+                rotation,
+                ..
+            } => {
+                if let Some(rotate) = rotate_filter(rotation) {
+                    filters.push(rotate.into());
+                }
+                filters.push(format!("scale={scaled_width}:{height}"));
+                if scaled_width < panel_width {
+                    filters.push(format!("pad={panel_width}:{height}:(ow-iw)/2:0"));
+                }
+            }
+            Layout::Blit { width, height, .. } => filters.push(format!("scale={width}:{height}")),
+        }
+        filters.push("setsar=1".into());
+        filters.join(",")
     }
 }
 
@@ -98,24 +189,12 @@ pub struct Source {
 impl Source {
     pub fn spawn(
         input: &Input,
-        geometry: &Geometry,
+        layout: &Layout,
         panel_width: u32,
-        rotation: u32,
         max_fps: u32,
         output: Output,
     ) -> Result<Self, String> {
-        let mut filters: Vec<String> = Vec::new();
-        if let Some(rotate) = rotate_filter(rotation) {
-            filters.push(rotate.into());
-        }
-        filters.push(format!(
-            "scale={}:{}",
-            geometry.scaled_width, geometry.height
-        ));
-        if geometry.scaled_width < panel_width {
-            filters.push(format!("pad={panel_width}:{}:(ow-iw)/2:0", geometry.height));
-        }
-        filters.push("setsar=1".into());
+        let (frame_width, frame_height) = layout.frame(panel_width);
 
         let mut command = Command::new("ffmpeg");
         command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
@@ -127,7 +206,7 @@ impl Source {
         }
         command
             .args(input.args())
-            .args(["-an", "-sn", "-vf", &filters.join(",")])
+            .args(["-an", "-sn", "-vf", &layout.filter(panel_width)])
             .args(["-fpsmax", &max_fps.to_string()]);
         let frame_bytes = match &output {
             Output::Jpeg { quality } => {
@@ -149,7 +228,7 @@ impl Source {
                     PixelFormat::Rgb888 => "bgr24",
                 };
                 command.args(["-f", "rawvideo", "-pix_fmt", pix_fmt]);
-                (panel_width * geometry.height) as usize * format.bytes()
+                (frame_width * frame_height) as usize * format.bytes()
             }
         };
         let mut child = command
