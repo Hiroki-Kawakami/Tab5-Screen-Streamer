@@ -14,6 +14,7 @@
 #include "harness.h"
 #include "screen_manager.hpp"
 #include "screens/home_screen.hpp"
+#include "screens/pc_app_screen.hpp"
 #include "screens/usb_mode_screen.hpp"
 #include "sdkconfig.h"
 #include "settings.hpp"
@@ -57,6 +58,8 @@ static bool harness_mode(int argc, const char *const *argv, void *) {
     std::shared_ptr<Screen> screen;
     if (strcmp(argv[1], "home") == 0) {
         screen = std::make_shared<HomeScreen>();
+    } else if (strcmp(argv[1], "pc-app") == 0) {
+        screen = std::make_shared<PcAppScreen>();
     } else if (strcmp(argv[1], "usb") == 0) {
         screen = std::make_shared<UsbModeScreen>(UsbProfileId::Tab5, "USB Stream");
     } else if (strcmp(argv[1], "usb-test") == 0) {
@@ -107,7 +110,11 @@ void app_entry() {
 
     lv_async_call([] {
         ui_orientation_start(s_display, settings_rotation_locked(), settings_rotation());
-        screen_manager.load(std::make_shared<HomeScreen>());
+        if (settings_last_mode() == AppMode::PcApp) {
+            screen_manager.load(PcAppScreen::stream_screen());
+        } else {
+            screen_manager.load(std::make_shared<HomeScreen>());
+        }
         bsp_display_set_brightness(80);
     });
 }

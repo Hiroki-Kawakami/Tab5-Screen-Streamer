@@ -19,7 +19,7 @@
 
 class Tab5Profile : public UsbProfile {
 public:
-    Tab5Profile();
+    explicit Tab5Profile(bool uac);
     ~Tab5Profile() override;
     usb_device::DeviceInfo info() const override;
     esp_err_t add_functions(usb_device::Device &device) override;
@@ -63,4 +63,5 @@ private:
     Receiver audio_in_ = {};
     portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
     std::atomic<uint8_t> orientation_ = 0;
+    bool uac_;
 };

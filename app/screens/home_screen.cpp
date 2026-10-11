@@ -4,9 +4,9 @@
  */
 
 #include "home_screen.hpp"
+#include "pc_app_screen.hpp"
 #include "resources.h"
 #include "screen_manager.hpp"
-#include "usb_mode_screen.hpp"
 
 namespace {
 
@@ -21,7 +21,7 @@ struct Mode {
     const char *subtitle;
 };
 
-const Mode kPcApp = {TABLER_SCREEN_SHARE, "Stream from PC App", "Stream your screen or videos from your computer with the Tab5 Streamer app"};
+const Mode kPcApp = {TABLER_SCREEN_SHARE, PcAppScreen::kTitle, "Stream your screen or videos from your computer with the Tab5 Streamer app"};
 const Mode kModes[] = {
     {TABLER_USB, "USB Monitor", "Emulates a standard USB display adapter"},
     {TABLER_BROADCAST, "Network Stream", "Receive from OBS, FFmpeg and more over the network (UDP / SRT)"},
@@ -71,7 +71,7 @@ void HomeScreen::build() {
 
     hero_ = card_create(contents_, kPcApp, true);
     lv_obj_add_event_fn(hero_, LV_EVENT_CLICKED, [](lv_event_t *) {
-        screen_manager.load(std::make_shared<UsbModeScreen>(UsbProfileId::Tab5, "Stream from PC App"));
+        screen_manager.load(std::make_shared<PcAppScreen>());
     });
     for (size_t i = 0; i < cards_.size(); i++) {
         cards_[i] = card_create(contents_, kModes[i], false);

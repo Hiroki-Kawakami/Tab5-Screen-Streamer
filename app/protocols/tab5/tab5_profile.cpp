@@ -32,8 +32,8 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
     return buffer;
 }
 
-Tab5Profile::Tab5Profile()
-    : video_(std::make_unique<Tab5Video>(events_)), audio_(std::make_unique<Tab5Audio>(events_)) {
+Tab5Profile::Tab5Profile(bool uac)
+    : video_(std::make_unique<Tab5Video>(events_)), audio_(std::make_unique<Tab5Audio>(events_)), uac_(uac) {
     video_in_ = {this, tab5::Channel::Video, kVideoSlotBytes, nullptr, {}, false};
     audio_in_ = {this, tab5::Channel::Audio, kAudioSlotBytes, nullptr, {}, false};
 }
@@ -128,6 +128,11 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     lv_unlock();
     panel_set_format_listener(format_changed, this);
 
+    err = device.add(control_);
+    if (err == ESP_OK) err = device.add(video_in_.vendor);
+    if (err == ESP_OK) err = device.add(audio_in_.vendor);
+    if (err != ESP_OK || !uac_) return err;
+
     usb_device::UacSpeaker::Config speaker;
     speaker.name = "Tab5 Speaker";
     speaker.sync = usb_device::UacSpeaker::Sync::Async;
@@ -152,11 +157,7 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
         speaker->set_feedback(rate);
     });
 
-    err = device.add(control_);
-    if (err == ESP_OK) err = device.add(video_in_.vendor);
-    if (err == ESP_OK) err = device.add(audio_in_.vendor);
-    if (err == ESP_OK) err = device.add(speaker_);
-    return err;
+    return device.add(speaker_);
 }
 
 void Tab5Profile::orientation_changed(bsp_rotation_t rotation, void *arg) {

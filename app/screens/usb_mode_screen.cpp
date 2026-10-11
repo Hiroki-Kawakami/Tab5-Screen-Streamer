@@ -19,7 +19,7 @@ void UsbModeScreen::back() {
 }
 
 void UsbModeScreen::onEnter() {
-    usb_start(id_);
+    usb_start(id_, options_);
 }
 
 void UsbModeScreen::onExit() {

@@ -22,22 +22,23 @@ static constexpr int kQueueLength = 4;
 struct Request {
     bool start;
     UsbProfileId id;
+    UsbOptions options;
 };
 
 static QueueHandle_t s_requests;
 static std::unique_ptr<usb_device::Device> s_device;
 static std::unique_ptr<UsbProfile> s_profile;
 
-static std::unique_ptr<UsbProfile> make_profile(UsbProfileId id) {
+static std::unique_ptr<UsbProfile> make_profile(UsbProfileId id, const UsbOptions &options) {
     switch (id) {
-        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>();
+        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>(options.audio);
         case UsbProfileId::Test: return std::make_unique<UsbTestProfile>();
     }
     return nullptr;
 }
 
-static void start(UsbProfileId id) {
-    s_profile = make_profile(id);
+static void start(UsbProfileId id, const UsbOptions &options) {
+    s_profile = make_profile(id, options);
     usb_device::DeviceConfig config;
     config.info = s_profile->info();
     s_device = std::make_unique<usb_device::Device>(std::move(config));
@@ -56,7 +57,7 @@ static void usb_task(void *) {
         xQueueReceive(s_requests, &request, portMAX_DELAY);
         s_device.reset();
         s_profile.reset();
-        if (request.start) start(request.id);
+        if (request.start) start(request.id, request.options);
     }
 }
 
@@ -69,12 +70,12 @@ esp_err_t usb_init() {
     return ESP_OK;
 }
 
-void usb_start(UsbProfileId id) {
-    const Request request = {true, id};
+void usb_start(UsbProfileId id, UsbOptions options) {
+    const Request request = {true, id, options};
     xQueueSend(s_requests, &request, portMAX_DELAY);
 }
 
 void usb_stop() {
-    const Request request = {false, UsbProfileId::Tab5};
+    const Request request = {false, UsbProfileId::Tab5, {}};
     xQueueSend(s_requests, &request, portMAX_DELAY);
 }

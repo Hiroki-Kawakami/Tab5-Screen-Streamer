@@ -10,7 +10,8 @@
 /* Runs a USB profile while it is on screen. */
 class UsbModeScreen : public NavigationScreen {
 public:
-    UsbModeScreen(UsbProfileId id, const char *title) : id_(id), title_(title) {}
+    UsbModeScreen(UsbProfileId id, const char *title, UsbOptions options = {})
+        : id_(id), title_(title), options_(options) {}
     void build() override;
     void back() override;
     void onEnter() override;
@@ -19,4 +20,5 @@ public:
 private:
     UsbProfileId id_;
     const char *title_;
+    UsbOptions options_;
 };

@@ -105,9 +105,21 @@ Setting<"rotation", uint8_t, +[](int value) -> uint8_t {
     return value >= 0 && value <= (kRotationLocked | BSP_ROTATION_270) ? value : 0;
 }> s_rotation{0};
 
+constexpr auto sanitize_flag = +[](bool enabled) -> uint8_t {
+    return enabled ? 1 : 0;
+};
+
+Setting<"lastmode", uint8_t, +[](int mode) -> uint8_t {
+    return mode >= 0 && mode <= (int)AppMode::PcApp ? mode : 0;
+}> s_last_mode{(uint8_t)AppMode::None};
+
+Setting<"usbaudio", uint8_t, sanitize_flag> s_usb_audio{1};
+
 template <typename Fn>
 void for_each_setting(Fn &&fn) {
     fn(s_rotation);
+    fn(s_last_mode);
+    fn(s_usb_audio);
 }
 
 }  // namespace
@@ -145,4 +157,20 @@ void settings_set_rotation_lock(bool locked) {
     const bsp_rotation_t rotation = ui_orientation_current();
     if (!s_rotation.set((locked ? kRotationLocked : 0) | rotation)) return;
     ui_orientation_set_locked(locked, rotation);
+}
+
+AppMode settings_last_mode() {
+    return (AppMode)s_last_mode.get();
+}
+
+void settings_set_last_mode(AppMode mode) {
+    s_last_mode.set((int)mode);
+}
+
+bool settings_usb_audio() {
+    return s_usb_audio.get() != 0;
+}
+
+void settings_set_usb_audio(bool enabled) {
+    s_usb_audio.set(enabled);
 }
