@@ -23,6 +23,30 @@ pub enum Pixels<'a> {
         cr: &'a [u8],
         c_stride: usize,
     },
+    /// Y plane and interleaved Cb, Cr plane, otherwise as I420.
+    Nv12 {
+        y: &'a [u8],
+        y_stride: usize,
+        uv: &'a [u8],
+        uv_stride: usize,
+    },
+}
+
+/// I420 and NV12 alike: chroma samples are `c_step` bytes apart.
+#[derive(Clone, Copy)]
+struct Planar<'a> {
+    y: &'a [u8],
+    y_stride: usize,
+    cb: &'a [u8],
+    cr: &'a [u8],
+    c_stride: usize,
+    c_step: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Bgrx { data: &'a [u8], stride: usize },
+    Yuv(Planar<'a>),
 }
 
 pub struct Image<'a> {
@@ -133,6 +157,7 @@ fn unrotated_slot(rotation: u32, x: usize, y: usize) -> usize {
 
 struct Reader<'a> {
     image: &'a Image<'a>,
+    source: Source<'a>,
     placement: Placement,
     rotated: (usize, usize),
     luma: Walk,
@@ -149,16 +174,49 @@ impl<'a> Reader<'a> {
         } else {
             size
         };
-        let (luma, chroma) = match image.pixels {
-            Pixels::Bgrx { stride, .. } => {
+        let source = match image.pixels {
+            Pixels::Bgrx { data, stride } => Source::Bgrx { data, stride },
+            Pixels::I420 {
+                y,
+                y_stride,
+                cb,
+                cr,
+                c_stride,
+            } => Source::Yuv(Planar {
+                y,
+                y_stride,
+                cb,
+                cr,
+                c_stride,
+                c_step: 1,
+            }),
+            Pixels::Nv12 {
+                y,
+                y_stride,
+                uv,
+                uv_stride,
+            } => Source::Yuv(Planar {
+                y,
+                y_stride,
+                cb: uv,
+                cr: &uv[1..],
+                c_stride: uv_stride,
+                c_step: 2,
+            }),
+        };
+        let (luma, chroma) = match source {
+            Source::Bgrx { stride, .. } => {
                 let walk = Walk::new(placement.rotation, size, stride, 4);
                 (walk, walk)
             }
-            Pixels::I420 {
-                y_stride, c_stride, ..
-            } => (
-                Walk::new(placement.rotation, size, y_stride, 1),
-                Walk::new(placement.rotation, (size.0 / 2, size.1 / 2), c_stride, 1),
+            Source::Yuv(p) => (
+                Walk::new(placement.rotation, size, p.y_stride, 1),
+                Walk::new(
+                    placement.rotation,
+                    (size.0 / 2, size.1 / 2),
+                    p.c_stride,
+                    p.c_step,
+                ),
             ),
         };
         let blocks = match placement.rotation % 4 {
@@ -169,6 +227,7 @@ impl<'a> Reader<'a> {
         };
         Reader {
             image,
+            source,
             placement,
             rotated,
             luma,
@@ -199,8 +258,8 @@ impl<'a> Reader<'a> {
             _ => (cx, cy),
         };
         let blocks = self.blocks;
-        match self.image.pixels {
-            Pixels::Bgrx { data, stride } => {
+        match self.source {
+            Source::Bgrx { data, stride } => {
                 let mut upper = [0u32; 16];
                 for row in 0..16 {
                     let line = &data[(sy + row) * stride + sx * 4..][..64];
@@ -237,15 +296,9 @@ impl<'a> Reader<'a> {
                     }
                 }
             }
-            Pixels::I420 {
-                y,
-                y_stride,
-                cb,
-                cr,
-                c_stride,
-            } => {
+            Source::Yuv(p) => {
                 for row in 0..16 {
-                    let line = &y[(sy + row) * y_stride + sx..][..16];
+                    let line = &p.y[(sy + row) * p.y_stride + sx..][..16];
                     let top = row / 8 * 2;
                     for (half, out) in [blocks[top], blocks[top + 1]].into_iter().enumerate() {
                         for (o, &v) in mcu.y[out][row % 8].iter_mut().zip(&line[half * 8..]) {
@@ -254,10 +307,10 @@ impl<'a> Reader<'a> {
                     }
                 }
                 for row in 0..8 {
-                    let at = (sy / 2 + row) * c_stride + sx / 2;
-                    for (plane, out) in [(cb, &mut mcu.cb), (cr, &mut mcu.cr)] {
-                        for (o, &v) in out[row].iter_mut().zip(&plane[at..][..8]) {
-                            *o = v as f32 - 128.0;
+                    let at = (sy / 2 + row) * p.c_stride + sx / 2 * p.c_step;
+                    for (plane, out) in [(p.cb, &mut mcu.cb), (p.cr, &mut mcu.cr)] {
+                        for (col, o) in out[row].iter_mut().enumerate() {
+                            *o = plane[at + col * p.c_step] as f32 - 128.0;
                         }
                     }
                 }
@@ -296,24 +349,24 @@ impl<'a> Reader<'a> {
 
     fn luma_at(&self, cx: usize, cy: usize) -> f32 {
         let i = self.luma.at(cx, cy);
-        match self.image.pixels {
-            Pixels::Bgrx { data, .. } => {
+        match self.source {
+            Source::Bgrx { data, .. } => {
                 luma(data[i + 2] as f32, data[i + 1] as f32, data[i] as f32)
             }
-            Pixels::I420 { y, .. } => y[i] as f32 - 128.0,
+            Source::Yuv(p) => p.y[i] as f32 - 128.0,
         }
     }
 
     /// Chroma for a 2x2 group the content edge cuts.
     fn chroma_at(&self, cx: usize, cy: usize) -> (f32, f32) {
-        match self.image.pixels {
-            Pixels::Bgrx { data, .. } => {
+        match self.source {
+            Source::Bgrx { data, .. } => {
                 let i = self.luma.at(cx, cy);
                 chroma(data[i + 2] as f32, data[i + 1] as f32, data[i] as f32)
             }
-            Pixels::I420 { cb, cr, .. } => {
+            Source::Yuv(p) => {
                 let i = self.chroma.at(cx / 2, cy / 2);
-                (cb[i] as f32 - 128.0, cr[i] as f32 - 128.0)
+                (p.cb[i] as f32 - 128.0, p.cr[i] as f32 - 128.0)
             }
         }
     }
@@ -642,6 +695,7 @@ mod tests {
         let luma: Vec<u8> = (0..w * h).map(|i| (i * 13 % 251) as u8).collect();
         let cb: Vec<u8> = (0..w * h / 4).map(|i| (i * 7 % 253) as u8).collect();
         let cr: Vec<u8> = (0..w * h / 4).map(|i| (i * 11 % 241) as u8).collect();
+        let uv: Vec<u8> = cb.iter().zip(&cr).flat_map(|(&b, &r)| [b, r]).collect();
         let images = [
             Pixels::Bgrx {
                 data: &data,
@@ -653,6 +707,12 @@ mod tests {
                 cb: &cb,
                 cr: &cr,
                 c_stride: w / 2,
+            },
+            Pixels::Nv12 {
+                y: &luma,
+                y_stride: w,
+                uv: &uv,
+                uv_stride: w,
             },
         ];
         for pixels in images {

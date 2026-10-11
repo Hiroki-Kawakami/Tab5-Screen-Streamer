@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/device", "crates/cli"]
+members = ["crates/core", "crates/device", "crates/capture", "crates/cli"]
 default-members = ["crates/cli"]
 resolver = "3"
 
@@ -10,5 +10,6 @@ publish = false
 
 [workspace.dependencies]
 nusb = "0.2.7"
+streamer-capture = { path = "crates/capture" }
 streamer-core = { path = "crates/core" }
 streamer-device = { path = "crates/device" }
