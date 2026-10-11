@@ -1,0 +1,6 @@
+[package]
+name = "streamer-core"
+description = "Wire format, layout and encoders shared by every Tab5-Screen-Streamer client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "streamer"
+description = "Stream to the Tab5 from the command line"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+streamer-core.workspace = true
+streamer-device.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "streamer-device"
+description = "USB and USB/IP links to the Tab5 for native clients"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nusb.workspace = true
+streamer-core.workspace = true

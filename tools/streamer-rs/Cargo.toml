@@ -1,8 +1,14 @@
-[package]
-name = "streamer"
+[workspace]
+members = ["crates/core", "crates/device", "crates/cli"]
+default-members = ["crates/cli"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
-[dependencies]
+[workspace.dependencies]
 nusb = "0.2.7"
+streamer-core = { path = "crates/core" }
+streamer-device = { path = "crates/device" }

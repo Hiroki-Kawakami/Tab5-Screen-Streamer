@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -169,8 +169,25 @@ impl Shared {
     }
 }
 
+/// Closes the socket once every pipe is dropped, which also ends the reader.
+struct Socket(Arc<Shared>);
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        let _ = self.0.writer.lock().unwrap().shutdown(Shutdown::Both);
+    }
+}
+
+impl std::ops::Deref for Socket {
+    type Target = Shared;
+
+    fn deref(&self) -> &Shared {
+        &self.0
+    }
+}
+
 struct UsbipOut {
-    shared: Arc<Shared>,
+    shared: Arc<Socket>,
     endpoint: u8,
     packet: usize,
     queue: VecDeque<u32>,
@@ -207,7 +224,7 @@ impl OutPipe for UsbipOut {
 }
 
 struct UsbipIn {
-    shared: Arc<Shared>,
+    shared: Arc<Socket>,
     endpoint: u8,
     queue: VecDeque<u32>,
 }
@@ -266,6 +283,7 @@ pub fn connect(address: &str) -> Result<Link, String> {
     };
     let background = shared.clone();
     thread::spawn(move || background.read_loop(reader));
+    let shared = Arc::new(Socket(shared));
 
     let set_configuration = [0x00, REQUEST_SET_CONFIGURATION, 1, 0, 0, 0, 0, 0];
     let seqnum = shared.submit(0x00, 0, 0, set_configuration, &[]);

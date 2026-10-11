@@ -105,7 +105,12 @@ fn volume_at(p: &[u8], at: usize) -> Volume {
 pub type Rect = (u16, u16, u16, u16);
 
 fn rect_at(p: &[u8], at: usize) -> Rect {
-    (u16_at(p, at), u16_at(p, at + 2), u16_at(p, at + 4), u16_at(p, at + 6))
+    (
+        u16_at(p, at),
+        u16_at(p, at + 2),
+        u16_at(p, at + 4),
+        u16_at(p, at + 6),
+    )
 }
 
 pub enum Event {
