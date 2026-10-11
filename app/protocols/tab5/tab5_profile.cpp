@@ -41,6 +41,7 @@ Tab5Profile::~Tab5Profile() {
     bsp_imu_set_orientation_enabled(false);
     panel_set_format_listener(nullptr, nullptr);
     video_.reset();
+    audio_->set_uac_feedback(nullptr);
     audio_.reset();
     heap_caps_free(control_transfer_.buffer);
     destroy(video_in_);
@@ -128,9 +129,34 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     if (err != ESP_OK) ESP_LOGW(TAG, "orientation tracking: %s", esp_err_to_name(err));
     panel_set_format_listener(format_changed, this);
 
+    usb_device::UacSpeaker::Config speaker;
+    speaker.name = "Tab5 Speaker";
+    speaker.sync = usb_device::UacSpeaker::Sync::Async;
+    speaker.formats = {{2, 16}};
+    speaker.sample_rates = {Tab5Audio::kUacRate};
+    speaker.volume_min = Tab5Audio::kUacVolumeMin;
+    speaker.volume_max = Tab5Audio::kUacVolumeMax;
+    speaker.volume_resolution = Tab5Audio::kUacVolumeStep;
+    speaker.volume = audio_->uac_volume().volume;
+    speaker.started = [this](const usb_device::UacSpeaker::Format &, uint32_t) {
+        audio_->uac_started();
+    };
+    speaker.stopped = [this] { audio_->uac_stopped(); };
+    speaker.received = [this](const uint8_t *pcm, size_t bytes) {
+        audio_->uac_received(pcm, bytes);
+    };
+    speaker.volume_changed = [this](bool mute, int16_t volume) {
+        audio_->set_uac_volume(mute, volume);
+    };
+    speaker_ = std::make_shared<usb_device::UacSpeaker>(std::move(speaker));
+    audio_->set_uac_feedback([speaker = speaker_.get()](double rate) {
+        speaker->set_feedback(rate);
+    });
+
     err = device.add(control_);
     if (err == ESP_OK) err = device.add(video_in_.vendor);
     if (err == ESP_OK) err = device.add(audio_in_.vendor);
+    if (err == ESP_OK) err = device.add(speaker_);
     return err;
 }
 
@@ -222,6 +248,7 @@ void Tab5Profile::send_info(uint32_t seq) {
     info.overlay_w = size.width;
     info.overlay_h = size.height;
     info.max_fps = kMaxFps;
+    info.volume[static_cast<int>(tab5::Stream::Uac)] = audio_->uac_volume();
     info.volume[static_cast<int>(tab5::Stream::Bulk)] = audio_->volume();
     info.audio_max_rate = Tab5Audio::kMaxRate;
     events_.send(tab5::Type::Info, seq, &info, sizeof(info), info.epoch);

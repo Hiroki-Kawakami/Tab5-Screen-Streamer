@@ -27,6 +27,16 @@ static constexpr int16_t kVolumeMax = 6 * 256;
 static constexpr int16_t kVolumeStep = 103;
 static constexpr int16_t kVolumeDefault = -10 * 256;
 
+static constexpr uint8_t kUacChannels = 2;
+static constexpr uint8_t kUacBits = 16;
+static constexpr uint32_t kUacFrameBytes = kUacChannels * kUacBits / 8;
+static constexpr uint32_t kUacBufferFrames = Tab5Audio::kUacRate / 20;
+static constexpr uint32_t kUacTargetFrames = kUacBufferFrames / 2;
+static constexpr uint32_t kUacChunkFrames = Tab5Audio::kUacRate / 250;
+// Feedback leans this far off the nominal rate at an empty or full buffer.
+static constexpr double kUacFeedbackGain = 0.002;
+static constexpr int64_t kUacStatsPeriodUs = 5 * 1000 * 1000;
+
 using tab5::Channel;
 using tab5::ErrorCode;
 
@@ -39,11 +49,16 @@ static int bsp_volume(int16_t volume) {
 
 Tab5Audio::~Tab5Audio() {
     if (!queue_) return;
-    const Item quit = {Op::Quit, nullptr, 0, nullptr, nullptr};
-    xQueueSend(queue_, &quit, portMAX_DELAY);
+    send(Op::Quit);
     xSemaphoreTake(exited_, portMAX_DELAY);
     vSemaphoreDelete(exited_);
     vQueueDelete(queue_);
+    if (uac_pcm_) audf_fifo_destroy(uac_pcm_);
+}
+
+void Tab5Audio::send(Op op) {
+    const Item item = {op, nullptr, 0, nullptr, nullptr};
+    xQueueSend(queue_, &item, portMAX_DELAY);
 }
 
 esp_err_t Tab5Audio::start(uint32_t capacity_bytes) {
@@ -51,12 +66,21 @@ esp_err_t Tab5Audio::start(uint32_t capacity_bytes) {
     queue_ = xQueueCreate(kQueueLength, sizeof(Item));
     exited_ = xSemaphoreCreateBinary();
     if (!queue_ || !exited_) return ESP_ERR_NO_MEM;
+    audf_fifo_config_t fifo = {};
+    fifo.fmt = AUDF_FMT_S16;
+    fifo.channels = kUacChannels;
+    fifo.capacity = kUacBufferFrames;
+    fifo.prefill = kUacTargetFrames;
+    fifo.underrun = AUDF_FIFO_UNDERRUN_SILENCE;
+    fifo.overrun = AUDF_FIFO_OVERRUN_DROP_OLDEST;
+    esp_err_t err = audf_fifo_create(&fifo, &uac_pcm_);
+    if (err != ESP_OK) return err;
     {
         std::lock_guard<std::mutex> guard(volume_lock_);
         volume_ = kVolumeDefault;
-        bsp_audio_set_volume(bsp_volume(volume_));
-        bsp_audio_set_mute(mute_);
+        uac_volume_ = kVolumeDefault;
     }
+    apply_volume();
     if (xTaskCreatePinnedToCore(task, "tab5_audio", kTaskStackBytes, this, kTaskPriority,
                                 nullptr, kTaskCore) != pdPASS) {
         return ESP_ERR_NO_MEM;
@@ -71,8 +95,14 @@ void Tab5Audio::submit(const uint8_t *data, uint32_t length, Done done, void *co
 }
 
 void Tab5Audio::end() {
-    const Item item = {Op::End, nullptr, 0, nullptr, nullptr};
-    xQueueSend(queue_, &item, portMAX_DELAY);
+    send(Op::End);
+}
+
+void Tab5Audio::apply_volume() {
+    std::lock_guard<std::mutex> guard(volume_lock_);
+    const bool uac = uac_playing_;
+    bsp_audio_set_volume(bsp_volume(uac ? uac_volume_ : volume_));
+    bsp_audio_set_mute(uac ? uac_mute_ : mute_);
 }
 
 void Tab5Audio::set_volume(bool mute, int16_t volume) {
@@ -81,10 +111,9 @@ void Tab5Audio::set_volume(bool mute, int16_t volume) {
         std::lock_guard<std::mutex> guard(volume_lock_);
         mute_ = mute;
         volume_ = std::clamp(volume, kVolumeMin, kVolumeMax);
-        bsp_audio_set_volume(bsp_volume(volume_));
-        bsp_audio_set_mute(mute_);
         message = {static_cast<uint8_t>(tab5::Stream::Bulk), mute_, volume_};
     }
+    apply_volume();
     events_.send(tab5::Type::Volume, 0, &message, sizeof(message));
 }
 
@@ -93,10 +122,52 @@ tab5::Volume Tab5Audio::volume() {
     return {mute_, 0, volume_, kVolumeMin, kVolumeMax, kVolumeStep};
 }
 
+void Tab5Audio::set_uac_feedback(std::function<void(double)> feedback) {
+    uac_feedback_ = std::move(feedback);
+}
+
+void Tab5Audio::uac_started() {
+    send(Op::UacStart);
+}
+
+void Tab5Audio::uac_stopped() {
+    send(Op::UacStop);
+}
+
+void Tab5Audio::uac_received(const uint8_t *pcm, size_t bytes) {
+    audf_fifo_write(uac_pcm_, pcm, bytes / kUacFrameBytes);
+}
+
+void Tab5Audio::set_uac_volume(bool mute, int16_t volume) {
+    tab5::VolumeMessage message;
+    {
+        std::lock_guard<std::mutex> guard(volume_lock_);
+        uac_mute_ = mute;
+        uac_volume_ = std::clamp(volume, kUacVolumeMin, kUacVolumeMax);
+        message = {static_cast<uint8_t>(tab5::Stream::Uac), uac_mute_, uac_volume_};
+    }
+    apply_volume();
+    events_.send(tab5::Type::Volume, 0, &message, sizeof(message));
+}
+
+tab5::Volume Tab5Audio::uac_volume() {
+    std::lock_guard<std::mutex> guard(volume_lock_);
+    return {uac_mute_, 0, uac_volume_, kUacVolumeMin, kUacVolumeMax, kUacVolumeStep};
+}
+
 void Tab5Audio::task(void *arg) {
     auto *self = static_cast<Tab5Audio *>(arg);
     Item item;
     while (true) {
+        if (self->uac_) {
+            if (xQueueReceive(self->queue_, &item, 0)) {
+                self->run(item);
+                if (item.op == Op::Quit) break;
+                continue;
+            }
+            self->play_uac();
+            continue;
+        }
         if (!xQueueReceive(self->queue_, &item, self->open_ ? kIdleClose : portMAX_DELAY)) {
             self->close();
             continue;
@@ -109,10 +180,27 @@ void Tab5Audio::task(void *arg) {
 }
 
 void Tab5Audio::run(const Item &item) {
-    if (item.op != Op::Transfer) {
-        close();
-        have_format_ = false;
-        return;
+    switch (item.op) {
+        case Op::Transfer:
+            break;
+        case Op::UacStart:
+            close();
+            audf_fifo_flush(uac_pcm_);
+            uac_ = true;
+            uac_playing_ = true;
+            apply_volume();
+            if (uac_feedback_) uac_feedback_(kUacRate);
+            return;
+        case Op::UacStop:
+            close();
+            uac_ = false;
+            uac_playing_ = false;
+            apply_volume();
+            return;
+        default:
+            close();
+            have_format_ = false;
+            return;
     }
     played_ = 0;
     uint32_t bad_seq = 0;
@@ -160,6 +248,10 @@ uint32_t Tab5Audio::frame_bytes() const {
 }
 
 void Tab5Audio::play(const tab5::MsgHeader &header, const uint8_t *pcm) {
+    if (uac_) {
+        events_.error(Channel::Audio, ErrorCode::Unsupported, header.seq);
+        return;
+    }
     if (!have_format_) return;
     const uint32_t frame = frame_bytes();
     if (header.length % frame) {
@@ -188,6 +280,34 @@ void Tab5Audio::play(const tab5::MsgHeader &header, const uint8_t *pcm) {
         played_ += n;
         dequeue(n);
         report(false);
+    }
+}
+
+// The FIFO plays silence until half full and whenever it runs dry; the
+// feedback rate steers the host to keep it at half.
+void Tab5Audio::play_uac() {
+    if (!open_) {
+        esp_err_t err = bsp_audio_open(kUacRate, kUacBits, kUacChannels);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "open uac: %s", esp_err_to_name(err));
+            vTaskDelay(kIdleClose);
+            return;
+        }
+        open_ = true;
+        opened_ = {kUacRate, kUacChannels, kUacBits, 0};
+    }
+    alignas(4) uint8_t chunk[kUacChunkFrames * kUacFrameBytes];
+    audf_fifo_read(uac_pcm_, chunk, kUacChunkFrames);
+    bsp_audio_write(chunk, sizeof(chunk));
+    const size_t level = audf_fifo_level(uac_pcm_);
+    const double error = ((double)level - kUacTargetFrames) / kUacTargetFrames;
+    const double rate = kUacRate * (1.0 - kUacFeedbackGain * error);
+    if (uac_feedback_) uac_feedback_(rate);
+
+    const int64_t now = esp_timer_get_time();
+    if (now - uac_stats_us_ >= kUacStatsPeriodUs) {
+        uac_stats_us_ = now;
+        ESP_LOGI(TAG, "uac: %u frames buffered, feedback %.1f Hz", (unsigned)level, rate);
     }
 }
 

@@ -256,6 +256,9 @@ is under the overlay; the PC redraws damaged areas.
 - The PC sends `AUDIO_FORMAT` after connecting and before every format change.
   `AUDIO_DATA` before the first `AUDIO_FORMAT` is dropped.
 - PCM already buffered plays out in its own format before the new one applies.
+- The UAC speaker and bulk audio are exclusive. While the host streams to the
+  speaker (48 kHz, 16-bit stereo), every `AUDIO_DATA` is answered with
+  `EV_ERROR` (unsupported) and dropped.
 - Any sample rate up to `audio_max_rate` is taken, with 1 or 2 channels of 16,
   24 or 32 bits. Anything else is answered with `EV_ERROR`, and the data
   following it is dropped until the next `AUDIO_FORMAT`.
@@ -308,6 +311,4 @@ change of the keyboard state. Both carry the same data as the HID reports.
 
 ## Open
 
-- Whether UAC and bulk audio are mixed or exclusive. If exclusive, the active
-  stream will be added to `INFO` and an event.
 - Whether the input route is switched from the Tab5 UI, the PC, or both.

@@ -14,6 +14,7 @@
 #include "tab5_events.hpp"
 #include "tab5_video.hpp"
 #include "usb/usb_profile.hpp"
+#include "usb_device_uac.hpp"
 #include "usb_device_vendor.hpp"
 
 class Tab5Profile : public UsbProfile {
@@ -56,6 +57,7 @@ private:
     std::unique_ptr<Tab5Video> video_;
     std::unique_ptr<Tab5Audio> audio_;
     std::shared_ptr<usb_device::Vendor> control_;
+    std::shared_ptr<usb_device::UacSpeaker> speaker_;
     usb_device::Transfer control_transfer_ = {};
     Receiver video_in_ = {};
     Receiver audio_in_ = {};

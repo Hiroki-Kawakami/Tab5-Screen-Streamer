@@ -6,16 +6,19 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "audf_fifo.h"
 #include "protocol.hpp"
 
 class Tab5Events;
 
-/* Plays audio endpoint transfers on its own task, paced by the output. */
+/* Plays audio endpoint transfers on its own task, paced by the output. While
+ * the UAC stream runs, it plays that instead and bulk audio is refused. */
 class Tab5Audio {
 public:
     using Done = void (*)(void *context);
@@ -35,8 +38,21 @@ public:
     void set_volume(bool mute, int16_t volume);
     tab5::Volume volume();
 
+    /* The UAC stream, from the device task. `feedback` takes the rate the
+     * output consumes samples at. */
+    static constexpr uint32_t kUacRate = 48000;
+    static constexpr int16_t kUacVolumeMin = -40 * 256;
+    static constexpr int16_t kUacVolumeMax = 0;
+    static constexpr int16_t kUacVolumeStep = 128;
+    void set_uac_feedback(std::function<void(double samples_per_second)> feedback);
+    void uac_started();
+    void uac_stopped();
+    void uac_received(const uint8_t *pcm, size_t bytes);
+    void set_uac_volume(bool mute, int16_t volume);
+    tab5::Volume uac_volume();
+
 private:
-    enum class Op : uint8_t { Transfer, End, Quit };
+    enum class Op : uint8_t { Transfer, End, Quit, UacStart, UacStop };
 
     struct Item {
         Op op;
@@ -53,6 +69,9 @@ private:
     void dequeue(uint32_t bytes);
     void close();
     void report(bool force);
+    void play_uac();
+    void apply_volume();
+    void send(Op op);
     uint32_t frame_bytes() const;
 
     Tab5Events &events_;
@@ -68,7 +87,15 @@ private:
     bool open_ = false;
     int64_t last_report_us_ = 0;
 
+    audf_fifo_t *uac_pcm_ = nullptr;
+    std::function<void(double)> uac_feedback_;
+    bool uac_ = false;
+    int64_t uac_stats_us_ = 0;
+    std::atomic<bool> uac_playing_ = false;
+
     std::mutex volume_lock_;
     bool mute_ = false;
     int16_t volume_ = 0;
+    bool uac_mute_ = false;
+    int16_t uac_volume_ = 0;
 };
