@@ -19,7 +19,7 @@
 
 class Tab5Profile : public UsbProfile {
 public:
-    explicit Tab5Profile(bool uac);
+    Tab5Profile(bool uac, UsbStatusListener status);
     ~Tab5Profile() override;
     usb_device::DeviceInfo info() const override;
     esp_err_t add_functions(usb_device::Device &device) override;
@@ -50,9 +50,10 @@ private:
     void control_unconfigured();
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
     void send_info(uint32_t seq);
+    void report_status();
     static void orientation_changed(bsp_rotation_t rotation, void *arg);
     static void format_changed(bsp_pixel_format_t format, void *arg);
-    static void clip_changed(const bsp_rect_t *clip, void *arg);
+    static void clip_changed(const bsp_rect_t *clip, bool front_changed, void *arg);
 
     Tab5Events events_;
     std::unique_ptr<Tab5Video> video_;
@@ -67,4 +68,8 @@ private:
     bool overlay_visible_ = false;
     bsp_rect_t stream_ = {};
     bool uac_;
+    UsbStatusListener status_;
+    bool configured_ = false;
+    bool streaming_ = false;
+    UsbStatus reported_ = UsbStatus::Unconfigured;
 };

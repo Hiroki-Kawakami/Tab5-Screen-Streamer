@@ -3,7 +3,9 @@
     "icon_96": {
       "size": 96,
       "icon": {
-        "TABLER_SCREEN_SHARE": "tabler/screen-share.svg"
+        "TABLER_SCREEN_SHARE": "tabler/screen-share.svg",
+        "TABLER_USB": "tabler/usb.svg",
+        "TABLER_DEVICE_DESKTOP": "tabler/device-desktop.svg"
       }
     },
     "icon_56": {
@@ -19,6 +21,12 @@
       "size": 48,
       "icon": {
         "TABLER_SETTINGS": "tabler/settings.svg"
+      }
+    },
+    "icon_36": {
+      "size": 36,
+      "icon": {
+        "TABLER_X": "tabler/x.svg"
       }
     }
   }

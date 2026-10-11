@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "jpeg_ppa_pipeline.h"
 #include "lvgl.hpp"
 #include "lz4_block.h"
@@ -264,7 +265,13 @@ esp_err_t panel_set_clip(const bsp_rect_t *clip) {
     preempt_lock();
     s_clipped = clip != nullptr;
     if (clip) s_clip = *clip;
-    if (s_clip_listener) s_clip_listener(clip, s_clip_listener_arg);
+    // Whatever the overlay draws, a partial LVGL display presents framebuffer 0.
+    const bool front_changed = clip && s_acquired && s_front != 0;
+    if (front_changed) {
+        s_front = 0;
+        display_manager.present(0);
+    }
+    if (s_clip_listener) s_clip_listener(clip, front_changed, s_clip_listener_arg);
     panel_unlock();
     return ESP_OK;
 }

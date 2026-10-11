@@ -7,6 +7,8 @@
 #include <cstdint>
 #include "bsp.h"
 
+inline constexpr int kMinDisplayBrightness = 1;
+
 enum class AppMode : uint8_t {
     None,
     PcApp,
@@ -14,6 +16,9 @@ enum class AppMode : uint8_t {
 
 void settings_init();
 void settings_commit();
+
+int settings_display_brightness();
+void settings_set_display_brightness(int percent);
 
 bool settings_rotation_locked();
 void settings_set_rotation_lock(bool locked);

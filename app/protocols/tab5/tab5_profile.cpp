@@ -32,15 +32,21 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
     return buffer;
 }
 
-Tab5Profile::Tab5Profile(bool uac)
-    : video_(std::make_unique<Tab5Video>(events_)), audio_(std::make_unique<Tab5Audio>(events_)), uac_(uac) {
+Tab5Profile::Tab5Profile(bool uac, UsbStatusListener status)
+    : video_(std::make_unique<Tab5Video>(events_, [this](bool streaming) {
+          portENTER_CRITICAL(&lock_);
+          streaming_ = streaming;
+          portEXIT_CRITICAL(&lock_);
+          report_status();
+      })),
+      audio_(std::make_unique<Tab5Audio>(events_)), uac_(uac), status_(std::move(status)) {
     video_in_ = {this, tab5::Channel::Video, kVideoSlotBytes, nullptr, {}, false};
     audio_in_ = {this, tab5::Channel::Audio, kAudioSlotBytes, nullptr, {}, false};
 }
 
 Tab5Profile::~Tab5Profile() {
     lv_lock();
-    ui_orientation_set_listener(nullptr, nullptr);
+    ui_orientation_set_observer(nullptr, nullptr);
     lv_unlock();
     panel_set_format_listener(nullptr, nullptr);
     panel_set_clip_listener(nullptr, nullptr);
@@ -125,7 +131,7 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
 
     lv_lock();
     orientation_ = ui_orientation_current();
-    ui_orientation_set_listener(orientation_changed, this);
+    ui_orientation_set_observer(orientation_changed, this);
     lv_unlock();
     panel_set_format_listener(format_changed, this);
     panel_set_clip_listener(clip_changed, this);
@@ -187,7 +193,7 @@ static tab5::Rect wire_rect(const bsp_rect_t &rect) {
             static_cast<uint16_t>(rect.size.width), static_cast<uint16_t>(rect.size.height)};
 }
 
-void Tab5Profile::clip_changed(const bsp_rect_t *clip, void *arg) {
+void Tab5Profile::clip_changed(const bsp_rect_t *clip, bool front_changed, void *arg) {
     auto *self = static_cast<Tab5Profile *>(arg);
     const bsp_size_t size = panel_size();
     const bsp_rect_t stream = clip ? *clip : bsp_rect_t{{0, 0}, size};
@@ -200,6 +206,10 @@ void Tab5Profile::clip_changed(const bsp_rect_t *clip, void *arg) {
 
     const tab5::OverlayEvent event = {clip != nullptr, 0, wire_rect(stream)};
     self->events_.send(tab5::Type::Overlay, 0, &event, sizeof(event));
+    if (front_changed) {
+        const tab5::Rect wire = wire_rect(stream);
+        self->events_.send(tab5::Type::Damage, 0, &wire, sizeof(wire));
+    }
     if (!was_visible || (clip && clip->origin.x == covered.origin.x &&
                          clip->origin.y == covered.origin.y &&
                          clip->size.width == covered.size.width &&
@@ -221,13 +231,32 @@ void Tab5Profile::clip_changed(const bsp_rect_t *clip, void *arg) {
     }
 }
 
+void Tab5Profile::report_status() {
+    portENTER_CRITICAL(&lock_);
+    const UsbStatus status = !configured_ ? UsbStatus::Unconfigured
+                             : streaming_ ? UsbStatus::Active
+                                          : UsbStatus::Configured;
+    const bool changed = status != reported_;
+    reported_ = status;
+    portEXIT_CRITICAL(&lock_);
+    if (changed && status_) status_(status);
+}
+
 void Tab5Profile::control_configured() {
+    portENTER_CRITICAL(&lock_);
+    configured_ = true;
+    portEXIT_CRITICAL(&lock_);
+    report_status();
     events_.start(control_->in());
     esp_err_t err = control_->out().submit(&control_transfer_);
     if (err != ESP_OK) ESP_LOGE(TAG, "submit control: %s", esp_err_to_name(err));
 }
 
 void Tab5Profile::control_unconfigured() {
+    portENTER_CRITICAL(&lock_);
+    configured_ = false;
+    portEXIT_CRITICAL(&lock_);
+    report_status();
     events_.stop();
 }
 

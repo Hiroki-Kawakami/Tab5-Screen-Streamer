@@ -77,6 +77,7 @@ void Tab5Video::run(const Item &item) {
     if (item.op == Op::Transfer && !panel_acquired()) {
         panel_acquire();
         ESP_LOGI(TAG, "stream started");
+        streaming_(true);
     }
     panel_lock();
     execute_item(item);
@@ -84,6 +85,7 @@ void Tab5Video::run(const Item &item) {
     if (item.op != Op::Transfer && panel_acquired()) {
         panel_release();
         ESP_LOGI(TAG, "stream stopped");
+        streaming_(false);
     }
 }
 

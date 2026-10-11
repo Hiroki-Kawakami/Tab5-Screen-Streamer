@@ -6,6 +6,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -27,7 +28,9 @@ public:
     static constexpr int kDirectAlign = 16;
     static constexpr int kBlitMaxSize = 1280;
 
-    explicit Tab5Video(Tab5Events &events) : events_(events) {}
+    /* `streaming` runs on the video task when the panel is taken and given back. */
+    Tab5Video(Tab5Events &events, std::function<void(bool)> streaming)
+        : events_(events), streaming_(std::move(streaming)) {}
     ~Tab5Video();
     esp_err_t start();
     uint32_t epoch() const { return epoch_; }
@@ -60,6 +63,7 @@ private:
     void count(uint32_t bytes);
 
     Tab5Events &events_;
+    std::function<void(bool)> streaming_;
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t exited_ = nullptr;
     std::atomic<uint32_t> epoch_ = 0;

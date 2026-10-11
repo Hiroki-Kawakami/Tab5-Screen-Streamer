@@ -4,7 +4,14 @@
  */
 
 #pragma once
+#include <cstdint>
+#include <functional>
 #include "usb_device.hpp"
+
+/* Active: the host is sending what the profile shows. Reported from the USB
+ * tasks. */
+enum class UsbStatus : uint8_t { Unconfigured, Configured, Active };
+using UsbStatusListener = std::function<void(UsbStatus)>;
 
 /* One way of appearing on USB: the device identity, its functions and what
  * consumes their data. Destroyed after the Device it was added to. */

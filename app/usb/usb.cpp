@@ -31,7 +31,7 @@ static std::unique_ptr<UsbProfile> s_profile;
 
 static std::unique_ptr<UsbProfile> make_profile(UsbProfileId id, const UsbOptions &options) {
     switch (id) {
-        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>(options.audio);
+        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>(options.audio, options.status);
         case UsbProfileId::Test: return std::make_unique<UsbTestProfile>();
     }
     return nullptr;
@@ -52,17 +52,18 @@ static void start(UsbProfileId id, const UsbOptions &options) {
 }
 
 static void usb_task(void *) {
-    Request request;
+    Request *request;
     while (true) {
         xQueueReceive(s_requests, &request, portMAX_DELAY);
         s_device.reset();
         s_profile.reset();
-        if (request.start) start(request.id, request.options);
+        if (request->start) start(request->id, request->options);
+        delete request;
     }
 }
 
 esp_err_t usb_init() {
-    s_requests = xQueueCreate(kQueueLength, sizeof(Request));
+    s_requests = xQueueCreate(kQueueLength, sizeof(Request *));
     if (!s_requests) return ESP_ERR_NO_MEM;
     if (xTaskCreate(usb_task, "usb", kTaskStackBytes, nullptr, kTaskPriority, nullptr) != pdPASS) {
         return ESP_ERR_NO_MEM;
@@ -71,11 +72,11 @@ esp_err_t usb_init() {
 }
 
 void usb_start(UsbProfileId id, UsbOptions options) {
-    const Request request = {true, id, options};
+    auto *request = new Request{true, id, std::move(options)};
     xQueueSend(s_requests, &request, portMAX_DELAY);
 }
 
 void usb_stop() {
-    const Request request = {false, UsbProfileId::Tab5, {}};
+    auto *request = new Request{false, UsbProfileId::Tab5, {}};
     xQueueSend(s_requests, &request, portMAX_DELAY);
 }

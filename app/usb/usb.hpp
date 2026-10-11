@@ -5,6 +5,7 @@
 
 #pragma once
 #include "esp_err.h"
+#include "usb_profile.hpp"
 
 enum class UsbProfileId {
     Tab5,
@@ -13,6 +14,7 @@ enum class UsbProfileId {
 
 struct UsbOptions {
     bool audio = true;
+    UsbStatusListener status;
 };
 
 esp_err_t usb_init();

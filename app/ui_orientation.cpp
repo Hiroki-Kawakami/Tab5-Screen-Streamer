@@ -19,6 +19,8 @@ static bsp_rotation_t s_main_rotation = BSP_ROTATION_0;
 static bool s_locked;
 static OrientationListener s_listener;
 static void *s_listener_arg;
+static OrientationListener s_observer;
+static void *s_observer_arg;
 static lv_timer_t *s_save_timer;
 
 static void rotate_main() {
@@ -53,6 +55,7 @@ static void orientation_changed(bsp_imu_orientation_t orientation, void *) {
         } else {
             rotate_main();
         }
+        if (s_observer) s_observer(rotation, s_observer_arg);
     });
     lv_unlock();
 }
@@ -90,4 +93,9 @@ void ui_orientation_set_listener(OrientationListener listener, void *arg) {
     s_listener = listener;
     s_listener_arg = arg;
     rotate_main();
+}
+
+void ui_orientation_set_observer(OrientationListener observer, void *arg) {
+    s_observer = observer;
+    s_observer_arg = arg;
 }

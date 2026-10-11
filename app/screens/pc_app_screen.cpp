@@ -7,10 +7,10 @@
 #include <cstring>
 #include "esp_log.h"
 #include "home_screen.hpp"
+#include "pc_app_stream_screen.hpp"
 #include "screen_manager.hpp"
 #include "settings.hpp"
 #include "settings_widgets.hpp"
-#include "usb_mode_screen.hpp"
 
 static const char *TAG = "pc_app_screen";
 
@@ -56,9 +56,7 @@ void step_create(lv_obj_t *parent, int number, const char *text) {
 }
 
 std::shared_ptr<Screen> PcAppScreen::stream_screen() {
-    UsbOptions options;
-    options.audio = settings_usb_audio();
-    return std::make_shared<UsbModeScreen>(UsbProfileId::Tab5, kTitle, options);
+    return std::make_shared<PcAppStreamScreen>(settings_usb_audio());
 }
 
 void PcAppScreen::build() {

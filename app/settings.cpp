@@ -7,6 +7,7 @@
 #include "nvs_flash.h"
 #include "ui_orientation.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -99,6 +100,10 @@ private:
     bool modified_ = false;
 };
 
+Setting<"brightness", uint8_t, +[](int percent) -> uint8_t {
+    return std::clamp(percent, kMinDisplayBrightness, 100);
+}> s_display_brightness{80};
+
 constexpr uint8_t kRotationLocked = 4;
 
 Setting<"rotation", uint8_t, +[](int value) -> uint8_t {
@@ -117,6 +122,7 @@ Setting<"usbaudio", uint8_t, sanitize_flag> s_usb_audio{1};
 
 template <typename Fn>
 void for_each_setting(Fn &&fn) {
+    fn(s_display_brightness);
     fn(s_rotation);
     fn(s_last_mode);
     fn(s_usb_audio);
@@ -139,6 +145,15 @@ void settings_commit() {
     bool written = false;
     for_each_setting([&written](auto &setting) { written |= setting.commit(s_nvs); });
     if (written) nvs_commit(s_nvs);
+}
+
+int settings_display_brightness() {
+    return s_display_brightness.get();
+}
+
+void settings_set_display_brightness(int percent) {
+    if (!s_display_brightness.set(percent)) return;
+    bsp_display_set_brightness(s_display_brightness.get());
 }
 
 bool settings_rotation_locked() {

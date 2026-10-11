@@ -3,25 +3,26 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
-#include "usb_mode_screen.hpp"
+#include "usb_test_screen.hpp"
 #include "home_screen.hpp"
 #include "screen_manager.hpp"
+#include "usb/usb.hpp"
 
-void UsbModeScreen::build() {
-    createNavigation(title_, LV_NAVIGATION_STYLE_DEFAULT | LV_NAVIGATION_STYLE_BACK);
+void UsbTestScreen::build() {
+    createNavigation("USB Test", LV_NAVIGATION_STYLE_DEFAULT | LV_NAVIGATION_STYLE_BACK);
     auto label = lv_label_create(contents_);
     lv_label_set_text(label, "Connect the USB-C port to a PC.");
     lv_obj_set_font_role(label, LV_WIDGETS_FONT_BODY);
 }
 
-void UsbModeScreen::back() {
+void UsbTestScreen::back() {
     screen_manager.load(std::make_shared<HomeScreen>());
 }
 
-void UsbModeScreen::onEnter() {
-    usb_start(id_, options_);
+void UsbTestScreen::onEnter() {
+    usb_start(UsbProfileId::Test);
 }
 
-void UsbModeScreen::onExit() {
+void UsbTestScreen::onExit() {
     usb_stop();
 }

@@ -16,7 +16,8 @@
 #include "screen_manager.hpp"
 #include "screens/home_screen.hpp"
 #include "screens/pc_app_screen.hpp"
-#include "screens/usb_mode_screen.hpp"
+#include "screens/pc_app_stream_screen.hpp"
+#include "screens/usb_test_screen.hpp"
 #include "sdkconfig.h"
 #include "settings.hpp"
 #include "ui_orientation.hpp"
@@ -62,9 +63,9 @@ static bool harness_mode(int argc, const char *const *argv, void *) {
     } else if (strcmp(argv[1], "pc-app") == 0) {
         screen = std::make_shared<PcAppScreen>();
     } else if (strcmp(argv[1], "usb") == 0) {
-        screen = std::make_shared<UsbModeScreen>(UsbProfileId::Tab5, "USB Stream");
+        screen = std::make_shared<PcAppStreamScreen>(true);
     } else if (strcmp(argv[1], "usb-test") == 0) {
-        screen = std::make_shared<UsbModeScreen>(UsbProfileId::Test, "USB Test");
+        screen = std::make_shared<UsbTestScreen>();
     } else {
         return false;
     }
@@ -124,6 +125,6 @@ void app_entry() {
         } else {
             screen_manager.load(std::make_shared<HomeScreen>());
         }
-        bsp_display_set_brightness(80);
+        bsp_display_set_brightness(settings_display_brightness());
     });
 }
