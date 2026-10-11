@@ -11,15 +11,16 @@
 static const char *TAG = "tab5_profile";
 
 static constexpr uint32_t kControlBytes = Tab5Events::kTransferBytes;
-static constexpr uint32_t kSlotBytes = 16 * 65024;
+static constexpr uint32_t kVideoSlotBytes = 16 * 65024;
+static constexpr uint32_t kAudioSlotBytes = 16384;
 static constexpr size_t kBufferAlignment = 128;
 static constexpr uint16_t kMaxFps = 60;
 
-enum class SlotState : uint8_t { Idle, Usb, Video };
+enum class SlotState : uint8_t { Idle, Usb, Busy };
 
 struct Tab5Profile::Slot {
     usb_device::Transfer transfer;
-    Tab5Profile *owner;
+    Receiver *receiver;
     SlotState state;
 };
 
@@ -29,19 +30,21 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
     return buffer;
 }
 
-Tab5Profile::Tab5Profile() : video_(std::make_unique<Tab5Video>(events_)) {}
+Tab5Profile::Tab5Profile()
+    : video_(std::make_unique<Tab5Video>(events_)), audio_(std::make_unique<Tab5Audio>(events_)) {
+    video_in_ = {this, tab5::Channel::Video, kVideoSlotBytes, nullptr, {}, false};
+    audio_in_ = {this, tab5::Channel::Audio, kAudioSlotBytes, nullptr, {}, false};
+}
 
 Tab5Profile::~Tab5Profile() {
     bsp_imu_set_orientation_cb(nullptr, nullptr);
     bsp_imu_set_orientation_enabled(false);
     panel_set_format_listener(nullptr, nullptr);
     video_.reset();
+    audio_.reset();
     heap_caps_free(control_transfer_.buffer);
-    for (Slot *slot : slots_) {
-        if (!slot) continue;
-        heap_caps_free(slot->transfer.buffer);
-        delete slot;
-    }
+    destroy(video_in_);
+    destroy(audio_in_);
 }
 
 usb_device::DeviceInfo Tab5Profile::info() const {
@@ -55,9 +58,50 @@ usb_device::DeviceInfo Tab5Profile::info() const {
     return info;
 }
 
+esp_err_t Tab5Profile::create(Receiver &receiver, const char *name, const char *guid,
+                              uint32_t caps) {
+    for (Slot *&slot : receiver.slots) {
+        uint8_t *buffer = alloc_buffer(receiver.slot_bytes, caps);
+        if (!buffer) return ESP_ERR_NO_MEM;
+        slot = new Slot{};
+        slot->receiver = &receiver;
+        slot->state = SlotState::Idle;
+        slot->transfer.buffer = buffer;
+        slot->transfer.length = receiver.slot_bytes;
+        slot->transfer.callback = receive_done;
+        slot->transfer.context = slot;
+    }
+    usb_device::Vendor::Config config;
+    config.name = name;
+    config.in = false;
+    config.winusb = true;
+    config.device_interface_guid = guid;
+    config.configured = [this, &receiver] { configured(receiver); };
+    config.unconfigured = [this, &receiver] { unconfigured(receiver); };
+    receiver.vendor = std::make_shared<usb_device::Vendor>(std::move(config));
+    return ESP_OK;
+}
+
+void Tab5Profile::destroy(Receiver &receiver) {
+    for (Slot *slot : receiver.slots) {
+        if (!slot) continue;
+        heap_caps_free(slot->transfer.buffer);
+        delete slot;
+    }
+}
+
 esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     esp_err_t err = events_.init();
     if (err == ESP_OK) err = video_->start();
+    if (err == ESP_OK) err = audio_->start(kSlots * kAudioSlotBytes);
+    if (err == ESP_OK) {
+        err = create(video_in_, "Tab5 Video", "{65B4EEDE-ACA0-4045-803A-B2454CFF9993}",
+                     MALLOC_CAP_SPIRAM);
+    }
+    if (err == ESP_OK) {
+        err = create(audio_in_, "Tab5 Audio", "{2F8AB360-5EA4-4EA4-A2C7-6055646488D6}",
+                     MALLOC_CAP_SPIRAM);
+    }
     if (err != ESP_OK) return err;
 
     control_transfer_.buffer = alloc_buffer(kControlBytes, MALLOC_CAP_DMA);
@@ -66,18 +110,6 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     control_transfer_.callback = control_done;
     control_transfer_.context = this;
 
-    for (Slot *&slot : slots_) {
-        uint8_t *buffer = alloc_buffer(kSlotBytes, MALLOC_CAP_SPIRAM);
-        if (!buffer) return ESP_ERR_NO_MEM;
-        slot = new Slot{};
-        slot->owner = this;
-        slot->state = SlotState::Idle;
-        slot->transfer.buffer = buffer;
-        slot->transfer.length = kSlotBytes;
-        slot->transfer.callback = video_done;
-        slot->transfer.context = slot;
-    }
-
     usb_device::Vendor::Config control;
     control.name = "Tab5 Control";
     control.winusb = true;
@@ -85,15 +117,6 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     control.configured = [this] { control_configured(); };
     control.unconfigured = [this] { control_unconfigured(); };
     control_ = std::make_shared<usb_device::Vendor>(std::move(control));
-
-    usb_device::Vendor::Config video;
-    video.name = "Tab5 Video";
-    video.in = false;
-    video.winusb = true;
-    video.device_interface_guid = "{65B4EEDE-ACA0-4045-803A-B2454CFF9993}";
-    video.configured = [this] { video_configured(); };
-    video.unconfigured = [this] { video_unconfigured(); };
-    video_vendor_ = std::make_shared<usb_device::Vendor>(std::move(video));
 
     const bsp_imu_orientation_t orientation = bsp_imu_get_orientation();
     if (orientation >= BSP_IMU_ORIENTATION_ROTATION_0 &&
@@ -106,7 +129,8 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     panel_set_format_listener(format_changed, this);
 
     err = device.add(control_);
-    if (err == ESP_OK) err = device.add(video_vendor_);
+    if (err == ESP_OK) err = device.add(video_in_.vendor);
+    if (err == ESP_OK) err = device.add(audio_in_.vendor);
     return err;
 }
 
@@ -153,15 +177,26 @@ void Tab5Profile::control_done(usb_device::Transfer *transfer) {
     if (err != ESP_OK) ESP_LOGE(TAG, "submit control: %s", esp_err_to_name(err));
 }
 
-void Tab5Profile::handle_control(const tab5::MsgHeader &header, const uint8_t *) {
+void Tab5Profile::handle_control(const tab5::MsgHeader &header, const uint8_t *payload) {
     switch (static_cast<tab5::Type>(header.type)) {
         case tab5::Type::GetInfo:
             send_info(header.seq);
             return;
-        default:
-            events_.error(tab5::Channel::Control, tab5::ErrorCode::Malformed, header.seq);
+        case tab5::Type::SetVolume: {
+            tab5::VolumeMessage message;
+            if (header.length != sizeof(message)) break;
+            memcpy(&message, payload, sizeof(message));
+            if (message.stream != static_cast<uint8_t>(tab5::Stream::Bulk)) {
+                events_.error(tab5::Channel::Control, tab5::ErrorCode::Unsupported, header.seq);
+                return;
+            }
+            audio_->set_volume(message.mute, message.volume);
             return;
+        }
+        default:
+            break;
     }
+    events_.error(tab5::Channel::Control, tab5::ErrorCode::Malformed, header.seq);
 }
 
 void Tab5Profile::send_info(uint32_t seq) {
@@ -181,60 +216,72 @@ void Tab5Profile::send_info(uint32_t seq) {
                      1u << static_cast<int>(tab5::Encoding::Raw) |
                      1u << static_cast<int>(tab5::Encoding::Lz4);
     info.max_message[static_cast<int>(tab5::Channel::Control)] = kControlBytes;
-    info.max_message[static_cast<int>(tab5::Channel::Video)] = kSlotBytes;
+    info.max_message[static_cast<int>(tab5::Channel::Video)] = kVideoSlotBytes;
+    info.max_message[static_cast<int>(tab5::Channel::Audio)] = kAudioSlotBytes;
     info.epoch = video_->epoch();
     info.overlay_w = size.width;
     info.overlay_h = size.height;
     info.max_fps = kMaxFps;
+    info.volume[static_cast<int>(tab5::Stream::Bulk)] = audio_->volume();
+    info.audio_max_rate = Tab5Audio::kMaxRate;
     events_.send(tab5::Type::Info, seq, &info, sizeof(info), info.epoch);
 }
 
-void Tab5Profile::video_configured() {
+void Tab5Profile::configured(Receiver &receiver) {
     portENTER_CRITICAL(&lock_);
-    video_active_ = true;
+    receiver.active = true;
     portEXIT_CRITICAL(&lock_);
-    for (Slot *slot : slots_) {
+    for (Slot *slot : receiver.slots) {
         if (slot->state == SlotState::Idle) submit(slot);
     }
 }
 
-void Tab5Profile::video_unconfigured() {
+void Tab5Profile::unconfigured(Receiver &receiver) {
     portENTER_CRITICAL(&lock_);
-    video_active_ = false;
+    receiver.active = false;
     portEXIT_CRITICAL(&lock_);
-    video_->end();
+    if (receiver.channel == tab5::Channel::Video) {
+        video_->end();
+    } else {
+        audio_->end();
+    }
 }
 
 void Tab5Profile::submit(Slot *slot) {
+    Receiver &receiver = *slot->receiver;
     portENTER_CRITICAL(&lock_);
-    const bool active = video_active_;
+    const bool active = receiver.active;
     slot->state = active ? SlotState::Usb : SlotState::Idle;
     portEXIT_CRITICAL(&lock_);
     if (!active) return;
-    esp_err_t err = video_vendor_->out().submit(&slot->transfer);
+    esp_err_t err = receiver.vendor->out().submit(&slot->transfer);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "submit video: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "submit %u: %s", (unsigned)receiver.channel, esp_err_to_name(err));
         slot->state = SlotState::Idle;
     }
 }
 
 void Tab5Profile::release(void *context) {
     auto *slot = static_cast<Slot *>(context);
-    slot->owner->submit(slot);
+    slot->receiver->owner->submit(slot);
 }
 
-void Tab5Profile::video_done(usb_device::Transfer *transfer) {
+void Tab5Profile::receive_done(usb_device::Transfer *transfer) {
     auto *slot = static_cast<Slot *>(transfer->context);
-    Tab5Profile *self = slot->owner;
+    Receiver &receiver = *slot->receiver;
     if (transfer->status == usb_device::TransferStatus::Canceled) {
         slot->state = SlotState::Idle;
         return;
     }
     if (transfer->status != usb_device::TransferStatus::Completed) {
-        ESP_LOGW(TAG, "video status %d", (int)transfer->status);
-        self->submit(slot);
+        ESP_LOGW(TAG, "channel %u status %d", (unsigned)receiver.channel, (int)transfer->status);
+        receiver.owner->submit(slot);
         return;
     }
-    slot->state = SlotState::Video;
-    self->video_->submit(transfer->buffer, transfer->actual, release, slot);
+    slot->state = SlotState::Busy;
+    if (receiver.channel == tab5::Channel::Video) {
+        receiver.owner->video_->submit(transfer->buffer, transfer->actual, release, slot);
+    } else {
+        receiver.owner->audio_->submit(transfer->buffer, transfer->actual, release, slot);
+    }
 }

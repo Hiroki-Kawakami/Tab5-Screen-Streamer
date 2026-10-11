@@ -5,6 +5,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 
 use crate::protocol::PixelFormat;
 
+#[derive(Clone)]
 pub struct Input {
     pub path: String,
     pub format: Option<String>,
@@ -313,5 +314,69 @@ fn jpeg_length(data: &[u8]) -> Option<usize> {
         if pos + 1 >= data.len() {
             return None;
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct AudioFormat {
+    pub rate: u32,
+    pub channels: u8,
+    pub bits: u8,
+}
+
+impl AudioFormat {
+    pub fn frame_bytes(&self) -> usize {
+        self.channels as usize * self.bits as usize / 8
+    }
+}
+
+/// Interleaved little-endian PCM of the input's audio from ffmpeg.
+pub struct AudioSource {
+    child: Child,
+    stdout: ChildStdout,
+}
+
+impl AudioSource {
+    pub fn spawn(input: &Input, format: AudioFormat) -> Result<Self, String> {
+        let sample = match format.bits {
+            16 => "s16le",
+            24 => "s24le",
+            32 => "s32le",
+            bits => return Err(format!("{bits} bit audio")),
+        };
+        let mut command = Command::new("ffmpeg");
+        command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+        if input.realtime {
+            command.arg("-re");
+        }
+        if input.looped {
+            command.args(["-stream_loop", "-1"]);
+        }
+        let mut child = command
+            .args(input.args())
+            .args(["-vn", "-sn", "-ac", &format.channels.to_string()])
+            .args(["-ar", &format.rate.to_string(), "-f", sample, "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("ffmpeg: {e}"))?;
+        let stdout = child.stdout.take().unwrap();
+        Ok(AudioSource { child, stdout })
+    }
+
+    /// Fills `buffer`, or returns false at the end of the input.
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<bool, String> {
+        match self.stdout.read_exact(buffer) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+            Err(e) => Err(format!("ffmpeg audio: {e}")),
+        }
+    }
+}
+
+impl Drop for AudioSource {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

@@ -10,6 +10,7 @@
 #include <memory>
 #include "bsp.h"
 #include "freertos/FreeRTOS.h"
+#include "tab5_audio.hpp"
 #include "tab5_events.hpp"
 #include "tab5_video.hpp"
 #include "usb/usb_profile.hpp"
@@ -26,14 +27,26 @@ private:
     struct Slot;
     static constexpr int kSlots = 4;
 
+    /* A bulk OUT endpoint whose transfers go to the video or audio task. */
+    struct Receiver {
+        Tab5Profile *owner;
+        tab5::Channel channel;
+        uint32_t slot_bytes;
+        std::shared_ptr<usb_device::Vendor> vendor;
+        Slot *slots[kSlots];
+        bool active;
+    };
+
     static void control_done(usb_device::Transfer *transfer);
-    static void video_done(usb_device::Transfer *transfer);
+    static void receive_done(usb_device::Transfer *transfer);
     static void release(void *context);
+    esp_err_t create(Receiver &receiver, const char *name, const char *guid, uint32_t caps);
+    void destroy(Receiver &receiver);
+    void configured(Receiver &receiver);
+    void unconfigured(Receiver &receiver);
+    void submit(Slot *slot);
     void control_configured();
     void control_unconfigured();
-    void video_configured();
-    void video_unconfigured();
-    void submit(Slot *slot);
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
     void send_info(uint32_t seq);
     static void orientation_changed(bsp_imu_orientation_t orientation, void *arg);
@@ -41,11 +54,11 @@ private:
 
     Tab5Events events_;
     std::unique_ptr<Tab5Video> video_;
+    std::unique_ptr<Tab5Audio> audio_;
     std::shared_ptr<usb_device::Vendor> control_;
-    std::shared_ptr<usb_device::Vendor> video_vendor_;
     usb_device::Transfer control_transfer_ = {};
-    Slot *slots_[kSlots] = {};
+    Receiver video_in_ = {};
+    Receiver audio_in_ = {};
     portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
-    bool video_active_ = false;
     std::atomic<uint8_t> orientation_ = 0;
 };

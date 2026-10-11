@@ -6,13 +6,15 @@ mod usbip;
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use link::{InPipe, Link, OutPipe};
 use protocol::{Encoding, Event, Info, Target};
-use source::{Input, Layout, Output, Source};
+use source::{AudioFormat, AudioSource, Input, Layout, Output, Source};
 
 const IN_BYTES: usize = 512;
 const IN_QUEUE: usize = 2;
@@ -26,12 +28,21 @@ type Result<T> = std::result::Result<T, String>;
 struct Session {
     control_out: Box<dyn OutPipe>,
     video_out: Box<dyn OutPipe>,
+    audio_out: Option<Box<dyn OutPipe>>,
+    audio_level: Arc<AudioLevel>,
     events: Receiver<Event>,
     control_seq: u32,
     video_seq: u32,
 }
 
-fn read_events(mut input: Box<dyn InPipe>, events: mpsc::Sender<Event>) {
+/// The device's last EV_AUDIO, and how many have come.
+#[derive(Default)]
+struct AudioLevel {
+    buffered: AtomicU32,
+    reports: AtomicU32,
+}
+
+fn read_events(mut input: Box<dyn InPipe>, events: mpsc::Sender<Event>, level: Arc<AudioLevel>) {
     for _ in 0..IN_QUEUE {
         input.submit(IN_BYTES);
     }
@@ -39,6 +50,10 @@ fn read_events(mut input: Box<dyn InPipe>, events: mpsc::Sender<Event>) {
         match input.wait(POLL) {
             Ok(data) => {
                 for event in protocol::parse_events(&data) {
+                    if let Event::Audio { buffered, .. } = event {
+                        level.buffered.store(buffered, Ordering::Relaxed);
+                        level.reports.fetch_add(1, Ordering::Release);
+                    }
                     if events.send(event).is_err() {
                         return;
                     }
@@ -58,10 +73,14 @@ impl Session {
     fn new(link: Link) -> Self {
         let (sender, events) = mpsc::channel();
         let control_in = link.control_in;
-        thread::spawn(move || read_events(control_in, sender));
+        let audio_level = Arc::new(AudioLevel::default());
+        let level = audio_level.clone();
+        thread::spawn(move || read_events(control_in, sender, level));
         Session {
             control_out: link.control_out,
             video_out: link.video_out,
+            audio_out: Some(link.audio_out),
+            audio_level,
             events,
             control_seq: 0,
             video_seq: 0,
@@ -159,6 +178,7 @@ struct PlayOptions {
     encoding: Encoding,
     front: bool,
     blit: bool,
+    audio: Option<AudioFormat>,
     rotation: Option<u32>,
     quality: u32,
 }
@@ -349,7 +369,13 @@ fn start_stream(options: &PlayOptions, info: &Info, rotation: u32) -> Result<Str
 }
 
 /// Applies a device event; true when the stream has to start over.
-fn apply(event: Event, info: &mut Info, swaps: &mut VecDeque<u32>, options: &PlayOptions) -> bool {
+fn apply(
+    event: Event,
+    info: &mut Info,
+    swaps: &mut VecDeque<u32>,
+    audio: &mut Option<(u32, u32)>,
+    options: &PlayOptions,
+) -> bool {
     match event {
         Event::SwapDone { seq } => {
             while swaps.front().is_some_and(|&s| s <= seq) {
@@ -361,6 +387,22 @@ fn apply(event: Event, info: &mut Info, swaps: &mut VecDeque<u32>, options: &Pla
             println!("orientation {orientation}");
             info.orientation = orientation as u8;
             options.rotation.is_none()
+        }
+        Event::Volume {
+            stream,
+            mute,
+            volume,
+        } => {
+            println!(
+                "volume {stream}: {:.1} dB{}",
+                volume as f64 / 256.0,
+                if mute { ", muted" } else { "" }
+            );
+            false
+        }
+        Event::Audio { buffered, capacity } => {
+            *audio = Some((buffered, capacity));
+            false
         }
         Event::Format { format, epoch } => {
             println!("pixel format {format:?}, epoch {epoch}");
@@ -375,8 +417,72 @@ fn apply(event: Event, info: &mut Info, swaps: &mut VecDeque<u32>, options: &Pla
     }
 }
 
+const AUDIO_CHUNKS_PER_SECOND: u32 = 50;
+const AUDIO_TARGET_CHUNKS: u32 = 3;
+const AUDIO_POLL: Duration = Duration::from_millis(2);
+
+/// Sends the input's audio, keeping about AUDIO_TARGET_CHUNKS queued on the
+/// device so its endpoint never fills and stalls the others.
+fn stream_audio(
+    input: Input,
+    format: AudioFormat,
+    mut out: Box<dyn OutPipe>,
+    level: Arc<AudioLevel>,
+) -> Result<()> {
+    let mut source = AudioSource::spawn(&input, format)?;
+    let chunk_frames = format.rate / AUDIO_CHUNKS_PER_SECOND;
+    let target = chunk_frames * AUDIO_TARGET_CHUNKS;
+    let mut chunk = vec![0u8; chunk_frames as usize * format.frame_bytes()];
+    let mut seq = 1;
+    let mut transfer = protocol::message(
+        protocol::AUDIO_FORMAT,
+        seq,
+        0,
+        &protocol::audio_format(format.rate, format.channels, format.bits),
+    );
+    let mut reports = level.reports.load(Ordering::Acquire);
+    let mut sent = 0;
+    while source.read(&mut chunk)? {
+        seq += 1;
+        transfer.extend_from_slice(&protocol::message(protocol::AUDIO_DATA, seq, 0, &chunk));
+        loop {
+            let now = level.reports.load(Ordering::Acquire);
+            if now != reports {
+                reports = now;
+                sent = 0;
+            }
+            if level.buffered.load(Ordering::Relaxed) + sent < target {
+                break;
+            }
+            thread::sleep(AUDIO_POLL);
+        }
+        while out.pending() > 0 {
+            out.wait(TIMEOUT).map_err(|e| format!("audio: {e}"))?;
+        }
+        out.submit(std::mem::take(&mut transfer));
+        sent += chunk_frames;
+    }
+    while out.pending() > 0 {
+        out.wait(TIMEOUT).map_err(|e| format!("audio: {e}"))?;
+    }
+    Ok(())
+}
+
 fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     let mut info = session.info()?;
+    if let Some(format) = options.audio {
+        if format.rate > info.audio_max_rate {
+            return Err(format!("the device plays up to {} Hz", info.audio_max_rate));
+        }
+        let input = options.input.clone();
+        let out = session.audio_out.take().unwrap();
+        let level = session.audio_level.clone();
+        thread::spawn(move || {
+            if let Err(e) = stream_audio(input, format, out, level) {
+                eprintln!("{e}");
+            }
+        });
+    }
     let rotation_of = |info: &Info| options.rotation.unwrap_or(info.orientation as u32);
     let mut stream = start_stream(&options, &info, rotation_of(&info))?;
     let limit = info.max_message[protocol::VIDEO] as usize;
@@ -388,6 +494,7 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
     let window = info.swap_window.max(1) as usize;
     let frame_interval = Duration::from_secs_f64(1.0 / info.max_fps.max(1) as f64);
     let mut swaps: VecDeque<u32> = VecDeque::new();
+    let mut audio_level = None;
     let mut next_frame = Instant::now();
     let mut first = true;
     let mut stats_start = Instant::now();
@@ -403,7 +510,9 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
                 Duration::ZERO
             };
             match session.events.recv_timeout(wait) {
-                Ok(event) => restart |= apply(event, &mut info, &mut swaps, &options),
+                Ok(event) => {
+                    restart |= apply(event, &mut info, &mut swaps, &mut audio_level, &options)
+                }
                 Err(RecvTimeoutError::Timeout) if wait > Duration::ZERO => {
                     return Err("no SWAP_DONE".into())
                 }
@@ -447,8 +556,14 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
         let elapsed = stats_start.elapsed();
         if elapsed >= STATS_PERIOD {
             let seconds = elapsed.as_secs_f64();
+            let audio = match audio_level {
+                Some((buffered, capacity)) => {
+                    format!(", audio {buffered}/{capacity} frames buffered")
+                }
+                None => String::new(),
+            };
             println!(
-                "{:.1} frames/s, {:.1} MB/s",
+                "{:.1} frames/s, {:.1} MB/s{audio}",
                 stats_frames as f64 / seconds,
                 stats_bytes as f64 / seconds / 1e6
             );
@@ -458,6 +573,35 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
         }
     }
     session.flush_video()
+}
+
+fn volume(session: &mut Session, db: f64, mute: bool) -> Result<()> {
+    session.control_seq += 1;
+    let payload = protocol::set_volume(protocol::BULK, mute, (db * 256.0).round() as i16);
+    session.control_out.submit(protocol::message(
+        protocol::SET_VOLUME,
+        session.control_seq,
+        0,
+        &payload,
+    ));
+    session
+        .control_out
+        .wait(TIMEOUT)
+        .map_err(|e| format!("set volume: {e}"))?;
+    loop {
+        match session.events.recv_timeout(TIMEOUT) {
+            Ok(Event::Volume { mute, volume, .. }) => {
+                println!(
+                    "bulk volume {:.1} dB{}",
+                    volume as f64 / 256.0,
+                    if mute { ", muted" } else { "" }
+                );
+                return Ok(());
+            }
+            Ok(event) => report(&event),
+            Err(_) => return Err("no EV_VOLUME".into()),
+        }
+    }
 }
 
 fn fill(session: &mut Session, color: u32) -> Result<()> {
@@ -486,10 +630,12 @@ fn usage() -> ExitCode {
 commands:
   info                       print the device's INFO
   fill <rrggbb>              fill the panel with a color
+  volume <db> [mute]         set the bulk audio volume
   play [options] <input>     stream a video through ffmpeg
     --encoding jpeg|raw|lz4  default jpeg
     --front                  draw into FRONT without swapping
     --blit                   send the source as is; the device rotates and scales
+    --audio [rate:ch:bits]   also send the input's audio, default 48000:2:16
     --rotate <0-3>|auto      counter-clockwise quarter turns, or the device's
     --quality <2-31>         ffmpeg mjpeg -q:v, default 4
     --format <fmt>           ffmpeg input format, e.g. lavfi
@@ -510,6 +656,7 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
         encoding: Encoding::Jpeg,
         front: false,
         blit: false,
+        audio: None,
         rotation: Some(0),
         quality: 4,
     };
@@ -526,6 +673,21 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
             }
             "--front" => options.front = true,
             "--blit" => options.blit = true,
+            "--audio" => {
+                let mut format = AudioFormat {
+                    rate: 48000,
+                    channels: 2,
+                    bits: 16,
+                };
+                if let Some(spec) = args.clone().next().filter(|a| a.contains(':')) {
+                    args.next();
+                    let mut parts = spec.split(':').map(|v| v.parse::<u32>().ok());
+                    format.rate = parts.next()??;
+                    format.channels = parts.next()?? as u8;
+                    format.bits = parts.next()?? as u8;
+                }
+                options.audio = Some(format);
+            }
             "--rotate" => {
                 options.rotation = match args.next()?.as_str() {
                     "auto" => None,
@@ -558,12 +720,17 @@ fn main() -> ExitCode {
     enum Command {
         Info,
         Fill(u32),
+        Volume(f64, bool),
         Play(PlayOptions),
     }
     let command = match (args.first().map(String::as_str), &args[1.min(args.len())..]) {
         (Some("info"), []) => Command::Info,
         (Some("fill"), [color]) => match u32::from_str_radix(color, 16) {
             Ok(color) => Command::Fill(color),
+            Err(_) => return usage(),
+        },
+        (Some("volume"), [db]) | (Some("volume"), [db, _]) => match db.parse() {
+            Ok(db) => Command::Volume(db, args.get(2).map(String::as_str) == Some("mute")),
             Err(_) => return usage(),
         },
         (Some("play"), rest) => match parse_play(rest) {
@@ -587,6 +754,7 @@ fn main() -> ExitCode {
     let result = match command {
         Command::Info => session.info().map(|info| println!("{info:#?}")),
         Command::Fill(color) => fill(&mut session, color),
+        Command::Volume(db, mute) => volume(&mut session, db, mute),
         Command::Play(options) => play(&mut session, options),
     };
     match result {

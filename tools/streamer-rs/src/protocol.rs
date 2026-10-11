@@ -4,11 +4,17 @@ pub const MAGIC: u16 = 0x3554;
 pub const HEADER_BYTES: usize = 16;
 
 pub const GET_INFO: u8 = 0x01;
+pub const SET_VOLUME: u8 = 0x03;
 pub const INFO: u8 = 0x81;
 pub const SWAP_DONE: u8 = 0x82;
 pub const ERROR: u8 = 0x83;
 pub const ORIENTATION: u8 = 0x84;
 pub const FORMAT: u8 = 0x85;
+pub const VOLUME: u8 = 0x8b;
+pub const AUDIO: u8 = 0x8c;
+pub const AUDIO_FORMAT: u8 = 0x20;
+pub const AUDIO_DATA: u8 = 0x21;
+pub const BULK: u8 = 1;
 pub const DRAW_DIRECT: u8 = 0x10;
 pub const DRAW_BLIT: u8 = 0x11;
 pub const FILL: u8 = 0x12;
@@ -69,6 +75,28 @@ pub struct Info {
     pub epoch: u32,
     pub overlay_visible: bool,
     pub max_fps: u16,
+    pub volume: [Volume; 2],
+    pub audio_max_rate: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct Volume {
+    pub mute: bool,
+    pub volume: i16,
+    pub min: i16,
+    pub max: i16,
+    pub resolution: i16,
+}
+
+fn volume_at(p: &[u8], at: usize) -> Volume {
+    Volume {
+        mute: p[at] != 0,
+        volume: u16_at(p, at + 2) as i16,
+        min: u16_at(p, at + 4) as i16,
+        max: u16_at(p, at + 6) as i16,
+        resolution: u16_at(p, at + 8) as i16,
+    }
 }
 
 pub enum Event {
@@ -77,6 +105,8 @@ pub enum Event {
     Error { seq: u32, channel: u8, code: u8 },
     Orientation(u32),
     Format { format: PixelFormat, epoch: u32 },
+    Volume { stream: u8, mute: bool, volume: i16 },
+    Audio { buffered: u32, capacity: u32 },
     Other,
 }
 
@@ -136,6 +166,18 @@ pub fn draw_blit(blit: &Blit, data: &[u8]) -> Vec<u8> {
     out
 }
 
+pub fn audio_format(rate: u32, channels: u8, bits: u8) -> Vec<u8> {
+    let mut out = rate.to_le_bytes().to_vec();
+    out.extend_from_slice(&[channels, bits, 0, 0]);
+    out
+}
+
+pub fn set_volume(stream: u8, mute: bool, volume: i16) -> Vec<u8> {
+    let mut out = vec![stream, mute as u8];
+    out.extend_from_slice(&volume.to_le_bytes());
+    out
+}
+
 pub fn fill(target: Target, x: u16, y: u16, w: u16, h: u16, rgb: u32) -> Vec<u8> {
     let mut out = vec![target as u8, 0];
     for value in [x, y, w, h] {
@@ -182,6 +224,8 @@ fn parse_info(p: &[u8]) -> Option<Info> {
         epoch: u32_at(p, 32),
         overlay_visible: p[36] != 0,
         max_fps: u16_at(p, 46),
+        volume: [volume_at(p, 48), volume_at(p, 58)],
+        audio_max_rate: u32_at(p, 68),
     })
 }
 
@@ -214,6 +258,15 @@ pub fn parse_events(data: &[u8]) -> Vec<Event> {
             FORMAT if !payload.is_empty() => match pixel_format(payload[0]) {
                 Some(format) => Event::Format { format, epoch },
                 None => continue,
+            },
+            VOLUME if payload.len() >= 4 => Event::Volume {
+                stream: payload[0],
+                mute: payload[1] != 0,
+                volume: u16_at(payload, 2) as i16,
+            },
+            AUDIO if payload.len() >= 12 => Event::Audio {
+                buffered: u32_at(payload, 4),
+                capacity: u32_at(payload, 8),
             },
             _ => Event::Other,
         };

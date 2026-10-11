@@ -139,21 +139,13 @@ INFO
   u16 overlay_x, overlay_y, overlay_w, overlay_h
   u16 max_fps                  frames per second the PC sends at most
   Volume volume[2]             UAC, BULK
-  u8  audio_format_count
-  u8  reserved[3]
-  AudioFormat audio_formats[audio_format_count]
+  u32 audio_max_rate           highest AUDIO_FORMAT sample rate
 
 Volume
   u8  mute
   u8  reserved
   i16 volume
   i16 min, max, resolution
-
-AudioFormat
-  u32 sample_rate
-  u8  channels
-  u8  bits
-  u16 reserved
 ```
 
 ## Video endpoint
@@ -264,10 +256,15 @@ is under the overlay; the PC redraws damaged areas.
 - The PC sends `AUDIO_FORMAT` after connecting and before every format change.
   `AUDIO_DATA` before the first `AUDIO_FORMAT` is dropped.
 - PCM already buffered plays out in its own format before the new one applies.
-- A format not listed in `INFO` is answered with `EV_ERROR`, and the data
+- Any sample rate up to `audio_max_rate` is taken, with 1 or 2 channels of 16,
+  24 or 32 bits. Anything else is answered with `EV_ERROR`, and the data
   following it is dropped until the next `AUDIO_FORMAT`.
 - Bulk has no clock. While bulk audio plays, the device sends `EV_AUDIO`
-  periodically and the PC paces its writes to keep the buffer level steady.
+  periodically and the PC paces its writes from that buffer level, the usual
+  feedback for a sink that owns the clock.
+- The PC keeps the buffer level well below `capacity_frames`. A full audio
+  endpoint refuses data, and some hosts then stall the device's other
+  endpoints along with it.
 
 ### Volume
 

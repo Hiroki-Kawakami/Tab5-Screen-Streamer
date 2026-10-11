@@ -9,9 +9,11 @@ pub const VENDOR_ID: u16 = 0xf055;
 pub const PRODUCT_ID: u16 = 0x1118;
 pub const CONTROL_INTERFACE: u8 = 0;
 pub const VIDEO_INTERFACE: u8 = 1;
+pub const AUDIO_INTERFACE: u8 = 2;
 pub const CONTROL_OUT: u8 = 0x01;
 pub const CONTROL_IN: u8 = 0x81;
 pub const VIDEO_OUT: u8 = 0x02;
+pub const AUDIO_OUT: u8 = 0x03;
 
 #[derive(Debug)]
 pub enum Error {
@@ -45,6 +47,7 @@ pub struct Link {
     pub control_out: Box<dyn OutPipe>,
     pub control_in: Box<dyn InPipe>,
     pub video_out: Box<dyn OutPipe>,
+    pub audio_out: Box<dyn OutPipe>,
 }
 
 struct NusbOut {
@@ -118,6 +121,7 @@ pub fn open_nusb() -> Result<Link, String> {
     };
     let control = claim(CONTROL_INTERFACE)?;
     let video = claim(VIDEO_INTERFACE)?;
+    let audio = claim(AUDIO_INTERFACE)?;
     let control_out = control
         .endpoint::<Bulk, Out>(CONTROL_OUT)
         .map_err(|e| format!("control out: {e}"))?;
@@ -127,6 +131,9 @@ pub fn open_nusb() -> Result<Link, String> {
     let video_out = video
         .endpoint::<Bulk, Out>(VIDEO_OUT)
         .map_err(|e| format!("video out: {e}"))?;
+    let audio_out = audio
+        .endpoint::<Bulk, Out>(AUDIO_OUT)
+        .map_err(|e| format!("audio out: {e}"))?;
     Ok(Link {
         control_out: Box::new(NusbOut {
             endpoint: control_out,
@@ -137,6 +144,10 @@ pub fn open_nusb() -> Result<Link, String> {
         }),
         video_out: Box::new(NusbOut {
             endpoint: video_out,
+            parts: VecDeque::new(),
+        }),
+        audio_out: Box::new(NusbOut {
+            endpoint: audio_out,
             parts: VecDeque::new(),
         }),
     })

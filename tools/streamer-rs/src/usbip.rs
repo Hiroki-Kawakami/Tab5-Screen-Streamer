@@ -287,5 +287,6 @@ pub fn connect(address: &str) -> Result<Link, String> {
             queue: VecDeque::new(),
         }),
         video_out: Box::new(out(link::VIDEO_OUT)),
+        audio_out: Box::new(out(link::AUDIO_OUT)),
     })
 }

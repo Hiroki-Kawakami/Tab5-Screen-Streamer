@@ -16,15 +16,20 @@ constexpr uint16_t kProtocolVersion = 1;
 
 enum class Type : uint8_t {
     GetInfo = 0x01,
+    SetVolume = 0x03,
     Info = 0x81,
     SwapDone = 0x82,
     Error = 0x83,
     Orientation = 0x84,
     Format = 0x85,
+    Volume = 0x8b,
+    Audio = 0x8c,
     DrawDirect = 0x10,
     DrawBlit = 0x11,
     Fill = 0x12,
     Swap = 0x13,
+    AudioFormat = 0x20,
+    AudioData = 0x21,
 };
 
 enum class Channel : uint8_t { Control = 0, Video = 1, Audio = 2 };
@@ -37,6 +42,7 @@ enum class ErrorCode : uint8_t {
     DecodeFailed = 5,
 };
 
+enum class Stream : uint8_t { Uac = 0, Bulk = 1 };
 enum class Target : uint8_t { Front = 0, Back = 1 };
 enum class Encoding : uint8_t { Jpeg = 0, Raw = 1, Lz4 = 2 };
 enum class PixelFormat : uint8_t { Rgb565 = 1, Rgb888 = 2 };
@@ -96,6 +102,25 @@ struct __attribute__((packed)) Volume {
     int16_t min, max, resolution;
 };
 
+struct __attribute__((packed)) VolumeMessage {
+    uint8_t stream;
+    uint8_t mute;
+    int16_t volume;
+};
+
+struct __attribute__((packed)) AudioFormat {
+    uint32_t sample_rate;
+    uint8_t channels;
+    uint8_t bits;
+    uint16_t reserved;
+};
+
+struct __attribute__((packed)) AudioEvent {
+    uint32_t time_us;
+    uint32_t buffered_frames;
+    uint32_t capacity_frames;
+};
+
 struct __attribute__((packed)) Info {
     uint16_t protocol_version;
     uint16_t panel_width, panel_height;
@@ -113,8 +138,7 @@ struct __attribute__((packed)) Info {
     uint16_t overlay_x, overlay_y, overlay_w, overlay_h;
     uint16_t max_fps;
     Volume volume[2];
-    uint8_t audio_format_count;
-    uint8_t reserved[3];
+    uint32_t audio_max_rate;
 };
 
 /* Calls `fn(header, payload)` for each message. Returns false at the first
