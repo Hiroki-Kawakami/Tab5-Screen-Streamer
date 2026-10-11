@@ -4,6 +4,7 @@
  */
 
 #include "screen_streamer.hpp"
+#include <cstdlib>
 #include <cstring>
 #include "bsp.h"
 #include "display_manager.hpp"
@@ -83,6 +84,13 @@ static bool harness_format(int argc, const char *const *argv, void *) {
     }
     return panel_set_format(format) == ESP_OK;
 }
+
+static bool harness_clip(int argc, const char *const *argv, void *) {
+    if (argc == 2 && strcmp(argv[1], "off") == 0) return panel_set_clip(nullptr) == ESP_OK;
+    if (argc != 5) return false;
+    const bsp_rect_t clip = {{atoi(argv[1]), atoi(argv[2])}, {atoi(argv[3]), atoi(argv[4])}};
+    return panel_set_clip(&clip) == ESP_OK;
+}
 #endif
 
 void app_entry() {
@@ -106,6 +114,7 @@ void app_entry() {
 #ifdef CONFIG_HARNESS
     harness_register("mode", harness_mode, nullptr);
     harness_register("format", harness_format, nullptr);
+    harness_register("clip", harness_clip, nullptr);
 #endif
 
     lv_async_call([] {

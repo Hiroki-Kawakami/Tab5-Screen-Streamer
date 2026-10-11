@@ -5,6 +5,8 @@
 
 #include "panel.hpp"
 #include <algorithm>
+#include <atomic>
+#include <numeric>
 #include "display_manager.hpp"
 #include "driver/ppa.h"
 #include "esp_attr.h"
@@ -27,6 +29,7 @@ static constexpr int kStrips = 2;
 
 static lv_display_t *s_ui;
 static SemaphoreHandle_t s_lock;
+static std::atomic<int> s_preempting;
 static PanelFormatListener s_format_listener;
 static void *s_format_listener_arg;
 static uint8_t *s_strips[kStrips];
@@ -43,14 +46,33 @@ static size_t s_stride;
 static int s_framebuffers;
 static int s_front;
 static bool s_acquired;
+static bool s_clipped;
+static bsp_rect_t s_clip;
+static PanelClipListener s_clip_listener;
+static void *s_clip_listener_arg;
 
 static uint8_t *framebuffer(PanelBuffer buffer) {
-    const int index = buffer == PanelBuffer::Front ? s_front : (s_front + 1) % s_framebuffers;
+    const int index =
+        buffer == PanelBuffer::Front || s_clipped ? s_front : (s_front + 1) % s_framebuffers;
     return static_cast<uint8_t *>(bsp_display_get_frame_buffer(index));
 }
 
 static bool rows_valid(int y, int height) {
     return y >= 0 && height > 0 && y + height <= s_size.height;
+}
+
+static bool intersect(bsp_rect_t *area, const bsp_rect_t &clip) {
+    const int x0 = std::max(area->origin.x, clip.origin.x);
+    const int y0 = std::max(area->origin.y, clip.origin.y);
+    const int x1 = std::min(area->origin.x + area->size.width, clip.origin.x + clip.size.width);
+    const int y1 = std::min(area->origin.y + area->size.height, clip.origin.y + clip.size.height);
+    if (x1 <= x0 || y1 <= y0) return false;
+    *area = {{x0, y0}, {x1 - x0, y1 - y0}};
+    return true;
+}
+
+static PanelBlit rows_blit(PanelBuffer buffer, int y, int height) {
+    return {buffer, {s_size.width, height}, s_format, BSP_ROTATION_0, {{0, y}, {s_size.width, height}}};
 }
 
 static ppa_srm_color_mode_t srm_mode(bsp_pixel_format_t format) {
@@ -142,13 +164,20 @@ static void delete_pipeline() {
 }
 
 static void set_ui_visible(bool visible) {
-    lv_lock();
     display_manager.set_visible(s_ui, visible);
-    lv_unlock();
     if (!visible) bsp_display_wait_draw();
 }
 
+// The video task takes the lock back as soon as it gives it while frames
+// queue up, starving any lower priority task waiting for it.
+static void preempt_lock() {
+    s_preempting++;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_preempting--;
+}
+
 void panel_lock() {
+    while (s_preempting.load()) vTaskDelay(1);
     xSemaphoreTake(s_lock, portMAX_DELAY);
 }
 
@@ -157,26 +186,37 @@ void panel_unlock() {
 }
 
 void panel_acquire() {
+    lv_lock();
     set_ui_visible(false);
+    panel_lock();
     // A partial LVGL display always presents framebuffer 0.
     s_front = 0;
     s_acquired = true;
     create_pipeline();
+    panel_unlock();
+    lv_unlock();
 }
 
 void panel_release() {
+    lv_lock();
+    panel_lock();
     delete_pipeline();
     // The UI's partial blits land in the framebuffer last presented, then
     // present 0; anything else on screen would hide them.
     display_manager.present(0);
+    s_front = 0;
     s_acquired = false;
+    panel_unlock();
     set_ui_visible(true);
+    lv_unlock();
 }
 
 esp_err_t panel_set_format(bsp_pixel_format_t format) {
-    panel_lock();
+    lv_lock();
+    preempt_lock();
     if (format == s_format) {
         panel_unlock();
+        lv_unlock();
         return ESP_OK;
     }
     if (s_acquired) {
@@ -185,9 +225,7 @@ esp_err_t panel_set_format(bsp_pixel_format_t format) {
         set_ui_visible(false);
     }
     esp_err_t err = bsp_display_reconfigure(format, 0);
-    lv_lock();
     display_manager.set_color_format(s_ui);
-    lv_unlock();
     s_format = bsp_display_get_pixel_format();
     s_stride = s_size.width * bsp_pixel_format_bytes(s_format);
     if (s_acquired) {
@@ -202,6 +240,7 @@ esp_err_t panel_set_format(bsp_pixel_format_t format) {
         s_format_listener(s_format, s_format_listener_arg);
     }
     panel_unlock();
+    lv_unlock();
     return err;
 }
 
@@ -214,6 +253,32 @@ void panel_set_format_listener(PanelFormatListener listener, void *arg) {
 
 bool panel_acquired() {
     return s_acquired;
+}
+
+esp_err_t panel_set_clip(const bsp_rect_t *clip) {
+    if (clip && (clip->origin.x < 0 || clip->origin.y < 0 || clip->size.width <= 0 ||
+                 clip->size.height <= 0 || clip->origin.x + clip->size.width > s_size.width ||
+                 clip->origin.y + clip->size.height > s_size.height)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    preempt_lock();
+    s_clipped = clip != nullptr;
+    if (clip) s_clip = *clip;
+    if (s_clip_listener) s_clip_listener(clip, s_clip_listener_arg);
+    panel_unlock();
+    return ESP_OK;
+}
+
+bool panel_clip(bsp_rect_t *clip) {
+    if (s_clipped) *clip = s_clip;
+    return s_clipped;
+}
+
+void panel_set_clip_listener(PanelClipListener listener, void *arg) {
+    panel_lock();
+    s_clip_listener = listener;
+    s_clip_listener_arg = arg;
+    panel_unlock();
 }
 
 bsp_size_t panel_size() {
@@ -229,6 +294,7 @@ int panel_framebuffers() {
 }
 
 void panel_swap() {
+    if (s_clipped) return;
     s_front = (s_front + 1) % s_framebuffers;
     display_manager.present(s_front);
 }
@@ -239,6 +305,7 @@ esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888) {
         area.origin.y + area.size.height > s_size.height) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_clipped && !intersect(&area, s_clip)) return ESP_OK;
     ppa_fill_oper_config_t config = {};
     config.out.buffer = framebuffer(buffer);
     config.out.buffer_size = s_stride * s_size.height;
@@ -260,9 +327,7 @@ esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888) {
 
 esp_err_t panel_write_rows(PanelBuffer buffer, int y, int height, const uint8_t *pixels) {
     if (!rows_valid(y, height)) return ESP_ERR_INVALID_ARG;
-    const PanelBlit blit = {buffer, {s_size.width, height}, s_format, BSP_ROTATION_0,
-                            {{0, y}, {s_size.width, height}}};
-    return panel_blit(blit, pixels);
+    return panel_blit(rows_blit(buffer, y, height), pixels);
 }
 
 esp_err_t panel_write_lz4_rows(PanelBuffer buffer, int y, int height, const uint8_t *lz4,
@@ -270,6 +335,7 @@ esp_err_t panel_write_lz4_rows(PanelBuffer buffer, int y, int height, const uint
     if (!rows_valid(y, height) || y % kRowAlign || height % kRowAlign) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_clipped) return panel_blit_lz4(rows_blit(buffer, y, height), lz4, bytes);
     uint8_t *dst = framebuffer(buffer) + y * s_stride;
     const size_t size = height * s_stride;
     const ptrdiff_t written = lz4_block_decompress(lz4, bytes, dst, size);
@@ -289,6 +355,7 @@ esp_err_t panel_decode_rows(PanelBuffer buffer, int y, int height, const uint8_t
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_pipeline) return ESP_ERR_INVALID_STATE;
+    if (s_clipped) return panel_blit_jpeg(rows_blit(buffer, y, height), jpeg, bytes);
     jpeg_enh_frame_info_t info = {};
     esp_err_t err = jpeg_enh_decoder_process(jpeg_ppa_pipeline_get_decoder(s_pipeline), jpeg,
                                              bytes, framebuffer(buffer) + y * s_stride,
@@ -323,50 +390,98 @@ static esp_err_t blit_scale(const PanelBlit &blit, uint32_t *scale_x, uint32_t *
     return *scale_x && *scale_y ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
 }
 
+static uint32_t scaled(uint32_t value, uint32_t scale) {
+    return value * scale / kScaleDenominator;
+}
+
+/* Source pixels [start, end) of an axis whose output stays inside [out0,
+ * out1). Edges round inward to a whole output pixel: PPA never finishes a
+ * block that ends mid pixel. */
+static bool clip_axis(uint32_t out0, uint32_t out1, uint32_t scale, uint32_t length,
+                      uint32_t *start, uint32_t *end) {
+    const uint32_t step = kScaleDenominator / std::gcd(kScaleDenominator, scale);
+    uint32_t a = (out0 * kScaleDenominator + scale - 1) / scale;
+    uint32_t b = std::min(out1 * kScaleDenominator / scale, length);
+    a = (a + step - 1) / step * step;
+    if (b < length) b -= b % step;
+    if (b <= a) return false;
+    *start = a;
+    *end = b;
+    return true;
+}
+
 /* Source rows [row, row + rows) as their own block, placed where they land
- * in the rotated, scaled source. */
-static ppa_srm_oper_config_t strip_config(const PanelBlit &blit, uint32_t scale_x,
-                                          uint32_t scale_y, const void *pixels, int row,
-                                          int rows) {
+ * in the rotated, scaled source and cut to the clip; false when nothing of
+ * them is visible. */
+static bool strip_config(const PanelBlit &blit, uint32_t scale_x, uint32_t scale_y,
+                         const void *pixels, int row, int rows, ppa_srm_oper_config_t *config) {
     const bsp_rect_t &area = blit.area;
-    const int start = row * scale_y / kScaleDenominator;
-    const int extent = rows * scale_y / kScaleDenominator;
+    bsp_rect_t visible = area;
+    if (s_clipped && !intersect(&visible, s_clip)) return false;
+    const uint32_t ex0 = visible.origin.x - area.origin.x;
+    const uint32_t ex1 = ex0 + visible.size.width;
+    const uint32_t ey0 = visible.origin.y - area.origin.y;
+    const uint32_t ey1 = ey0 + visible.size.height;
+    const uint32_t sw = scaled(blit.source.width, scale_x);
+    const uint32_t sh = scaled(blit.source.height, scale_y);
+    uint32_t u0, u1, v0, v1;
+    switch (blit.rotation) {
+        case BSP_ROTATION_90: u0 = sw - ey1; u1 = sw - ey0; v0 = ex0; v1 = ex1; break;
+        case BSP_ROTATION_180: u0 = sw - ex1; u1 = sw - ex0; v0 = sh - ey1; v1 = sh - ey0; break;
+        case BSP_ROTATION_270: u0 = ey0; u1 = ey1; v0 = sh - ex1; v1 = sh - ex0; break;
+        default: u0 = ex0; u1 = ex1; v0 = ey0; v1 = ey1; break;
+    }
+    uint32_t col0, col1, row0, row1;
+    if (!clip_axis(u0, u1, scale_x, blit.source.width, &col0, &col1) ||
+        !clip_axis(v0, v1, scale_y, blit.source.height, &row0, &row1)) {
+        return false;
+    }
+    row0 = std::max<uint32_t>(row0, row);
+    row1 = std::min<uint32_t>(row1, row + rows);
+    if (row1 <= row0) return false;
+
+    const uint32_t cs = scaled(col0, scale_x), ce = scaled(col1, scale_x);
+    const uint32_t rs = scaled(row0, scale_y), re = scaled(row1, scale_y);
     int x = area.origin.x;
     int y = area.origin.y;
     switch (blit.rotation) {
-        case BSP_ROTATION_90: x += start; break;
-        case BSP_ROTATION_180: y += area.size.height - start - extent; break;
-        case BSP_ROTATION_270: x += area.size.width - start - extent; break;
-        default: y += start; break;
+        case BSP_ROTATION_90: x += rs; y += sw - ce; break;
+        case BSP_ROTATION_180: x += sw - ce; y += sh - re; break;
+        case BSP_ROTATION_270: x += sh - re; y += cs; break;
+        default: x += cs; y += rs; break;
     }
 
-    ppa_srm_oper_config_t config = {};
-    config.in.buffer = pixels;
-    config.in.pic_w = blit.source.width;
-    config.in.pic_h = rows;
-    config.in.block_w = blit.source.width;
-    config.in.block_h = rows;
-    config.in.srm_cm = srm_mode(blit.format);
-    config.out.buffer = framebuffer(blit.buffer);
-    config.out.buffer_size = s_stride * s_size.height;
-    config.out.pic_w = s_size.width;
-    config.out.pic_h = s_size.height;
-    config.out.block_offset_x = x;
-    config.out.block_offset_y = y;
-    config.out.srm_cm = srm_mode(s_format);
-    config.rotation_angle = srm_angle(blit.rotation);
-    config.scale_x = (float)scale_x / kScaleDenominator;
-    config.scale_y = (float)scale_y / kScaleDenominator;
-    config.mode = PPA_TRANS_MODE_BLOCKING;
-    return config;
+    *config = {};
+    config->in.buffer = pixels;
+    config->in.pic_w = blit.source.width;
+    config->in.pic_h = rows;
+    config->in.block_offset_x = col0;
+    config->in.block_offset_y = row0 - row;
+    config->in.block_w = col1 - col0;
+    config->in.block_h = row1 - row0;
+    config->in.srm_cm = srm_mode(blit.format);
+    config->out.buffer = framebuffer(blit.buffer);
+    config->out.buffer_size = s_stride * s_size.height;
+    config->out.pic_w = s_size.width;
+    config->out.pic_h = s_size.height;
+    config->out.block_offset_x = x;
+    config->out.block_offset_y = y;
+    config->out.srm_cm = srm_mode(s_format);
+    config->rotation_angle = srm_angle(blit.rotation);
+    config->scale_x = (float)scale_x / kScaleDenominator;
+    config->scale_y = (float)scale_y / kScaleDenominator;
+    config->mode = PPA_TRANS_MODE_BLOCKING;
+    return true;
 }
 
 esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels) {
     uint32_t scale_x, scale_y;
     esp_err_t err = blit_scale(blit, &scale_x, &scale_y);
     if (err != ESP_OK) return err;
-    const ppa_srm_oper_config_t config =
-        strip_config(blit, scale_x, scale_y, pixels, 0, blit.source.height);
+    ppa_srm_oper_config_t config;
+    if (!strip_config(blit, scale_x, scale_y, pixels, 0, blit.source.height, &config)) {
+        return ESP_OK;
+    }
     return ppa_do_scale_rotate_mirror(s_copy, &config);
 }
 
@@ -395,8 +510,11 @@ esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t byt
             break;
         }
         previous = size;
-        ppa_srm_oper_config_t config =
-            strip_config(blit, scale_x, scale_y, s_strips[strip], row, rows);
+        ppa_srm_oper_config_t config;
+        if (!strip_config(blit, scale_x, scale_y, s_strips[strip], row, rows, &config)) {
+            strip ^= 1;
+            continue;
+        }
         config.mode = PPA_TRANS_MODE_NON_BLOCKING;
         config.user_data = s_strip_done[strip];
         s_strip_busy[strip] = true;
@@ -428,6 +546,10 @@ esp_err_t panel_blit_jpeg(const PanelBlit &blit, const uint8_t *jpeg, uint32_t b
     transform.scale_y = (float)scale_y / kScaleDenominator;
     transform.out_offset_x = blit.area.origin.x;
     transform.out_offset_y = blit.area.origin.y;
+    if (s_clipped) {
+        transform.out_clip = {(uint32_t)s_clip.origin.x, (uint32_t)s_clip.origin.y,
+                              (uint32_t)s_clip.size.width, (uint32_t)s_clip.size.height};
+    }
     jpeg_enh_frame_info_t info = {};
     err = jpeg_ppa_pipeline_process(s_pipeline, jpeg, bytes, &out, &transform, &info);
     if (err == ESP_OK && (info.origin_w != (uint32_t)blit.source.width ||

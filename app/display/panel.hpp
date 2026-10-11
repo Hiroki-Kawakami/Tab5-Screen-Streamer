@@ -23,15 +23,25 @@ bsp_size_t panel_size();
 bsp_pixel_format_t panel_format();
 int panel_framebuffers();
 
-/* Rebuilds the panel in `format`, waiting for panel_unlock(); from any task
- * but the LVGL one. Every framebuffer is undefined afterwards. The listener
- * runs inside, before drawing resumes. */
+/* Rebuilds the panel in `format`, waiting for panel_unlock(). Every
+ * framebuffer is undefined afterwards. The listener runs inside, before
+ * drawing resumes. */
 using PanelFormatListener = void (*)(bsp_pixel_format_t format, void *arg);
 esp_err_t panel_set_format(bsp_pixel_format_t format);
 void panel_set_format_listener(PanelFormatListener listener, void *arg);
 
-/* The rest runs on one task, holding the lock; drawing and swapping only
- * between acquire and release. */
+/* While a clip is set, swaps are held: Back is the framebuffer on screen and
+ * panel_swap() presents nothing. Every draw is cut to the clip, leaving up
+ * to a scaled source pixel along its edges undrawn. Null clears it. Waits for
+ * panel_unlock(); the listener runs inside. */
+using PanelClipListener = void (*)(const bsp_rect_t *clip, void *arg);
+esp_err_t panel_set_clip(const bsp_rect_t *clip);
+bool panel_clip(bsp_rect_t *clip);
+void panel_set_clip_listener(PanelClipListener listener, void *arg);
+
+/* The LVGL lock is always taken before the panel lock. acquire and release
+ * take both, so they are called without either. The rest runs on one task,
+ * holding the lock; drawing and swapping only between acquire and release. */
 void panel_lock();
 void panel_unlock();
 void panel_acquire();

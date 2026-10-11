@@ -43,6 +43,7 @@ Tab5Profile::~Tab5Profile() {
     ui_orientation_set_listener(nullptr, nullptr);
     lv_unlock();
     panel_set_format_listener(nullptr, nullptr);
+    panel_set_clip_listener(nullptr, nullptr);
     video_.reset();
     audio_->set_uac_feedback(nullptr);
     audio_.reset();
@@ -127,6 +128,15 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     ui_orientation_set_listener(orientation_changed, this);
     lv_unlock();
     panel_set_format_listener(format_changed, this);
+    panel_set_clip_listener(clip_changed, this);
+    panel_lock();
+    bsp_rect_t clip;
+    const bool clipped = panel_clip(&clip);
+    portENTER_CRITICAL(&lock_);
+    overlay_visible_ = clipped;
+    stream_ = clipped ? clip : bsp_rect_t{{0, 0}, panel_size()};
+    portEXIT_CRITICAL(&lock_);
+    panel_unlock();
 
     err = device.add(control_);
     if (err == ESP_OK) err = device.add(video_in_.vendor);
@@ -170,6 +180,45 @@ void Tab5Profile::orientation_changed(bsp_rotation_t rotation, void *arg) {
 
 void Tab5Profile::format_changed(bsp_pixel_format_t format, void *arg) {
     static_cast<Tab5Profile *>(arg)->video_->format_changed(format);
+}
+
+static tab5::Rect wire_rect(const bsp_rect_t &rect) {
+    return {static_cast<uint16_t>(rect.origin.x), static_cast<uint16_t>(rect.origin.y),
+            static_cast<uint16_t>(rect.size.width), static_cast<uint16_t>(rect.size.height)};
+}
+
+void Tab5Profile::clip_changed(const bsp_rect_t *clip, void *arg) {
+    auto *self = static_cast<Tab5Profile *>(arg);
+    const bsp_size_t size = panel_size();
+    const bsp_rect_t stream = clip ? *clip : bsp_rect_t{{0, 0}, size};
+    portENTER_CRITICAL(&self->lock_);
+    const bool was_visible = self->overlay_visible_;
+    const bsp_rect_t covered = self->stream_;
+    self->overlay_visible_ = clip != nullptr;
+    self->stream_ = stream;
+    portEXIT_CRITICAL(&self->lock_);
+
+    const tab5::OverlayEvent event = {clip != nullptr, 0, wire_rect(stream)};
+    self->events_.send(tab5::Type::Overlay, 0, &event, sizeof(event));
+    if (!was_visible || (clip && clip->origin.x == covered.origin.x &&
+                         clip->origin.y == covered.origin.y &&
+                         clip->size.width == covered.size.width &&
+                         clip->size.height == covered.size.height)) {
+        return;
+    }
+    const int right = covered.origin.x + covered.size.width;
+    const int bottom = covered.origin.y + covered.size.height;
+    const bsp_rect_t damage[] = {
+        {{0, 0}, {size.width, covered.origin.y}},
+        {{0, bottom}, {size.width, size.height - bottom}},
+        {{0, covered.origin.y}, {covered.origin.x, covered.size.height}},
+        {{right, covered.origin.y}, {size.width - right, covered.size.height}},
+    };
+    for (const bsp_rect_t &rect : damage) {
+        if (rect.size.width <= 0 || rect.size.height <= 0) continue;
+        const tab5::Rect wire = wire_rect(rect);
+        self->events_.send(tab5::Type::Damage, 0, &wire, sizeof(wire));
+    }
 }
 
 void Tab5Profile::control_configured() {
@@ -242,8 +291,14 @@ void Tab5Profile::send_info(uint32_t seq) {
     info.max_message[static_cast<int>(tab5::Channel::Video)] = kVideoSlotBytes;
     info.max_message[static_cast<int>(tab5::Channel::Audio)] = kAudioSlotBytes;
     info.epoch = video_->epoch();
-    info.overlay_w = size.width;
-    info.overlay_h = size.height;
+    portENTER_CRITICAL(&lock_);
+    info.overlay_visible = overlay_visible_;
+    const tab5::Rect stream = wire_rect(stream_);
+    portEXIT_CRITICAL(&lock_);
+    info.overlay_x = stream.x;
+    info.overlay_y = stream.y;
+    info.overlay_w = stream.w;
+    info.overlay_h = stream.h;
     info.max_fps = kMaxFps;
     info.volume[static_cast<int>(tab5::Stream::Uac)] = audio_->uac_volume();
     info.volume[static_cast<int>(tab5::Stream::Bulk)] = audio_->volume();

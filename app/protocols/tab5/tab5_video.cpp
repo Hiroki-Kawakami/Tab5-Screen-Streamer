@@ -74,17 +74,21 @@ void Tab5Video::format_changed(bsp_pixel_format_t format) {
 }
 
 void Tab5Video::run(const Item &item) {
+    if (item.op == Op::Transfer && !panel_acquired()) {
+        panel_acquire();
+        ESP_LOGI(TAG, "stream started");
+    }
     panel_lock();
     execute_item(item);
     panel_unlock();
+    if (item.op != Op::Transfer && panel_acquired()) {
+        panel_release();
+        ESP_LOGI(TAG, "stream stopped");
+    }
 }
 
 void Tab5Video::execute_item(const Item &item) {
     if (item.op != Op::Transfer) {
-        if (panel_acquired()) {
-            panel_release();
-            ESP_LOGI(TAG, "stream stopped");
-        }
         stats_start_us_ = 0;
         stats_bytes_ = 0;
         stats_swaps_ = 0;
@@ -126,10 +130,6 @@ void Tab5Video::count(uint32_t bytes) {
 }
 
 void Tab5Video::execute(const tab5::MsgHeader &header, const uint8_t *payload) {
-    if (!panel_acquired()) {
-        panel_acquire();
-        ESP_LOGI(TAG, "stream started");
-    }
     switch (static_cast<tab5::Type>(header.type)) {
         case tab5::Type::DrawDirect:
             draw_direct(header, payload);

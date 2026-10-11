@@ -22,6 +22,8 @@ enum class Type : uint8_t {
     Error = 0x83,
     Orientation = 0x84,
     Format = 0x85,
+    Overlay = 0x86,
+    Damage = 0x87,
     Volume = 0x8b,
     Audio = 0x8c,
     DrawDirect = 0x10,
@@ -89,6 +91,16 @@ struct __attribute__((packed)) ErrorEvent {
 struct __attribute__((packed)) ByteEvent {
     uint8_t value;
     uint8_t reserved[3];
+};
+
+struct __attribute__((packed)) Rect {
+    uint16_t x, y, w, h;
+};
+
+struct __attribute__((packed)) OverlayEvent {
+    uint8_t visible;
+    uint8_t reserved;
+    Rect stream;
 };
 
 struct __attribute__((packed)) SwapDoneEvent {

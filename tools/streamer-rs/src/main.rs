@@ -368,12 +368,14 @@ fn start_stream(options: &PlayOptions, info: &Info, rotation: u32) -> Result<Str
     })
 }
 
-/// Applies a device event; true when the stream has to start over.
+/// Applies a device event; true when the stream has to start over. `damaged`
+/// is set when the letterbox has to be drawn again.
 fn apply(
     event: Event,
     info: &mut Info,
     swaps: &mut VecDeque<u32>,
     audio: &mut Option<(u32, u32)>,
+    damaged: &mut bool,
     options: &PlayOptions,
 ) -> bool {
     match event {
@@ -402,6 +404,23 @@ fn apply(
         }
         Event::Audio { buffered, capacity } => {
             *audio = Some((buffered, capacity));
+            false
+        }
+        Event::Overlay { visible, stream } => {
+            println!(
+                "overlay {}, stream {}x{} at {},{}",
+                if visible { "shown" } else { "hidden" },
+                stream.2,
+                stream.3,
+                stream.0,
+                stream.1
+            );
+            info.overlay_visible = visible;
+            false
+        }
+        Event::Damage((x, y, w, h)) => {
+            println!("damage {w}x{h} at {x},{y}");
+            *damaged = true;
             false
         }
         Event::Format { format, epoch } => {
@@ -511,7 +530,14 @@ fn play(session: &mut Session, options: PlayOptions) -> Result<()> {
             };
             match session.events.recv_timeout(wait) {
                 Ok(event) => {
-                    restart |= apply(event, &mut info, &mut swaps, &mut audio_level, &options)
+                    restart |= apply(
+                        event,
+                        &mut info,
+                        &mut swaps,
+                        &mut audio_level,
+                        &mut first,
+                        &options,
+                    )
                 }
                 Err(RecvTimeoutError::Timeout) if wait > Duration::ZERO => {
                     return Err("no SWAP_DONE".into())

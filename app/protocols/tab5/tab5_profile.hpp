@@ -52,6 +52,7 @@ private:
     void send_info(uint32_t seq);
     static void orientation_changed(bsp_rotation_t rotation, void *arg);
     static void format_changed(bsp_pixel_format_t format, void *arg);
+    static void clip_changed(const bsp_rect_t *clip, void *arg);
 
     Tab5Events events_;
     std::unique_ptr<Tab5Video> video_;
@@ -63,5 +64,7 @@ private:
     Receiver audio_in_ = {};
     portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
     std::atomic<uint8_t> orientation_ = 0;
+    bool overlay_visible_ = false;
+    bsp_rect_t stream_ = {};
     bool uac_;
 };

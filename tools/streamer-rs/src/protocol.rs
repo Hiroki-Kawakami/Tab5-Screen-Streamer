@@ -10,6 +10,8 @@ pub const SWAP_DONE: u8 = 0x82;
 pub const ERROR: u8 = 0x83;
 pub const ORIENTATION: u8 = 0x84;
 pub const FORMAT: u8 = 0x85;
+pub const OVERLAY: u8 = 0x86;
+pub const DAMAGE: u8 = 0x87;
 pub const VOLUME: u8 = 0x8b;
 pub const AUDIO: u8 = 0x8c;
 pub const AUDIO_FORMAT: u8 = 0x20;
@@ -99,12 +101,21 @@ fn volume_at(p: &[u8], at: usize) -> Volume {
     }
 }
 
+/// x, y, w, h
+pub type Rect = (u16, u16, u16, u16);
+
+fn rect_at(p: &[u8], at: usize) -> Rect {
+    (u16_at(p, at), u16_at(p, at + 2), u16_at(p, at + 4), u16_at(p, at + 6))
+}
+
 pub enum Event {
     Info(Info),
     SwapDone { seq: u32 },
     Error { seq: u32, channel: u8, code: u8 },
     Orientation(u32),
     Format { format: PixelFormat, epoch: u32 },
+    Overlay { visible: bool, stream: Rect },
+    Damage(Rect),
     Volume { stream: u8, mute: bool, volume: i16 },
     Audio { buffered: u32, capacity: u32 },
     Other,
@@ -259,6 +270,11 @@ pub fn parse_events(data: &[u8]) -> Vec<Event> {
                 Some(format) => Event::Format { format, epoch },
                 None => continue,
             },
+            OVERLAY if payload.len() >= 10 => Event::Overlay {
+                visible: payload[0] != 0,
+                stream: rect_at(payload, 2),
+            },
+            DAMAGE if payload.len() >= 8 => Event::Damage(rect_at(payload, 0)),
             VOLUME if payload.len() >= 4 => Event::Volume {
                 stream: payload[0],
                 mute: payload[1] != 0,
