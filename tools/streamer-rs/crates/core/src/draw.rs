@@ -75,63 +75,74 @@ fn encode(encoding: Encoding, pixels: &[u8]) -> Vec<u8> {
     }
 }
 
-/// The messages drawing `frame`, a JPEG or rows in the panel's pixel format
-/// sized `layout.frame()`.
+/// One JPEG of rows [row, row + rows) of a frame's pixels.
+pub struct Band {
+    pub row: u32,
+    pub rows: u32,
+    pub jpeg: Vec<u8>,
+}
+
+/// A frame ready to send, laid out by `Layout::placement`.
+pub enum Encoded {
+    Jpeg(Vec<Band>),
+    /// Rows in the panel's pixel format, sent as RAW or LZ4.
+    Pixels(Vec<u8>),
+}
+
+/// The messages drawing `frame`.
 pub fn frame_messages(
     layout: &Layout,
     encoding: Encoding,
     target: Target,
     info: &Info,
-    frame: &[u8],
+    frame: Encoded,
 ) -> Vec<(u8, Vec<u8>)> {
     let limit = info.max_message[protocol::VIDEO] as usize;
     let panel_width = info.panel_width as u32;
-    let (width, height) = layout.frame(panel_width);
-    let row_bytes = width as usize * info.pixel_format.bytes();
-    let pixels =
-        |row: u32, rows: u32| &frame[row as usize * row_bytes..(row + rows) as usize * row_bytes];
-    let mut messages = Vec::new();
-    match *layout {
-        Layout::Direct { y, .. } => {
-            if encoding == Encoding::Jpeg {
-                let payload =
-                    protocol::draw_direct(target, encoding, y as u16, height as u16, frame);
-                return vec![(protocol::DRAW_DIRECT, payload)];
-            }
-            let band = band_rows(limit, protocol::DRAW_DIRECT_BYTES, row_bytes);
-            let mut row = 0;
-            while row < height {
-                let rows = band.min(height - row);
-                let data = encode(encoding, pixels(row, rows));
-                let payload =
-                    protocol::draw_direct(target, encoding, (y + row) as u16, rows as u16, &data);
-                messages.push((protocol::DRAW_DIRECT, payload));
-                row += rows;
+    let placement = layout.placement(panel_width);
+    let (width, height) = (placement.canvas.0 as u32, placement.canvas.1 as u32);
+    let mut bands = Vec::new();
+    match frame {
+        Encoded::Jpeg(jpegs) => {
+            for band in jpegs {
+                bands.push((band.row, band.rows, band.jpeg));
             }
         }
-        Layout::Blit { rotation, area, .. } => {
-            let mut blit = protocol::Blit {
-                target,
-                encoding,
-                format: info.pixel_format,
-                rotation,
-                source: (width, height),
-                area,
+        Encoded::Pixels(pixels) => {
+            let row_bytes = width as usize * info.pixel_format.bytes();
+            let header = match layout {
+                Layout::Direct { .. } => protocol::DRAW_DIRECT_BYTES,
+                Layout::Blit { .. } => protocol::DRAW_BLIT_BYTES,
             };
-            if encoding == Encoding::Jpeg {
-                return vec![(protocol::DRAW_BLIT, protocol::draw_blit(&blit, frame))];
-            }
-            let band = band_rows(limit, protocol::DRAW_BLIT_BYTES, row_bytes);
+            let band = band_rows(limit, header, row_bytes);
             let mut row = 0;
             while row < height {
                 let rows = band.min(height - row);
-                blit.source = (width, rows);
-                blit.area = layout.blit_band(row, rows);
-                let data = encode(encoding, pixels(row, rows));
-                messages.push((protocol::DRAW_BLIT, protocol::draw_blit(&blit, &data)));
+                let data = &pixels[row as usize * row_bytes..(row + rows) as usize * row_bytes];
+                bands.push((row, rows, encode(encoding, data)));
                 row += rows;
             }
         }
     }
-    messages
+    bands
+        .into_iter()
+        .map(|(row, rows, data)| match *layout {
+            Layout::Direct { y, .. } => {
+                let payload =
+                    protocol::draw_direct(target, encoding, (y + row) as u16, rows as u16, &data);
+                (protocol::DRAW_DIRECT, payload)
+            }
+            Layout::Blit { rotation, .. } => {
+                let blit = protocol::Blit {
+                    target,
+                    encoding,
+                    format: info.pixel_format,
+                    rotation,
+                    source: (width, rows),
+                    area: layout.blit_band(row, rows),
+                };
+                (protocol::DRAW_BLIT, protocol::draw_blit(&blit, &data))
+            }
+        })
+        .collect()
 }
