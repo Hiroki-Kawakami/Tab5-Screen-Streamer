@@ -16,6 +16,8 @@
 #include "screens/home_screen.hpp"
 #include "screens/usb_mode_screen.hpp"
 #include "sdkconfig.h"
+#include "settings.hpp"
+#include "ui_orientation.hpp"
 #include "usb/usb.hpp"
 
 static const char *TAG = "screen_streamer";
@@ -87,6 +89,7 @@ void app_entry() {
     bsp_config.dispatch.task_priority = 6;
     bsp_config.dispatch.task_affinity = 1;
     bsp_init(&bsp_config);
+    settings_init();
 
     esp_err_t err = display_init();
     if (err != ESP_OK) {
@@ -103,6 +106,7 @@ void app_entry() {
 #endif
 
     lv_async_call([] {
+        ui_orientation_start(s_display, settings_rotation_locked(), settings_rotation());
         screen_manager.load(std::make_shared<HomeScreen>());
         bsp_display_set_brightness(80);
     });

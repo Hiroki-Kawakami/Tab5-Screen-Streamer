@@ -7,6 +7,8 @@
 #include "display/panel.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "lvgl.hpp"
+#include "ui_orientation.hpp"
 
 static const char *TAG = "tab5_profile";
 
@@ -37,8 +39,9 @@ Tab5Profile::Tab5Profile()
 }
 
 Tab5Profile::~Tab5Profile() {
-    bsp_imu_set_orientation_cb(nullptr, nullptr);
-    bsp_imu_set_orientation_enabled(false);
+    lv_lock();
+    ui_orientation_set_listener(nullptr, nullptr);
+    lv_unlock();
     panel_set_format_listener(nullptr, nullptr);
     video_.reset();
     audio_->set_uac_feedback(nullptr);
@@ -119,14 +122,10 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     control.unconfigured = [this] { control_unconfigured(); };
     control_ = std::make_shared<usb_device::Vendor>(std::move(control));
 
-    const bsp_imu_orientation_t orientation = bsp_imu_get_orientation();
-    if (orientation >= BSP_IMU_ORIENTATION_ROTATION_0 &&
-        orientation <= BSP_IMU_ORIENTATION_ROTATION_270) {
-        orientation_ = orientation;
-    }
-    bsp_imu_set_orientation_cb(orientation_changed, this);
-    err = bsp_imu_set_orientation_enabled(true);
-    if (err != ESP_OK) ESP_LOGW(TAG, "orientation tracking: %s", esp_err_to_name(err));
+    lv_lock();
+    orientation_ = ui_orientation_current();
+    ui_orientation_set_listener(orientation_changed, this);
+    lv_unlock();
     panel_set_format_listener(format_changed, this);
 
     usb_device::UacSpeaker::Config speaker;
@@ -160,14 +159,11 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     return err;
 }
 
-void Tab5Profile::orientation_changed(bsp_imu_orientation_t orientation, void *arg) {
+void Tab5Profile::orientation_changed(bsp_rotation_t rotation, void *arg) {
     auto *self = static_cast<Tab5Profile *>(arg);
-    if (orientation < BSP_IMU_ORIENTATION_ROTATION_0 ||
-        orientation > BSP_IMU_ORIENTATION_ROTATION_270 || orientation == self->orientation_) {
-        return;
-    }
-    self->orientation_ = orientation;
-    const tab5::ByteEvent event = {static_cast<uint8_t>(orientation), {}};
+    if (rotation == self->orientation_) return;
+    self->orientation_ = rotation;
+    const tab5::ByteEvent event = {static_cast<uint8_t>(rotation), {}};
     self->events_.send(tab5::Type::Orientation, 0, &event, sizeof(event));
 }
 

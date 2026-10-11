@@ -8,3 +8,4 @@ sdkconfig.old
 .DS_Store
 captures
 target
+nvs_data.toml

@@ -50,7 +50,7 @@ private:
     void control_unconfigured();
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
     void send_info(uint32_t seq);
-    static void orientation_changed(bsp_imu_orientation_t orientation, void *arg);
+    static void orientation_changed(bsp_rotation_t rotation, void *arg);
     static void format_changed(bsp_pixel_format_t format, void *arg);
 
     Tab5Events events_;
