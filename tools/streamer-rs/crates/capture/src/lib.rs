@@ -53,7 +53,7 @@ pub fn display(id: u64) -> Option<Display> {
 
 /// Capturing until dropped.
 pub struct Capture {
-    _platform: platform::Capture,
+    platform: platform::Capture,
 }
 
 impl Capture {
@@ -67,8 +67,31 @@ impl Capture {
         frames: SyncSender<Frame>,
     ) -> Result<Self, String> {
         let platform = platform::Capture::start(display, size, max_fps, frames)?;
-        Ok(Capture {
-            _platform: platform,
-        })
+        Ok(Capture { platform })
+    }
+
+    /// Why the OS has stopped the capture, once it has; for instance when the
+    /// display is reconfigured.
+    pub fn stopped(&self) -> Option<String> {
+        self.platform.stopped()
+    }
+}
+
+/// A display the OS shows as a monitor, until dropped. macOS only.
+pub struct VirtualDisplay(platform::VirtualDisplay);
+
+impl VirtualDisplay {
+    /// `millimeters` is the physical size the OS scales its interface by.
+    pub fn new(name: &str, size: (u32, u32), millimeters: (f64, f64)) -> Result<Self, String> {
+        platform::VirtualDisplay::new(name, size, millimeters).map(VirtualDisplay)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0.id()
+    }
+
+    /// Changes the resolution, up to the longer side it was created with.
+    pub fn resize(&self, size: (u32, u32)) -> Result<(), String> {
+        self.0.resize(size)
     }
 }

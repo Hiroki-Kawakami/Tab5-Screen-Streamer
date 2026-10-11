@@ -266,8 +266,8 @@ impl<'a> Reader<'a> {
                     // Whole u32 pixels rather than byte loads: LLVM vectorizes the
                     // shifts, not the interleaved bytes.
                     let mut pixels = [0u32; 16];
-                    for (p, bytes) in pixels.iter_mut().zip(line.chunks_exact(4)) {
-                        *p = u32::from_le_bytes(bytes.try_into().unwrap());
+                    for (p, bytes) in pixels.iter_mut().zip(line.as_chunks::<4>().0) {
+                        *p = u32::from_le_bytes(*bytes);
                     }
                     let mut y = [0f32; 16];
                     for (y, &p) in y.iter_mut().zip(&pixels) {

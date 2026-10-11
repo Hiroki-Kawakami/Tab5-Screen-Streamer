@@ -82,6 +82,8 @@ commands:
   displays                   list the displays capture takes
   capture [options]          stream a display
     --display <n>            index from displays, default the main display
+    --virtual                a virtual display for the device instead (macOS),
+                             present while it is connected
     --rotate <0-3>|auto      as for play, default auto
     --quality <1-100>        JPEG quality, default 80"
     );
@@ -102,6 +104,7 @@ fn parse_quality(value: &str) -> Option<u8> {
 fn parse_capture(args: &[String]) -> Option<CaptureOptions> {
     let mut options = CaptureOptions {
         display: None,
+        virtual_display: false,
         rotation: None,
         quality: 80,
     };
@@ -109,6 +112,7 @@ fn parse_capture(args: &[String]) -> Option<CaptureOptions> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--display" => options.display = Some(args.next()?.parse().ok()?),
+            "--virtual" => options.virtual_display = true,
             "--rotate" => options.rotation = parse_rotation(args.next()?)?,
             "--quality" => options.quality = parse_quality(args.next()?)?,
             _ => return None,

@@ -340,6 +340,13 @@ impl Capture {
     }
 }
 
+impl Capture {
+    pub fn stopped(&self) -> Option<String> {
+        let finished = self.control.as_ref().is_none_or(|c| c.is_finished());
+        finished.then(|| "capture ended".into())
+    }
+}
+
 impl Drop for Capture {
     fn drop(&mut self) {
         if let Some(control) = self.control.take()
@@ -347,5 +354,21 @@ impl Drop for Capture {
         {
             eprintln!("stop capture: {e}");
         }
+    }
+}
+
+pub struct VirtualDisplay(std::convert::Infallible);
+
+impl VirtualDisplay {
+    pub fn new(_name: &str, _size: (u32, u32), _millimeters: (f64, f64)) -> Result<Self, String> {
+        Err("virtual displays are macOS only".into())
+    }
+
+    pub fn id(&self) -> u64 {
+        match self.0 {}
+    }
+
+    pub fn resize(&self, _size: (u32, u32)) -> Result<(), String> {
+        match self.0 {}
     }
 }
