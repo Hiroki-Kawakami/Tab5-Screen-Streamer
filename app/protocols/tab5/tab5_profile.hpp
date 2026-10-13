@@ -50,6 +50,8 @@ private:
     void submit(Slot *slot);
     void control_configured();
     void control_unconfigured();
+    void control_suspended();
+    void control_resumed();
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
     void received();
     void open_session(uint32_t seq);
@@ -79,6 +81,7 @@ private:
     bool uac_;
     UsbStatusListener status_;
     bool configured_ = false;
+    bool suspended_ = false;
     bool streaming_ = false;
     UsbStatus reported_ = UsbStatus::Unconfigured;
     std::mutex session_lock_;

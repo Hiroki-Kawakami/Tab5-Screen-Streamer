@@ -142,6 +142,8 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     control.device_interface_guid = "{17A6BA36-2C39-40B2-941A-42436642AF2C}";
     control.configured = [this] { control_configured(); };
     control.unconfigured = [this] { control_unconfigured(); };
+    control.suspended = [this] { control_suspended(); };
+    control.resumed = [this] { control_resumed(); };
     control_ = std::make_shared<usb_device::Vendor>(std::move(control));
 
     lv_lock();
@@ -248,7 +250,7 @@ void Tab5Profile::clip_changed(const bsp_rect_t *clip, bool front_changed, void 
 
 void Tab5Profile::report_status() {
     portENTER_CRITICAL(&lock_);
-    const UsbStatus status = !configured_ ? UsbStatus::Unconfigured
+    const UsbStatus status = !configured_ || suspended_ ? UsbStatus::Unconfigured
                              : streaming_ ? UsbStatus::Active
                                           : UsbStatus::Configured;
     const bool changed = status != reported_;
@@ -271,11 +273,27 @@ void Tab5Profile::control_configured() {
 void Tab5Profile::control_unconfigured() {
     portENTER_CRITICAL(&lock_);
     configured_ = false;
+    suspended_ = false;
     portEXIT_CRITICAL(&lock_);
     report_status();
     xTimerStop(timeout_timer_, portMAX_DELAY);
     close_session();
     events_.stop();
+}
+
+void Tab5Profile::control_suspended() {
+    portENTER_CRITICAL(&lock_);
+    suspended_ = true;
+    portEXIT_CRITICAL(&lock_);
+    report_status();
+    close_session();
+}
+
+void Tab5Profile::control_resumed() {
+    portENTER_CRITICAL(&lock_);
+    suspended_ = false;
+    portEXIT_CRITICAL(&lock_);
+    report_status();
 }
 
 void Tab5Profile::control_done(usb_device::Transfer *transfer) {
