@@ -49,6 +49,31 @@ MsgHeader (16 bytes)
   times. The device never blocks on it: when its event queue is full, newer
   events replace older ones of the same type.
 
+## Session
+
+The PC drives the device within a session, from `OPEN` until `CLOSE`, a
+timeout, or the end of the USB configuration.
+
+- `OPEN` is answered with `INFO`. Before answering, the device drops what an
+  earlier session left behind: transfers cut short on the OUT endpoints,
+  video and audio not yet executed, and queued events. Events the PC reads
+  before that `INFO` belong to the earlier session.
+- The PC sends nothing on the video and audio endpoints until `INFO` comes.
+  An `OPEN` that is not answered within 200 ms is sent again, with its own
+  `seq`; only the `INFO` carrying that `seq` opens the session.
+- `OPEN` during a session ends it first, without `EV_CLOSED`.
+- The panel is taken at the first video transfer of a session. When the
+  session ends the panel is given back, bulk audio stops and its buffered PCM
+  is dropped.
+- Video and audio outside a session are dropped without an error.
+- The PC sends `CLOSE` when it stops, once its video transfers have
+  completed. A transfer cut short is recovered by the next `OPEN`, but the
+  last frame may be lost.
+- When nothing has been sent on any vendor endpoint for 1 s, the PC sends
+  `KEEPALIVE`. A session that receives nothing for 3 s ends, and the device
+  sends `EV_CLOSED`. The PC then opens a new session and redraws the whole
+  panel.
+
 ## Coordinates and orientation
 
 Coordinates are in panel-native pixels (720x1280 portrait on the Tab5),
@@ -84,27 +109,30 @@ format, so it is not sent.
 
 | Type | Name | Payload |
 |---|---|---|
-| 0x01 | `GET_INFO` | none; answered with `INFO` |
-| 0x02 | `SET_INPUT_ROUTE` | `u8 route`, `u8 reserved[3]` |
-| 0x03 | `SET_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
+| 0x01 | `OPEN` | none; answered with `INFO` |
+| 0x02 | `CLOSE` | none |
+| 0x03 | `KEEPALIVE` | none |
+| 0x04 | `SET_INPUT_ROUTE` | `u8 route`, `u8 reserved[3]` |
+| 0x05 | `SET_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
 
 ### Replies and events (IN)
 
 | Type | Name | Payload |
 |---|---|---|
 | 0x81 | `INFO` | see below |
-| 0x82 | `SWAP_DONE` | `u32 time_us` |
+| 0x82 | `EV_CLOSED` | none; see [Session](#session) |
 | 0x83 | `EV_ERROR` | `u8 endpoint`, `u8 code`, `u16 reserved` |
-| 0x84 | `EV_ORIENTATION` | `u8 orientation`, `u8 reserved[3]` |
-| 0x85 | `EV_FORMAT` | `u8 pixel_format`, `u8 reserved[3]`; header `epoch` is the new epoch |
-| 0x86 | `EV_OVERLAY` | `u8 visible`, `u8 reserved`, `u16 x, y, w, h` |
-| 0x87 | `EV_DAMAGE` | `u16 x, y, w, h` |
-| 0x88 | `EV_TOUCH` | see [Input](#input) |
-| 0x89 | `EV_KEY` | see [Input](#input) |
-| 0x8a | `EV_INPUT_ROUTE` | `u8 route`, `u8 reserved[3]` |
-| 0x8b | `EV_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
-| 0x8c | `EV_AUDIO` | `u32 time_us`, `u32 buffered_frames`, `u32 capacity_frames` |
-| 0x8d | `EV_MAX_FPS` | `u16 max_fps`, `u16 reserved` |
+| 0x84 | `SWAP_DONE` | `u32 time_us` |
+| 0x85 | `EV_MAX_FPS` | `u16 max_fps`, `u16 reserved` |
+| 0x86 | `EV_FORMAT` | `u8 pixel_format`, `u8 reserved[3]`; header `epoch` is the new epoch |
+| 0x87 | `EV_ORIENTATION` | `u8 orientation`, `u8 reserved[3]` |
+| 0x88 | `EV_OVERLAY` | `u8 visible`, `u8 reserved`, `u16 x, y, w, h` |
+| 0x89 | `EV_DAMAGE` | `u16 x, y, w, h` |
+| 0x8a | `EV_TOUCH` | see [Input](#input) |
+| 0x8b | `EV_KEY` | see [Input](#input) |
+| 0x8c | `EV_INPUT_ROUTE` | `u8 route`, `u8 reserved[3]` |
+| 0x8d | `EV_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
+| 0x8e | `EV_AUDIO` | `u32 time_us`, `u32 buffered_frames`, `u32 capacity_frames` |
 
 `time_us` is the low 32 bits of the device clock in microseconds.
 

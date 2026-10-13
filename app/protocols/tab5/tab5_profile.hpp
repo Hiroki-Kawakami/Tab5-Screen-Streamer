@@ -8,8 +8,10 @@
 #pragma once
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include "bsp.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include "tab5_audio.hpp"
 #include "tab5_events.hpp"
 #include "tab5_video.hpp"
@@ -49,12 +51,19 @@ private:
     void control_configured();
     void control_unconfigured();
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
+    void received();
+    void open_session(uint32_t seq);
+    void close_session();
+    bool end_session_locked();
+    void flush(Receiver &receiver);
+    static void check_timeout(TimerHandle_t timer);
     void send_info(uint32_t seq);
     void report_status();
     static void orientation_changed(bsp_rotation_t rotation, void *arg);
     static void format_changed(bsp_pixel_format_t format, void *arg);
     static void clip_changed(const bsp_rect_t *clip, bool front_changed, void *arg);
 
+    std::atomic<uint32_t> session_ = 0;
     Tab5Events events_;
     std::unique_ptr<Tab5Video> video_;
     std::unique_ptr<Tab5Audio> audio_;
@@ -72,4 +81,8 @@ private:
     bool configured_ = false;
     bool streaming_ = false;
     UsbStatus reported_ = UsbStatus::Unconfigured;
+    std::mutex session_lock_;
+    uint32_t sessions_ = 0;
+    int64_t received_us_ = 0;
+    TimerHandle_t timeout_timer_ = nullptr;
 };

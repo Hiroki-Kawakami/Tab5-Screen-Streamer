@@ -1,5 +1,5 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +15,9 @@ const VIDEO_QUEUE: usize = 2;
 pub const TIMEOUT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(100);
 const RETRY: Duration = Duration::from_millis(500);
+const OPEN_RETRY: Duration = Duration::from_millis(200);
+/// Well inside the device's 3 s session timeout.
+const KEEPALIVE: Duration = Duration::from_secs(1);
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -55,10 +58,10 @@ impl AudioOut {
     }
 }
 
-/// One session with the device, from GET_INFO until a transfer fails. Every
-/// error from it means the device is gone; open a new one.
+/// One session with the device, from OPEN until it is closed or a transfer
+/// fails. Every error from it means the session is gone; open a new one.
 pub struct Connection {
-    control: Control,
+    control: Arc<Mutex<Control>>,
     video_out: Box<dyn OutPipe>,
     audio: Option<AudioOut>,
     events: Receiver<Event>,
@@ -85,7 +88,46 @@ impl Control {
     }
 }
 
-/// Stops the control IN reader, releasing its endpoint, when dropped.
+/// When anything was last submitted on any OUT endpoint.
+struct Activity {
+    start: Instant,
+    last_ms: AtomicU64,
+}
+
+impl Activity {
+    fn touch(&self) {
+        let now = self.start.elapsed().as_millis() as u64;
+        self.last_ms.store(now, Ordering::Relaxed);
+    }
+
+    fn idle(&self) -> Duration {
+        let last = Duration::from_millis(self.last_ms.load(Ordering::Relaxed));
+        self.start.elapsed().saturating_sub(last)
+    }
+}
+
+struct Tracked {
+    pipe: Box<dyn OutPipe>,
+    activity: Arc<Activity>,
+}
+
+impl OutPipe for Tracked {
+    fn submit(&mut self, data: Vec<u8>) {
+        self.activity.touch();
+        self.pipe.submit(data);
+    }
+
+    fn pending(&self) -> usize {
+        self.pipe.pending()
+    }
+
+    fn wait(&mut self, timeout: Duration) -> std::result::Result<(), link::Error> {
+        self.pipe.wait(timeout)
+    }
+}
+
+/// Stops the control IN reader and the keep-alive, releasing their endpoints,
+/// when dropped.
 struct Reader {
     stop: Arc<AtomicBool>,
 }
@@ -96,17 +138,38 @@ impl Drop for Reader {
     }
 }
 
-/// Sends GET_INFO and waits for INFO; events before it are dropped.
-fn query_info(control: &mut Control, events: &Receiver<Event>) -> Result<Info> {
-    control.send(protocol::GET_INFO, &[])?;
+/// Sends OPEN until it is answered with INFO; events before it are from an
+/// earlier session and dropped. A retry gets past a transfer an earlier
+/// session cut short, which the device drops along with the OPEN after it.
+fn open_session(control: &mut Control, events: &Receiver<Event>) -> Result<Info> {
     let deadline = Instant::now() + TIMEOUT;
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match events.recv_timeout(left) {
-            Ok(Event::Info(info)) => return Ok(info),
-            Ok(event) => report(&event),
-            Err(RecvTimeoutError::Timeout) => return Err("no INFO".into()),
-            Err(RecvTimeoutError::Disconnected) => return Err("control in closed".into()),
+        let seq = control.send(protocol::OPEN, &[])?;
+        let retry = (Instant::now() + OPEN_RETRY).min(deadline);
+        loop {
+            let left = retry.saturating_duration_since(Instant::now());
+            match events.recv_timeout(left) {
+                Ok(Event::Info { seq: answered, info }) if answered == seq => return Ok(info),
+                Ok(event) => report(&event),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return Err("control in closed".into()),
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("no INFO".into());
+        }
+    }
+}
+
+fn keep_alive(control: Arc<Mutex<Control>>, activity: Arc<Activity>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        let idle = activity.idle();
+        if idle < KEEPALIVE {
+            thread::sleep((KEEPALIVE - idle).min(POLL));
+            continue;
+        }
+        if control.lock().unwrap().send(protocol::KEEPALIVE, &[]).is_err() {
+            return;
         }
     }
 }
@@ -154,16 +217,31 @@ impl Connection {
         let control_in = link.control_in;
         let (reader_level, reader_stop) = (level.clone(), reader.stop.clone());
         thread::spawn(move || read_events(control_in, sender, reader_level, reader_stop));
+        let activity = Arc::new(Activity {
+            start: Instant::now(),
+            last_ms: AtomicU64::new(0),
+        });
+        let tracked = |pipe| -> Box<dyn OutPipe> {
+            Box::new(Tracked {
+                pipe,
+                activity: activity.clone(),
+            })
+        };
         let mut control = Control {
-            out: link.control_out,
+            out: tracked(link.control_out),
             seq: 0,
         };
-        let info = query_info(&mut control, &events)?;
+        let info = open_session(&mut control, &events)?;
+        let control = Arc::new(Mutex::new(control));
+        let (keep_control, keep_stop) = (control.clone(), reader.stop.clone());
+        let video_out = tracked(link.video_out);
+        let audio_out = tracked(link.audio_out);
+        thread::spawn(move || keep_alive(keep_control, activity, keep_stop));
         Ok(Connection {
             control,
-            video_out: link.video_out,
+            video_out,
             audio: Some(AudioOut {
-                pipe: link.audio_out,
+                pipe: audio_out,
                 level,
                 closed: reader.stop.clone(),
             }),
@@ -177,16 +255,13 @@ impl Connection {
 
     /// Sends a control request; returns its seq.
     pub fn control(&mut self, kind: u8, payload: &[u8]) -> Result<u32> {
-        self.control.send(kind, payload)
+        self.control.lock().unwrap().send(kind, payload)
     }
 
-    pub fn query_info(&mut self) -> Result<Info> {
-        query_info(&mut self.control, &self.events)
-    }
-
-    /// The next event within `timeout`, or None.
+    /// The next event within `timeout`, or None. EV_CLOSED is an error.
     pub fn event(&self, timeout: Duration) -> Result<Option<Event>> {
         match self.events.recv_timeout(timeout) {
+            Ok(Event::Closed) => Err("the device closed the session".into()),
             Ok(event) => Ok(Some(event)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Err("control in closed".into()),
@@ -219,6 +294,14 @@ impl Connection {
                 .wait(TIMEOUT)
                 .map_err(|e| format!("video: {e}"))?;
         }
+        Ok(())
+    }
+
+    /// Ends the session once the video sent so far is taken; the device goes
+    /// back to its own screen.
+    pub fn close(mut self) -> Result<()> {
+        self.flush_video()?;
+        self.control(protocol::CLOSE, &[])?;
         Ok(())
     }
 }
@@ -260,8 +343,8 @@ impl Device {
         self.connections.try_recv().ok()
     }
 
-    pub fn wait(&self) -> Option<Connection> {
-        self.connections.recv().ok()
+    pub fn wait(&self, timeout: Duration) -> Option<Connection> {
+        self.connections.recv_timeout(timeout).ok()
     }
 
     /// Gives up `connection` and starts opening the next one.

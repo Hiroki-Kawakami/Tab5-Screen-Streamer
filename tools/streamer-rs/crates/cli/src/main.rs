@@ -4,6 +4,7 @@ mod clock;
 mod media;
 mod play;
 mod present;
+mod signal;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -14,7 +15,20 @@ use play::PlayOptions;
 use streamer_core::protocol::{self, Encoding, Event, Target};
 use streamer_device::connection::{Address, Connection, Device, TIMEOUT, report};
 
+/// How often a wait looks whether to stop.
+const STOP_POLL: Duration = Duration::from_millis(100);
+
 type Result<T> = std::result::Result<T, String>;
+
+/// The next connection; None once stopping.
+fn connect(device: &Device) -> Option<Connection> {
+    while !signal::stopping() {
+        if let Some(connection) = device.wait(STOP_POLL) {
+            return Some(connection);
+        }
+    }
+    None
+}
 
 fn volume(connection: &mut Connection, db: f64, mute: bool) -> Result<()> {
     let payload = protocol::set_volume(protocol::BULK, mute, (db * 256.0).round() as i16);
@@ -220,20 +234,24 @@ fn main() -> ExitCode {
         Some(address) => Address::Usbip(address),
         None => Address::Usb,
     };
+    if matches!(command, Command::Play(_) | Command::Capture(_)) {
+        signal::install();
+    }
     let result = match command {
         Command::Play(options) => play::play(&Device::spawn(address), options),
         Command::Displays => capture::list(),
         Command::Capture(options) => capture::capture(&Device::spawn(address), options),
-        command => Connection::open(&address).and_then(|mut connection| match command {
-            Command::Info => {
-                println!("{:#?}", connection.info);
-                Ok(())
+        command => Connection::open(&address).and_then(|mut connection| {
+            match command {
+                Command::Info => println!("{:#?}", connection.info),
+                Command::Fill(color) => fill(&mut connection, color)?,
+                Command::Volume(db, mute) => volume(&mut connection, db, mute)?,
+                _ => unreachable!(),
             }
-            Command::Fill(color) => fill(&mut connection, color),
-            Command::Volume(db, mute) => volume(&mut connection, db, mute),
-            _ => unreachable!(),
+            connection.close()
         }),
     };
+    signal::finished();
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

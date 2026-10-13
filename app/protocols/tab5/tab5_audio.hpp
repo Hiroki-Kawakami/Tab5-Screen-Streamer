@@ -25,13 +25,16 @@ public:
 
     static constexpr uint32_t kMaxRate = 48000;
 
-    explicit Tab5Audio(Tab5Events &events) : events_(events) {}
+    /* Transfers of a session other than `session` are dropped unread. */
+    Tab5Audio(Tab5Events &events, const std::atomic<uint32_t> &session)
+        : events_(events), session_(session) {}
     ~Tab5Audio();
     /* `capacity_bytes` is what the endpoint can hold queued. */
     esp_err_t start(uint32_t capacity_bytes);
 
     /* `done` runs on the audio task once the data is no longer read. */
-    void submit(const uint8_t *data, uint32_t length, Done done, void *context);
+    void submit(const uint8_t *data, uint32_t length, uint32_t session, Done done,
+                void *context);
     void end();
 
     /* From any task. Clamps, applies and announces the bulk stream's volume. */
@@ -58,6 +61,7 @@ private:
         Op op;
         const uint8_t *data;
         uint32_t length;
+        uint32_t session;
         Done done;
         void *context;
     };
@@ -75,6 +79,7 @@ private:
     uint32_t frame_bytes() const;
 
     Tab5Events &events_;
+    const std::atomic<uint32_t> &session_;
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t exited_ = nullptr;
     uint32_t capacity_bytes_ = 0;

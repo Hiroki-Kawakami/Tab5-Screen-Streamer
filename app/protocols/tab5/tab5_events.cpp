@@ -38,6 +38,11 @@ void Tab5Events::stop() {
     count_ = 0;
 }
 
+void Tab5Events::clear() {
+    std::lock_guard<std::mutex> guard(lock_);
+    count_ = 0;
+}
+
 void Tab5Events::send(tab5::Type type, uint32_t seq, const void *payload, uint16_t bytes,
                       uint32_t epoch) {
     const uint16_t length = sizeof(tab5::MsgHeader) + bytes;

@@ -23,7 +23,7 @@ using tab5::ErrorCode;
 
 Tab5Video::~Tab5Video() {
     if (!queue_) return;
-    const Item quit = {Op::Quit, nullptr, 0, nullptr, nullptr};
+    const Item quit = {Op::Quit, nullptr, 0, 0, nullptr, nullptr};
     xQueueSend(queue_, &quit, portMAX_DELAY);
     xSemaphoreTake(exited_, portMAX_DELAY);
     vSemaphoreDelete(exited_);
@@ -41,13 +41,14 @@ esp_err_t Tab5Video::start() {
     return ESP_OK;
 }
 
-void Tab5Video::submit(const uint8_t *data, uint32_t length, Done done, void *context) {
-    const Item item = {Op::Transfer, data, length, done, context};
+void Tab5Video::submit(const uint8_t *data, uint32_t length, uint32_t session, Done done,
+                       void *context) {
+    const Item item = {Op::Transfer, data, length, session, done, context};
     xQueueSend(queue_, &item, portMAX_DELAY);
 }
 
 void Tab5Video::end() {
-    const Item item = {Op::End, nullptr, 0, nullptr, nullptr};
+    const Item item = {Op::End, nullptr, 0, 0, nullptr, nullptr};
     xQueueSend(queue_, &item, portMAX_DELAY);
 }
 
@@ -74,6 +75,10 @@ void Tab5Video::format_changed(bsp_pixel_format_t format) {
 }
 
 void Tab5Video::run(const Item &item) {
+    if (item.op == Op::Transfer && item.session != session_) {
+        item.done(item.context);
+        return;
+    }
     if (item.op == Op::Transfer && !panel_acquired()) {
         panel_acquire();
         ESP_LOGI(TAG, "stream started");

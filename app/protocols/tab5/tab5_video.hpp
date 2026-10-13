@@ -28,9 +28,11 @@ public:
     static constexpr int kDirectAlign = 16;
     static constexpr int kBlitMaxSize = 1280;
 
-    /* `streaming` runs on the video task when the panel is taken and given back. */
-    Tab5Video(Tab5Events &events, std::function<void(bool)> streaming)
-        : events_(events), streaming_(std::move(streaming)) {}
+    /* `streaming` runs on the video task when the panel is taken and given back.
+     * Transfers of a session other than `session` are dropped unread. */
+    Tab5Video(Tab5Events &events, const std::atomic<uint32_t> &session,
+              std::function<void(bool)> streaming)
+        : events_(events), session_(session), streaming_(std::move(streaming)) {}
     ~Tab5Video();
     esp_err_t start();
     uint32_t epoch() const { return epoch_; }
@@ -38,7 +40,8 @@ public:
     void format_changed(bsp_pixel_format_t format);
 
     /* `done` runs on the video task once the data is no longer read. */
-    void submit(const uint8_t *data, uint32_t length, Done done, void *context);
+    void submit(const uint8_t *data, uint32_t length, uint32_t session, Done done,
+                void *context);
     void end();
 
 private:
@@ -48,6 +51,7 @@ private:
         Op op;
         const uint8_t *data;
         uint32_t length;
+        uint32_t session;
         Done done;
         void *context;
     };
@@ -63,6 +67,7 @@ private:
     void count(uint32_t bytes);
 
     Tab5Events &events_;
+    const std::atomic<uint32_t> &session_;
     std::function<void(bool)> streaming_;
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t exited_ = nullptr;

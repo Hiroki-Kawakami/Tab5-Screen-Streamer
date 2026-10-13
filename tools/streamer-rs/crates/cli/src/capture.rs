@@ -11,6 +11,7 @@ use streamer_core::protocol::{Encoding, Info};
 use streamer_device::connection::{Connection, Device};
 
 use crate::present::{self, LayoutKey, Presenter};
+use crate::signal;
 
 /// How long to wait for a frame before handling device events.
 const POLL: Duration = Duration::from_millis(50);
@@ -91,7 +92,7 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
         ),
         (false, None) => Some(capture::main_display()?),
     };
-    while let Some(mut connection) = device.wait() {
+    while let Some(mut connection) = crate::connect(device) {
         let created = match display {
             Some(_) => None,
             None => {
@@ -114,9 +115,12 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
             }
         };
         match stop {
-            Ok(()) => return Ok(()),
+            Ok(()) => return connection.close(),
             Err(Lost(e)) => device.lost(connection, &e),
-            Err(Fatal(e)) => return Err(e),
+            Err(Fatal(e)) => {
+                let _ = connection.close();
+                return Err(e);
+            }
             Err(Changed) => unreachable!(),
         }
     }
@@ -260,7 +264,7 @@ fn layout(size: (u32, u32), info: &Info, rotation: u32) -> Result<Layout> {
 }
 
 impl<'a> Session<'a> {
-    /// Ok(()) when the display is gone.
+    /// Ok(()) when the display is gone or on stopping.
     fn run(
         connection: &mut Connection,
         source: Source<'a>,
@@ -302,7 +306,7 @@ impl<'a> Session<'a> {
         };
         session.start().map_err(Fatal)?;
         let mut checked = Instant::now();
-        loop {
+        while !signal::stopping() {
             let wait = match session.pending {
                 true => session.presenter.until_due().min(POLL),
                 false => POLL,
@@ -350,6 +354,7 @@ impl<'a> Session<'a> {
             let audio_level = session.presenter.audio_level;
             session.presenter.stats.report(audio_level);
         }
+        Ok(())
     }
 
     fn start(&mut self) -> Result<()> {

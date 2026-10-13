@@ -20,6 +20,8 @@ public:
     esp_err_t init();
     void start(usb_device::Endpoint in);
     void stop();
+    /* Drops the queued messages; one already handed to the host still goes. */
+    void clear();
 
     void send(tab5::Type type, uint32_t seq, const void *payload, uint16_t bytes,
               uint32_t epoch = 0);

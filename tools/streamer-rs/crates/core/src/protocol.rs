@@ -3,17 +3,20 @@
 pub const MAGIC: u16 = 0x3554;
 pub const HEADER_BYTES: usize = 16;
 
-pub const GET_INFO: u8 = 0x01;
-pub const SET_VOLUME: u8 = 0x03;
+pub const OPEN: u8 = 0x01;
+pub const CLOSE: u8 = 0x02;
+pub const KEEPALIVE: u8 = 0x03;
+pub const SET_VOLUME: u8 = 0x05;
 pub const INFO: u8 = 0x81;
-pub const SWAP_DONE: u8 = 0x82;
+pub const CLOSED: u8 = 0x82;
 pub const ERROR: u8 = 0x83;
-pub const ORIENTATION: u8 = 0x84;
-pub const FORMAT: u8 = 0x85;
-pub const OVERLAY: u8 = 0x86;
-pub const DAMAGE: u8 = 0x87;
-pub const VOLUME: u8 = 0x8b;
-pub const AUDIO: u8 = 0x8c;
+pub const SWAP_DONE: u8 = 0x84;
+pub const FORMAT: u8 = 0x86;
+pub const ORIENTATION: u8 = 0x87;
+pub const OVERLAY: u8 = 0x88;
+pub const DAMAGE: u8 = 0x89;
+pub const VOLUME: u8 = 0x8d;
+pub const AUDIO: u8 = 0x8e;
 pub const AUDIO_FORMAT: u8 = 0x20;
 pub const AUDIO_DATA: u8 = 0x21;
 pub const BULK: u8 = 1;
@@ -114,7 +117,8 @@ fn rect_at(p: &[u8], at: usize) -> Rect {
 }
 
 pub enum Event {
-    Info(Info),
+    Info { seq: u32, info: Info },
+    Closed,
     SwapDone { seq: u32 },
     Error { seq: u32, channel: u8, code: u8 },
     Orientation(u32),
@@ -261,9 +265,10 @@ pub fn parse_events(data: &[u8]) -> Vec<Event> {
         pos += HEADER_BYTES + length;
         let event = match kind {
             INFO => match parse_info(payload) {
-                Some(info) => Event::Info(info),
+                Some(info) => Event::Info { seq, info },
                 None => continue,
             },
+            CLOSED => Event::Closed,
             SWAP_DONE => Event::SwapDone { seq },
             ERROR if payload.len() >= 2 => Event::Error {
                 seq,

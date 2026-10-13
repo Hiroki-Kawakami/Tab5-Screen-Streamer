@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "lvgl.hpp"
 #include "ui_orientation.hpp"
 
@@ -18,8 +19,10 @@ static constexpr uint32_t kVideoSlotBytes = 16 * 65024;
 static constexpr uint32_t kAudioSlotBytes = 16384;
 static constexpr size_t kBufferAlignment = 128;
 static constexpr uint16_t kMaxFps = 60;
+static constexpr int64_t kSessionTimeoutUs = 3 * 1000 * 1000;
+static constexpr TickType_t kTimeoutCheck = pdMS_TO_TICKS(250);
 
-enum class SlotState : uint8_t { Idle, Usb, Busy };
+enum class SlotState : uint8_t { Idle, Usb, Flushing, Busy };
 
 struct Tab5Profile::Slot {
     usb_device::Transfer transfer;
@@ -34,18 +37,19 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
 }
 
 Tab5Profile::Tab5Profile(bool uac, UsbStatusListener status)
-    : video_(std::make_unique<Tab5Video>(events_, [this](bool streaming) {
+    : video_(std::make_unique<Tab5Video>(events_, session_, [this](bool streaming) {
           portENTER_CRITICAL(&lock_);
           streaming_ = streaming;
           portEXIT_CRITICAL(&lock_);
           report_status();
       })),
-      audio_(std::make_unique<Tab5Audio>(events_)), uac_(uac), status_(std::move(status)) {
+      audio_(std::make_unique<Tab5Audio>(events_, session_)), uac_(uac), status_(std::move(status)) {
     video_in_ = {this, tab5::Channel::Video, kVideoSlotBytes, nullptr, {}, false};
     audio_in_ = {this, tab5::Channel::Audio, kAudioSlotBytes, nullptr, {}, false};
 }
 
 Tab5Profile::~Tab5Profile() {
+    if (timeout_timer_) xTimerDelete(timeout_timer_, portMAX_DELAY);
     lv_lock();
     ui_orientation_set_observer(nullptr, nullptr);
     lv_unlock();
@@ -122,6 +126,9 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
                      MALLOC_CAP_SPIRAM);
     }
     if (err != ESP_OK) return err;
+
+    timeout_timer_ = xTimerCreate("tab5_session", kTimeoutCheck, pdTRUE, this, check_timeout);
+    if (!timeout_timer_) return ESP_ERR_NO_MEM;
 
     control_transfer_.buffer = alloc_buffer(kControlBytes, MALLOC_CAP_DMA);
     if (!control_transfer_.buffer) return ESP_ERR_NO_MEM;
@@ -256,6 +263,7 @@ void Tab5Profile::control_configured() {
     portEXIT_CRITICAL(&lock_);
     report_status();
     events_.start(control_->in());
+    xTimerStart(timeout_timer_, portMAX_DELAY);
     esp_err_t err = control_->out().submit(&control_transfer_);
     if (err != ESP_OK) ESP_LOGE(TAG, "submit control: %s", esp_err_to_name(err));
 }
@@ -265,6 +273,8 @@ void Tab5Profile::control_unconfigured() {
     configured_ = false;
     portEXIT_CRITICAL(&lock_);
     report_status();
+    xTimerStop(timeout_timer_, portMAX_DELAY);
+    close_session();
     events_.stop();
 }
 
@@ -272,6 +282,7 @@ void Tab5Profile::control_done(usb_device::Transfer *transfer) {
     auto *self = static_cast<Tab5Profile *>(transfer->context);
     if (transfer->status == usb_device::TransferStatus::Canceled) return;
     if (transfer->status == usb_device::TransferStatus::Completed) {
+        self->received();
         uint32_t bad_seq = 0;
         const bool ok = tab5::for_each_message(
             transfer->buffer, transfer->actual, &bad_seq,
@@ -288,8 +299,13 @@ void Tab5Profile::control_done(usb_device::Transfer *transfer) {
 
 void Tab5Profile::handle_control(const tab5::MsgHeader &header, const uint8_t *payload) {
     switch (static_cast<tab5::Type>(header.type)) {
-        case tab5::Type::GetInfo:
-            send_info(header.seq);
+        case tab5::Type::Open:
+            open_session(header.seq);
+            return;
+        case tab5::Type::Close:
+            close_session();
+            return;
+        case tab5::Type::KeepAlive:
             return;
         case tab5::Type::SetVolume: {
             tab5::VolumeMessage message;
@@ -306,6 +322,63 @@ void Tab5Profile::handle_control(const tab5::MsgHeader &header, const uint8_t *p
             break;
     }
     events_.error(tab5::Channel::Control, tab5::ErrorCode::Malformed, header.seq);
+}
+
+void Tab5Profile::received() {
+    const int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&lock_);
+    received_us_ = now;
+    portEXIT_CRITICAL(&lock_);
+}
+
+// What a session that ended mid-transfer left on the OUT endpoints would
+// otherwise run into the first transfers of this one.
+void Tab5Profile::open_session(uint32_t seq) {
+    std::lock_guard<std::mutex> guard(session_lock_);
+    end_session_locked();
+    flush(video_in_);
+    flush(audio_in_);
+    events_.clear();
+    received();
+    if (++sessions_ == 0) sessions_ = 1;
+    session_ = sessions_;
+    ESP_LOGI(TAG, "session %u opened", (unsigned)sessions_);
+    send_info(seq);
+}
+
+void Tab5Profile::close_session() {
+    std::lock_guard<std::mutex> guard(session_lock_);
+    if (end_session_locked()) ESP_LOGI(TAG, "session closed");
+}
+
+bool Tab5Profile::end_session_locked() {
+    if (!session_) return false;
+    session_ = 0;
+    video_->end();
+    audio_->end();
+    return true;
+}
+
+void Tab5Profile::flush(Receiver &receiver) {
+    portENTER_CRITICAL(&lock_);
+    for (Slot *slot : receiver.slots) {
+        if (slot->state == SlotState::Usb) slot->state = SlotState::Flushing;
+    }
+    portEXIT_CRITICAL(&lock_);
+    receiver.vendor->out().flush();
+}
+
+void Tab5Profile::check_timeout(TimerHandle_t timer) {
+    auto *self = static_cast<Tab5Profile *>(pvTimerGetTimerID(timer));
+    std::lock_guard<std::mutex> guard(self->session_lock_);
+    if (!self->session_) return;
+    portENTER_CRITICAL(&self->lock_);
+    const int64_t idle = esp_timer_get_time() - self->received_us_;
+    portEXIT_CRITICAL(&self->lock_);
+    if (idle < kSessionTimeoutUs) return;
+    ESP_LOGW(TAG, "session timed out");
+    self->end_session_locked();
+    self->events_.send(tab5::Type::Closed, 0, nullptr, 0);
 }
 
 void Tab5Profile::send_info(uint32_t seq) {
@@ -385,19 +458,30 @@ void Tab5Profile::release(void *context) {
 void Tab5Profile::receive_done(usb_device::Transfer *transfer) {
     auto *slot = static_cast<Slot *>(transfer->context);
     Receiver &receiver = *slot->receiver;
+    Tab5Profile *owner = receiver.owner;
     if (transfer->status == usb_device::TransferStatus::Canceled) {
-        slot->state = SlotState::Idle;
+        if (slot->state == SlotState::Flushing) {
+            owner->submit(slot);
+        } else {
+            slot->state = SlotState::Idle;
+        }
         return;
     }
     if (transfer->status != usb_device::TransferStatus::Completed) {
         ESP_LOGW(TAG, "channel %u status %d", (unsigned)receiver.channel, (int)transfer->status);
-        receiver.owner->submit(slot);
+        owner->submit(slot);
+        return;
+    }
+    owner->received();
+    const uint32_t session = owner->session_;
+    if (!session) {
+        owner->submit(slot);
         return;
     }
     slot->state = SlotState::Busy;
     if (receiver.channel == tab5::Channel::Video) {
-        receiver.owner->video_->submit(transfer->buffer, transfer->actual, release, slot);
+        owner->video_->submit(transfer->buffer, transfer->actual, session, release, slot);
     } else {
-        receiver.owner->audio_->submit(transfer->buffer, transfer->actual, release, slot);
+        owner->audio_->submit(transfer->buffer, transfer->actual, session, release, slot);
     }
 }

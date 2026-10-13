@@ -57,7 +57,7 @@ Tab5Audio::~Tab5Audio() {
 }
 
 void Tab5Audio::send(Op op) {
-    const Item item = {op, nullptr, 0, nullptr, nullptr};
+    const Item item = {op, nullptr, 0, 0, nullptr, nullptr};
     xQueueSend(queue_, &item, portMAX_DELAY);
 }
 
@@ -88,9 +88,10 @@ esp_err_t Tab5Audio::start(uint32_t capacity_bytes) {
     return ESP_OK;
 }
 
-void Tab5Audio::submit(const uint8_t *data, uint32_t length, Done done, void *context) {
+void Tab5Audio::submit(const uint8_t *data, uint32_t length, uint32_t session, Done done,
+                       void *context) {
     queued_bytes_ += length;
-    const Item item = {Op::Transfer, data, length, done, context};
+    const Item item = {Op::Transfer, data, length, session, done, context};
     xQueueSend(queue_, &item, portMAX_DELAY);
 }
 
@@ -201,6 +202,11 @@ void Tab5Audio::run(const Item &item) {
             close();
             have_format_ = false;
             return;
+    }
+    if (item.session != session_) {
+        dequeue(item.length);
+        item.done(item.context);
+        return;
     }
     played_ = 0;
     uint32_t bad_seq = 0;

@@ -1,7 +1,7 @@
 //! Streaming a video from ffmpeg: pacing and encoding its frames.
 
 use std::sync::Arc;
-use std::sync::mpsc::{self, Sender, SyncSender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
 use std::thread;
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ use crate::audio;
 use crate::clock::Clock;
 use crate::media::{AudioFormat, Frame, Input, Media};
 use crate::present::{self, LayoutKey, Presenter};
+use crate::signal;
 
 const AUDIO_QUEUE: usize = 64;
 /// A frame later than this is dropped to catch up.
@@ -188,13 +189,13 @@ impl Player {
     }
 }
 
-/// Streams until the input ends. While the device is away frames are paced
-/// and dropped, so the input keeps its time.
+/// Streams until the input ends or on stopping. While the device is away
+/// frames are paced and dropped, so the input keeps its time.
 pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
-    let mut connection = device.wait();
+    let mut connection = crate::connect(device);
     let info = match &connection {
         Some(connection) => connection.info.clone(),
-        None => return Err("no device".into()),
+        None => return Ok(()),
     };
     let rotation = options.rotation.unwrap_or(info.orientation as u32);
     let wants_audio = options.audio.is_some();
@@ -254,7 +255,12 @@ pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
         player.connected(connection)?;
     }
 
-    while let Ok(frame) = player.media.frames.recv() {
+    while !signal::stopping() {
+        let frame = match player.media.frames.recv_timeout(crate::STOP_POLL) {
+            Ok(frame) => frame,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         player.last_pts = frame.pts;
         if connection.is_none() {
             connection = device.poll();
@@ -277,8 +283,8 @@ pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
         let audio_level = player.presenter.audio_level;
         player.presenter.stats.report(audio_level);
     }
-    match &mut connection {
-        Some(connection) => connection.flush_video(),
+    match connection {
+        Some(connection) => connection.close(),
         None => Ok(()),
     }
 }
