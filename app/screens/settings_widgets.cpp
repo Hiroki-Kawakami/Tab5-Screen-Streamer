@@ -113,3 +113,43 @@ lv_obj_t *lv_setting_switch_create(lv_obj_t *row, bool checked,
     });
     return sw;
 }
+
+lv_obj_t *lv_setting_segmented_create(lv_obj_t *row, std::initializer_list<const char *> labels,
+                                      int active,
+                                      std::function<void(lv_obj_t *, int)> on_select,
+                                      const SettingColors *colors) {
+    auto segmented = lv_container_create(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_user_data(segmented, (void *)colors);
+    lv_obj_set_size(segmented, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(segmented, 4, 0);
+    lv_obj_set_style_pad_column(segmented, 4, 0);
+    lv_obj_set_style_radius(segmented, 12, 0);
+    lv_obj_set_style_bg_color(segmented, lv_color_hex(colors ? colors->track : kTrackColor), 0);
+    lv_obj_set_style_bg_opa(segmented, LV_OPA_COVER, 0);
+
+    int index = 0;
+    for (auto label : labels) {
+        auto button = lv_button_create(segmented, LV_BUTTON_STYLE_SECONDARY);
+        lv_button_set_text(button, label);
+        lv_obj_set_style_pad_hor(button, 22, 0);
+        lv_obj_set_style_pad_ver(button, 12, 0);
+        lv_obj_add_event_fn(button, LV_EVENT_CLICKED, [segmented, index, on_select](lv_event_t *) {
+            on_select(segmented, index);
+        });
+        index++;
+    }
+    lv_setting_segmented_set_active(segmented, active);
+    return segmented;
+}
+
+void lv_setting_segmented_set_active(lv_obj_t *segmented, int active) {
+    const auto *colors = static_cast<const SettingColors *>(lv_obj_get_user_data(segmented));
+    const uint32_t track = colors ? colors->track : kTrackColor;
+    const uint32_t accent = colors ? colors->accent : kActiveColor;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(segmented); i++) {
+        auto button = lv_obj_get_child(segmented, i);
+        const bool on = (int)i == active;
+        lv_obj_set_style_bg_color(button, lv_color_hex(on ? accent : track), 0);
+        lv_obj_set_style_text_color(button, on || colors ? lv_color_white() : lv_color_black(), 0);
+    }
+}

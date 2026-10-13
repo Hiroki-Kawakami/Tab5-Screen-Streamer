@@ -95,13 +95,15 @@ static bool harness_clip(int argc, const char *const *argv, void *) {
 #endif
 
 void app_entry() {
+    settings_init();
+
     bsp_config_t bsp_config = {};
-    bsp_config.display.pixel_format = BSP_PIXEL_FORMAT_RGB565;
+    bsp_config.display.pixel_format = settings_display_pixel_format();
     bsp_config.display.fb_num = 3;
     bsp_config.dispatch.task_priority = 6;
     bsp_config.dispatch.task_affinity = 1;
     bsp_init(&bsp_config);
-    settings_init();
+    bsp_audio_set_eq_enabled(settings_equalizer_enabled());
 
     esp_err_t err = display_init();
     if (err != ESP_OK) {

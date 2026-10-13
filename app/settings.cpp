@@ -4,6 +4,7 @@
  */
 
 #include "settings.hpp"
+#include "display/panel.hpp"
 #include "nvs_flash.h"
 #include "ui_orientation.hpp"
 
@@ -104,6 +105,10 @@ Setting<"brightness", uint8_t, +[](int percent) -> uint8_t {
     return std::clamp(percent, kMinDisplayBrightness, 100);
 }> s_display_brightness{80};
 
+Setting<"colordepth", uint8_t, +[](int bits) -> uint8_t {
+    return bits == 24 ? 24 : 16;
+}> s_display_color_depth{16};
+
 constexpr uint8_t kRotationLocked = 4;
 
 Setting<"rotation", uint8_t, +[](int value) -> uint8_t {
@@ -114,6 +119,8 @@ constexpr auto sanitize_flag = +[](bool enabled) -> uint8_t {
     return enabled ? 1 : 0;
 };
 
+Setting<"equalizer", uint8_t, sanitize_flag> s_equalizer{1};
+
 Setting<"lastmode", uint8_t, +[](int mode) -> uint8_t {
     return mode >= 0 && mode <= (int)AppMode::PcApp ? mode : 0;
 }> s_last_mode{(uint8_t)AppMode::None};
@@ -123,7 +130,9 @@ Setting<"usbaudio", uint8_t, sanitize_flag> s_usb_audio{1};
 template <typename Fn>
 void for_each_setting(Fn &&fn) {
     fn(s_display_brightness);
+    fn(s_display_color_depth);
     fn(s_rotation);
+    fn(s_equalizer);
     fn(s_last_mode);
     fn(s_usb_audio);
 }
@@ -156,6 +165,18 @@ void settings_set_display_brightness(int percent) {
     bsp_display_set_brightness(s_display_brightness.get());
 }
 
+bsp_pixel_format_t settings_display_pixel_format() {
+    return s_display_color_depth.get() == 24 ? BSP_PIXEL_FORMAT_RGB888 : BSP_PIXEL_FORMAT_RGB565;
+}
+
+esp_err_t settings_set_display_pixel_format(bsp_pixel_format_t format) {
+    if (format == settings_display_pixel_format()) return ESP_OK;
+    const esp_err_t err = panel_set_format(format);
+    if (err != ESP_OK) return err;
+    s_display_color_depth.set((int)bsp_pixel_format_bytes(format) * 8);
+    return ESP_OK;
+}
+
 bool settings_rotation_locked() {
     return (s_rotation.get() & kRotationLocked) != 0;
 }
@@ -172,6 +193,15 @@ void settings_set_rotation_lock(bool locked) {
     const bsp_rotation_t rotation = ui_orientation_current();
     if (!s_rotation.set((locked ? kRotationLocked : 0) | rotation)) return;
     ui_orientation_set_locked(locked, rotation);
+}
+
+bool settings_equalizer_enabled() {
+    return s_equalizer.get() != 0;
+}
+
+void settings_set_equalizer_enabled(bool enabled) {
+    if (!s_equalizer.set(enabled)) return;
+    bsp_audio_set_eq_enabled(enabled);
 }
 
 AppMode settings_last_mode() {

@@ -7,6 +7,7 @@
 #include "pc_app_screen.hpp"
 #include "resources.h"
 #include "screen_manager.hpp"
+#include "settings_screen.hpp"
 
 namespace {
 
@@ -66,6 +67,9 @@ void HomeScreen::build() {
     auto settings_icon = lv_label_create(settings);
     lv_label_set_text(settings_icon, TABLER_SETTINGS);
     lv_obj_set_style_text_font(settings_icon, &icon_48, 0);
+    lv_obj_add_event_fn(settings, LV_EVENT_CLICKED, [](lv_event_t *) {
+        screen_manager.load(std::make_shared<SettingsScreen>());
+    });
 
     lv_obj_set_style_pad_column(contents_, 24, 0);
 
