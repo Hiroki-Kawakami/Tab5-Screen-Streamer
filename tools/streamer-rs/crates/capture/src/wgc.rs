@@ -62,6 +62,10 @@ pub fn display(id: u64) -> Option<Display> {
     describe(Monitor::from_raw_hmonitor(id as *mut std::ffi::c_void))
 }
 
+pub fn mirror_primary(_id: u64) -> Option<u64> {
+    None
+}
+
 pub fn main_display() -> Result<Display, String> {
     let monitor = Monitor::primary().map_err(|e| format!("primary monitor: {e}"))?;
     describe(monitor).ok_or_else(|| "primary monitor has no size".into())
@@ -360,7 +364,12 @@ impl Drop for Capture {
 pub struct VirtualDisplay(std::convert::Infallible);
 
 impl VirtualDisplay {
-    pub fn new(_name: &str, _size: (u32, u32), _millimeters: (f64, f64)) -> Result<Self, String> {
+    pub fn new(
+        _name: &str,
+        _serial: u32,
+        _size: (u32, u32),
+        _millimeters: (f64, f64),
+    ) -> Result<Self, String> {
         Err("virtual displays are macOS only".into())
     }
 

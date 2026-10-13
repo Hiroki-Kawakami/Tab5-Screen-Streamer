@@ -20,8 +20,11 @@ const RESTART_DELAY: Duration = Duration::from_millis(500);
 /// How long a new virtual display may take to become capturable.
 const VIRTUAL_APPEAR: Duration = Duration::from_secs(3);
 const VIRTUAL_NAME: &str = "M5Stack Tab5";
-/// The panel's physical size, portrait.
-const PANEL_MILLIMETERS: (f64, f64) = (62.0, 110.0);
+/// For a device without a USB serial number, such as over USB/IP.
+const VIRTUAL_SERIAL: u32 = 0x1234;
+/// The size declared for the virtual display, portrait: larger than the panel,
+/// see docs/macos-virtual-display.md.
+const PANEL_MILLIMETERS: (f64, f64) = (169.0, 300.0);
 type Result<T> = std::result::Result<T, String>;
 
 pub struct CaptureOptions {
@@ -89,24 +92,81 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
         (false, None) => Some(capture::main_display()?),
     };
     while let Some(mut connection) = device.wait() {
-        let created;
-        let (id, virtual_display) = match display {
-            Some(display) => (display.id, None),
+        let created = match display {
+            Some(_) => None,
             None => {
                 let rotation = options
                     .rotation
                     .unwrap_or(connection.info.orientation as u32);
-                created = create_virtual(&connection.info, rotation)?;
-                (created.id(), Some(&created))
+                let serial = virtual_serial(connection.serial.as_deref());
+                Some(create_virtual(&connection.info, serial, rotation)?)
             }
         };
-        match Session::run(&mut connection, id, virtual_display, &options) {
+        let stop = loop {
+            let source = match (&created, display) {
+                (Some(virtual_display), _) => Source::of(virtual_display),
+                (None, Some(display)) => Source::Display(display.id),
+                (None, None) => unreachable!(),
+            };
+            match Session::run(&mut connection, source, &options) {
+                Err(Changed) => continue,
+                stop => break stop,
+            }
+        };
+        match stop {
             Ok(()) => return Ok(()),
             Err(Lost(e)) => device.lost(connection, &e),
             Err(Fatal(e)) => return Err(e),
+            Err(Changed) => unreachable!(),
         }
     }
     Ok(())
+}
+
+/// What a session captures.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Display(u64),
+    /// A virtual display on its own, sized by the session to the rotation.
+    Virtual(&'a VirtualDisplay),
+    /// The display a virtual display mirrors, or is mirrored to: macOS gives
+    /// the set one mode, so it is captured like any display.
+    Mirrored {
+        virtual_id: u64,
+        display: u64,
+    },
+}
+
+impl<'a> Source<'a> {
+    fn of(virtual_display: &'a VirtualDisplay) -> Self {
+        let virtual_id = virtual_display.id();
+        match capture::mirror_primary(virtual_id) {
+            Some(display) => Source::Mirrored {
+                virtual_id,
+                display,
+            },
+            None => Source::Virtual(virtual_display),
+        }
+    }
+
+    fn display(&self) -> u64 {
+        match *self {
+            Source::Display(id) | Source::Mirrored { display: id, .. } => id,
+            Source::Virtual(display) => display.id(),
+        }
+    }
+
+    /// Whether a virtual display has gone into or out of a mirror set.
+    fn changed(&self) -> bool {
+        match *self {
+            Source::Display(_) => false,
+            Source::Virtual(display) => capture::mirror_primary(display.id()).is_some(),
+            Source::Mirrored {
+                virtual_id,
+                display,
+            } => capture::mirror_primary(virtual_id) != Some(display),
+        }
+    }
 }
 
 /// The display size that fills the panel at `rotation`.
@@ -127,16 +187,36 @@ fn wait_for_size(id: u64, size: (u32, u32)) -> Result<()> {
     Ok(())
 }
 
-/// A virtual display for the panel, once it can be captured.
-fn create_virtual(info: &Info, rotation: u32) -> Result<VirtualDisplay> {
+/// A virtual display for the panel, once it or the display it mirrors can be
+/// captured.
+/// The low 32 bits of the device's MAC address, its USB serial number in hex,
+/// so each device gets its own display arrangement.
+fn virtual_serial(usb_serial: Option<&str>) -> u32 {
+    usb_serial
+        .and_then(|s| u64::from_str_radix(s, 16).ok())
+        .map_or(VIRTUAL_SERIAL, |mac| mac as u32)
+}
+
+fn create_virtual(info: &Info, serial: u32, rotation: u32) -> Result<VirtualDisplay> {
     let size = virtual_size(info, rotation);
     let millimeters = match rotation % 2 {
         1 => (PANEL_MILLIMETERS.1, PANEL_MILLIMETERS.0),
         _ => PANEL_MILLIMETERS,
     };
-    let display = VirtualDisplay::new(VIRTUAL_NAME, size, millimeters)?;
     let deadline = Instant::now() + VIRTUAL_APPEAR;
-    while !capture::displays()?.iter().any(|d| d.id == display.id()) {
+    // Fails while the one before, with the same identity, is still going away.
+    let display = loop {
+        match VirtualDisplay::new(VIRTUAL_NAME, serial, size, millimeters) {
+            Ok(display) => break display,
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    loop {
+        let source = capture::mirror_primary(display.id()).unwrap_or(display.id());
+        if capture::displays()?.iter().any(|d| d.id == source) {
+            break;
+        }
         if Instant::now() >= deadline {
             return Err("virtual display did not appear".into());
         }
@@ -149,13 +229,16 @@ fn create_virtual(info: &Info, rotation: u32) -> Result<VirtualDisplay> {
 enum Stop {
     /// The device is gone.
     Lost(String),
+    /// What to capture has changed.
+    Changed,
     Fatal(String),
 }
 
-use Stop::{Fatal, Lost};
+use Stop::{Changed, Fatal, Lost};
 
 struct Session<'a> {
     options: &'a CaptureOptions,
+    source: Source<'a>,
     display: u64,
     /// Sized by the session to the rotation, rather than watched.
     virtual_display: Option<&'a VirtualDisplay>,
@@ -180,19 +263,32 @@ impl<'a> Session<'a> {
     /// Ok(()) when the display is gone.
     fn run(
         connection: &mut Connection,
-        display: u64,
-        virtual_display: Option<&'a VirtualDisplay>,
+        source: Source<'a>,
         options: &'a CaptureOptions,
     ) -> std::result::Result<(), Stop> {
-        let Some(found) = capture::display(display) else {
-            return Ok(());
+        let display = source.display();
+        let virtual_display = match source {
+            Source::Virtual(virtual_display) => Some(virtual_display),
+            _ => None,
         };
         let info = connection.info.clone();
         let rotation = options.rotation.unwrap_or(info.orientation as u32);
+        if let Some(virtual_display) = virtual_display {
+            // A mirror set leaves it at the set's mode.
+            let size = virtual_size(&info, rotation);
+            if capture::display(display).is_none_or(|d| d.size != size) {
+                virtual_display.resize(size).map_err(Fatal)?;
+                wait_for_size(display, size).map_err(Fatal)?;
+            }
+        }
+        let Some(found) = capture::display(display) else {
+            return Ok(());
+        };
         let layout = layout(found.size, &info, rotation).map_err(Fatal)?;
         let (sender, frames) = mpsc::sync_channel(1);
         let mut session = Session {
             options,
+            source,
             display,
             virtual_display,
             size: found.size,
@@ -229,16 +325,22 @@ impl<'a> Session<'a> {
             if session.presenter.events(connection).map_err(Lost)? {
                 session.relayout().map_err(Fatal)?;
             }
-            if session.virtual_display.is_none() && checked.elapsed() >= DISPLAY_CHECK {
+            if checked.elapsed() >= DISPLAY_CHECK {
                 checked = Instant::now();
-                let Some(now) = capture::display(display) else {
-                    println!("display gone");
-                    return Ok(());
-                };
-                if now.size != session.size {
-                    println!("display now {}x{}", now.size.0, now.size.1);
-                    session.size = now.size;
-                    session.relayout().map_err(Fatal)?;
+                if session.source.changed() {
+                    println!("display mirroring changed");
+                    return Err(Changed);
+                }
+                if session.virtual_display.is_none() {
+                    let Some(now) = capture::display(display) else {
+                        println!("display gone");
+                        return Ok(());
+                    };
+                    if now.size != session.size {
+                        println!("display now {}x{}", now.size.0, now.size.1);
+                        session.size = now.size;
+                        session.relayout().map_err(Fatal)?;
+                    }
                 }
             }
             let wanted = session.pending || session.presenter.redraw;

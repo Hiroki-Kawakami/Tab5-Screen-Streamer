@@ -48,6 +48,8 @@ pub struct Link {
     pub control_in: Box<dyn InPipe>,
     pub video_out: Box<dyn OutPipe>,
     pub audio_out: Box<dyn OutPipe>,
+    /// The USB serial number, the device's MAC address in hex.
+    pub serial: Option<String>,
 }
 
 struct NusbOut {
@@ -134,7 +136,9 @@ pub fn open_nusb() -> Result<Link, String> {
     let audio_out = audio
         .endpoint::<Bulk, Out>(AUDIO_OUT)
         .map_err(|e| format!("audio out: {e}"))?;
+    let serial = info.serial_number().map(String::from);
     Ok(Link {
+        serial,
         control_out: Box::new(NusbOut {
             endpoint: control_out,
             parts: VecDeque::new(),

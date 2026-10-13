@@ -298,6 +298,7 @@ pub fn connect(address: &str) -> Result<Link, String> {
         queue: VecDeque::new(),
     };
     Ok(Link {
+        serial: None,
         control_out: Box::new(out(link::CONTROL_OUT)),
         control_in: Box::new(UsbipIn {
             shared: shared.clone(),

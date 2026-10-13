@@ -11,8 +11,9 @@ use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, class, define_class, msg_send, sel};
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{
-    CGDisplayPixelsHigh, CGDisplayPixelsWide, CGMainDisplayID, CGPreflightScreenCaptureAccess,
-    CGRequestScreenCaptureAccess, kCGDisplayStreamYCbCrMatrix_ITU_R_601_4,
+    CGDisplayIsInMirrorSet, CGDisplayPixelsHigh, CGDisplayPixelsWide, CGDisplayPrimaryDisplay,
+    CGMainDisplayID, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
+    kCGDisplayStreamYCbCrMatrix_ITU_R_601_4,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
@@ -104,6 +105,11 @@ pub fn display(id: u64) -> Option<Display> {
         CGDisplayPixelsHigh(display) as u32,
     );
     (size.0 > 0 && size.1 > 0).then_some(Display { id, size })
+}
+
+pub fn mirror_primary(id: u64) -> Option<u64> {
+    let display = id as u32;
+    CGDisplayIsInMirrorSet(display).then(|| CGDisplayPrimaryDisplay(display) as u64)
 }
 
 pub fn main_display() -> Result<Display, String> {
@@ -321,7 +327,12 @@ fn apply(display: &AnyObject, size: (u32, u32)) -> Result<(), String> {
 }
 
 impl VirtualDisplay {
-    pub fn new(name: &str, size: (u32, u32), millimeters: (f64, f64)) -> Result<Self, String> {
+    pub fn new(
+        name: &str,
+        serial: u32,
+        size: (u32, u32),
+        millimeters: (f64, f64),
+    ) -> Result<Self, String> {
         let queue = DispatchQueue::new("streamer.virtual-display", None);
         let longest = size.0.max(size.1);
         let descriptor: Retained<AnyObject> =
@@ -335,8 +346,12 @@ impl VirtualDisplay {
             let _: () = msg_send![&*descriptor, setSizeInMillimeters: millimeters];
             let _: () = msg_send![&*descriptor, setProductID: 0x303au32];
             let _: () = msg_send![&*descriptor, setVendorID: 0x4020u32];
-            let _: () = msg_send![&*descriptor, setSerialNum: 0x1234u32];
-            let _: () = msg_send![&*descriptor, setDispatchQueue: &*queue];
+            let _: () = msg_send![&*descriptor, setSerialNumber: serial];
+            let _: () = msg_send![&*descriptor, setQueue: &*queue];
+            let terminated = RcBlock::new(|_display: *mut AnyObject| {
+                eprintln!("virtual display terminated");
+            });
+            let _: () = msg_send![&*descriptor, setTerminationHandler: &*terminated];
         }
         let display: Option<Retained<AnyObject>> = unsafe {
             msg_send![msg_send![class!(CGVirtualDisplay), alloc], initWithDescriptor: &*descriptor]

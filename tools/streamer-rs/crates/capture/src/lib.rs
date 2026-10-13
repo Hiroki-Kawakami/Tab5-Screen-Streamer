@@ -46,6 +46,12 @@ pub fn main_display() -> Result<Display, String> {
     platform::main_display()
 }
 
+/// The display whose content `id` shows while it is in a mirror set, which
+/// may be `id` itself; None while it is not mirrored.
+pub fn mirror_primary(id: u64) -> Option<u64> {
+    platform::mirror_primary(id)
+}
+
 /// The display's current size, or None when it is gone.
 pub fn display(id: u64) -> Option<Display> {
     platform::display(id)
@@ -81,9 +87,15 @@ impl Capture {
 pub struct VirtualDisplay(platform::VirtualDisplay);
 
 impl VirtualDisplay {
-    /// `millimeters` is the physical size the OS scales its interface by.
-    pub fn new(name: &str, size: (u32, u32), millimeters: (f64, f64)) -> Result<Self, String> {
-        platform::VirtualDisplay::new(name, size, millimeters).map(VirtualDisplay)
+    /// The OS keeps the display's arrangement by `serial`. `millimeters` is
+    /// the physical size the OS scales its interface by.
+    pub fn new(
+        name: &str,
+        serial: u32,
+        size: (u32, u32),
+        millimeters: (f64, f64),
+    ) -> Result<Self, String> {
+        platform::VirtualDisplay::new(name, serial, size, millimeters).map(VirtualDisplay)
     }
 
     pub fn id(&self) -> u64 {

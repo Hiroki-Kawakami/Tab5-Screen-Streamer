@@ -64,6 +64,7 @@ pub struct Connection {
     events: Receiver<Event>,
     _reader: Reader,
     pub info: Info,
+    pub serial: Option<String>,
     video_seq: u32,
 }
 
@@ -169,6 +170,7 @@ impl Connection {
             events,
             _reader: reader,
             info,
+            serial: link.serial,
             video_seq: 0,
         })
     }
