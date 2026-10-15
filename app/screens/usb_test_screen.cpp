@@ -7,6 +7,7 @@
 #include "home_screen.hpp"
 #include "screen_manager.hpp"
 #include "usb/usb.hpp"
+#include "usb/usb_test_profile.hpp"
 
 void UsbTestScreen::build() {
     createNavigation("USB Test", LV_NAVIGATION_STYLE_DEFAULT | LV_NAVIGATION_STYLE_BACK);
@@ -20,7 +21,7 @@ void UsbTestScreen::back() {
 }
 
 void UsbTestScreen::onEnter() {
-    usb_start(UsbProfileId::Test);
+    usb_start(std::make_shared<UsbTestProfile>());
 }
 
 void UsbTestScreen::onExit() {

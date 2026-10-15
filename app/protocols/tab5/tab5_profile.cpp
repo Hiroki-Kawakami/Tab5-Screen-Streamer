@@ -4,23 +4,13 @@
  */
 
 #include "tab5_profile.hpp"
-#include "display/panel.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
-#include "esp_timer.h"
-#include "lvgl.hpp"
-#include "ui_orientation.hpp"
 
 static const char *TAG = "tab5_profile";
 
-static constexpr uint32_t kControlBytes = Tab5Events::kTransferBytes;
-static constexpr uint32_t kVideoSlotBytes = 16 * 65024;
-static constexpr uint32_t kAudioSlotBytes = 16384;
 static constexpr size_t kBufferAlignment = 128;
-static constexpr uint16_t kMaxFps = 60;
-static constexpr int64_t kSessionTimeoutUs = 3 * 1000 * 1000;
-static constexpr TickType_t kTimeoutCheck = pdMS_TO_TICKS(250);
 
 enum class SlotState : uint8_t { Idle, Usb, Flushing, Busy };
 
@@ -36,30 +26,16 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
     return buffer;
 }
 
-Tab5Profile::Tab5Profile(bool uac, bool hid, UsbStatusListener status)
-    : video_(std::make_unique<Tab5Video>(events_, session_, [this](bool streaming) {
-          portENTER_CRITICAL(&lock_);
-          streaming_ = streaming;
-          portEXIT_CRITICAL(&lock_);
-          report_status();
-      })),
-      audio_(std::make_unique<Tab5Audio>(events_, session_)), uac_(uac), hid_(hid),
-      status_(std::move(status)) {
-    video_in_ = {this, tab5::Channel::Video, kVideoSlotBytes, nullptr, {}, false};
-    audio_in_ = {this, tab5::Channel::Audio, kAudioSlotBytes, nullptr, {}, false};
+Tab5Profile::Tab5Profile(std::shared_ptr<Tab5Service> service, bool uac, bool hid)
+    : service_(std::move(service)), uac_(uac), hid_(hid) {
+    video_in_ = {this, tab5::Channel::Video, Tab5Service::kVideoBytes, nullptr, {}, false};
+    audio_in_ = {this, tab5::Channel::Audio, Tab5Service::kAudioBytes, nullptr, {}, false};
 }
 
 Tab5Profile::~Tab5Profile() {
     if (keyboard_) bsp_keyboard_set_event_cb(nullptr, nullptr);
-    if (timeout_timer_) xTimerDelete(timeout_timer_, portMAX_DELAY);
-    lv_lock();
-    ui_orientation_set_observer(nullptr, nullptr);
-    lv_unlock();
-    panel_set_format_listener(nullptr, nullptr);
-    panel_set_clip_listener(nullptr, nullptr);
-    video_.reset();
-    audio_->set_uac_feedback(nullptr);
-    audio_.reset();
+    if (attached_) service_->detach();
+    if (speaker_) service_->audio().set_uac_feedback(nullptr);
     heap_caps_free(control_transfer_.buffer);
     destroy(video_in_);
     destroy(audio_in_);
@@ -116,25 +92,17 @@ void Tab5Profile::destroy(Receiver &receiver) {
 }
 
 esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
-    esp_err_t err = events_.init();
-    if (err == ESP_OK) err = video_->start();
-    if (err == ESP_OK) err = audio_->start(kSlots * kAudioSlotBytes);
-    if (err == ESP_OK) {
-        err = create(video_in_, "Tab5 Video", "{65B4EEDE-ACA0-4045-803A-B2454CFF9993}",
-                     MALLOC_CAP_SPIRAM);
-    }
+    esp_err_t err = create(video_in_, "Tab5 Video", "{65B4EEDE-ACA0-4045-803A-B2454CFF9993}",
+                           MALLOC_CAP_SPIRAM);
     if (err == ESP_OK) {
         err = create(audio_in_, "Tab5 Audio", "{2F8AB360-5EA4-4EA4-A2C7-6055646488D6}",
                      MALLOC_CAP_SPIRAM);
     }
     if (err != ESP_OK) return err;
 
-    timeout_timer_ = xTimerCreate("tab5_session", kTimeoutCheck, pdTRUE, this, check_timeout);
-    if (!timeout_timer_) return ESP_ERR_NO_MEM;
-
-    control_transfer_.buffer = alloc_buffer(kControlBytes, MALLOC_CAP_DMA);
+    control_transfer_.buffer = alloc_buffer(Tab5Service::kControlBytes, MALLOC_CAP_DMA);
     if (!control_transfer_.buffer) return ESP_ERR_NO_MEM;
-    control_transfer_.length = kControlBytes;
+    control_transfer_.length = Tab5Service::kControlBytes;
     control_transfer_.callback = control_done;
     control_transfer_.context = this;
 
@@ -143,25 +111,16 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     control.winusb = true;
     control.device_interface_guid = "{17A6BA36-2C39-40B2-941A-42436642AF2C}";
     control.configured = [this] { control_configured(); };
-    control.unconfigured = [this] { control_unconfigured(); };
-    control.suspended = [this] { control_suspended(); };
-    control.resumed = [this] { control_resumed(); };
+    control.unconfigured = [this] { service_->disconnected(); };
+    control.suspended = [this] { service_->suspended(); };
+    control.resumed = [this] { service_->resumed(); };
     control_ = std::make_shared<usb_device::Vendor>(std::move(control));
 
-    lv_lock();
-    orientation_ = ui_orientation_current();
-    ui_orientation_set_observer(orientation_changed, this);
-    lv_unlock();
-    panel_set_format_listener(format_changed, this);
-    panel_set_clip_listener(clip_changed, this);
-    panel_lock();
-    bsp_rect_t clip;
-    const bool clipped = panel_clip(&clip);
-    portENTER_CRITICAL(&lock_);
-    overlay_visible_ = clipped;
-    stream_ = clipped ? clip : bsp_rect_t{{0, 0}, panel_size()};
-    portEXIT_CRITICAL(&lock_);
-    panel_unlock();
+    service_->attach([this] {
+        flush(video_in_);
+        flush(audio_in_);
+    });
+    attached_ = true;
 
     err = device.add(control_);
     if (err == ESP_OK) err = device.add(video_in_.vendor);
@@ -169,6 +128,7 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     if (err == ESP_OK && hid_) err = add_keyboard(device);
     if (err != ESP_OK || !uac_) return err;
 
+    Tab5Audio &audio = service_->audio();
     usb_device::UacSpeaker::Config speaker;
     speaker.name = "Tab5 Speaker";
     speaker.sync = usb_device::UacSpeaker::Sync::Async;
@@ -177,19 +137,19 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     speaker.volume_min = Tab5Audio::kUacVolumeMin;
     speaker.volume_max = Tab5Audio::kUacVolumeMax;
     speaker.volume_resolution = Tab5Audio::kUacVolumeStep;
-    speaker.volume = audio_->uac_volume().volume;
-    speaker.started = [this](const usb_device::UacSpeaker::Format &, uint32_t) {
-        audio_->uac_started();
+    speaker.volume = audio.uac_volume().volume;
+    speaker.started = [&audio](const usb_device::UacSpeaker::Format &, uint32_t) {
+        audio.uac_started();
     };
-    speaker.stopped = [this] { audio_->uac_stopped(); };
-    speaker.received = [this](const uint8_t *pcm, size_t bytes) {
-        audio_->uac_received(pcm, bytes);
+    speaker.stopped = [&audio] { audio.uac_stopped(); };
+    speaker.received = [&audio](const uint8_t *pcm, size_t bytes) {
+        audio.uac_received(pcm, bytes);
     };
-    speaker.volume_changed = [this](bool mute, int16_t volume) {
-        audio_->set_uac_volume(mute, volume);
+    speaker.volume_changed = [&audio](bool mute, int16_t volume) {
+        audio.set_uac_volume(mute, volume);
     };
     speaker_ = std::make_shared<usb_device::UacSpeaker>(std::move(speaker));
-    audio_->set_uac_feedback([speaker = speaker_.get()](double rate) {
+    audio.set_uac_feedback([speaker = speaker_.get()](double rate) {
         speaker->set_feedback(rate);
     });
 
@@ -224,188 +184,23 @@ void Tab5Profile::keyboard_event(const bsp_keyboard_event_t *event, void *arg) {
     }
 }
 
-void Tab5Profile::orientation_changed(bsp_rotation_t rotation, void *arg) {
-    auto *self = static_cast<Tab5Profile *>(arg);
-    if (rotation == self->orientation_) return;
-    self->orientation_ = rotation;
-    const tab5::ByteEvent event = {static_cast<uint8_t>(rotation), {}};
-    self->events_.send(tab5::Type::Orientation, 0, &event, sizeof(event));
-}
-
-void Tab5Profile::format_changed(bsp_pixel_format_t format, void *arg) {
-    static_cast<Tab5Profile *>(arg)->video_->format_changed(format);
-}
-
-static tab5::Rect wire_rect(const bsp_rect_t &rect) {
-    return {static_cast<uint16_t>(rect.origin.x), static_cast<uint16_t>(rect.origin.y),
-            static_cast<uint16_t>(rect.size.width), static_cast<uint16_t>(rect.size.height)};
-}
-
-void Tab5Profile::clip_changed(const bsp_rect_t *clip, bool front_changed, void *arg) {
-    auto *self = static_cast<Tab5Profile *>(arg);
-    const bsp_size_t size = panel_size();
-    const bsp_rect_t stream = clip ? *clip : bsp_rect_t{{0, 0}, size};
-    portENTER_CRITICAL(&self->lock_);
-    const bool was_visible = self->overlay_visible_;
-    const bsp_rect_t covered = self->stream_;
-    self->overlay_visible_ = clip != nullptr;
-    self->stream_ = stream;
-    portEXIT_CRITICAL(&self->lock_);
-
-    const tab5::OverlayEvent event = {clip != nullptr, 0, wire_rect(stream)};
-    self->events_.send(tab5::Type::Overlay, 0, &event, sizeof(event));
-    if (front_changed) {
-        const tab5::Rect wire = wire_rect(stream);
-        self->events_.send(tab5::Type::Damage, 0, &wire, sizeof(wire));
-    }
-    if (!was_visible || (clip && clip->origin.x == covered.origin.x &&
-                         clip->origin.y == covered.origin.y &&
-                         clip->size.width == covered.size.width &&
-                         clip->size.height == covered.size.height)) {
-        return;
-    }
-    const int right = covered.origin.x + covered.size.width;
-    const int bottom = covered.origin.y + covered.size.height;
-    const bsp_rect_t damage[] = {
-        {{0, 0}, {size.width, covered.origin.y}},
-        {{0, bottom}, {size.width, size.height - bottom}},
-        {{0, covered.origin.y}, {covered.origin.x, covered.size.height}},
-        {{right, covered.origin.y}, {size.width - right, covered.size.height}},
-    };
-    for (const bsp_rect_t &rect : damage) {
-        if (rect.size.width <= 0 || rect.size.height <= 0) continue;
-        const tab5::Rect wire = wire_rect(rect);
-        self->events_.send(tab5::Type::Damage, 0, &wire, sizeof(wire));
-    }
-}
-
-void Tab5Profile::report_status() {
-    portENTER_CRITICAL(&lock_);
-    const UsbStatus status = !configured_ || suspended_ ? UsbStatus::Unconfigured
-                             : streaming_ ? UsbStatus::Active
-                                          : UsbStatus::Configured;
-    const bool changed = status != reported_;
-    reported_ = status;
-    portEXIT_CRITICAL(&lock_);
-    if (changed && status_) status_(status);
-}
-
 void Tab5Profile::control_configured() {
-    portENTER_CRITICAL(&lock_);
-    configured_ = true;
-    portEXIT_CRITICAL(&lock_);
-    report_status();
-    events_.start(control_->in());
-    xTimerStart(timeout_timer_, portMAX_DELAY);
+    service_->connected(control_->in());
     esp_err_t err = control_->out().submit(&control_transfer_);
     if (err != ESP_OK) ESP_LOGE(TAG, "submit control: %s", esp_err_to_name(err));
-}
-
-void Tab5Profile::control_unconfigured() {
-    portENTER_CRITICAL(&lock_);
-    configured_ = false;
-    suspended_ = false;
-    portEXIT_CRITICAL(&lock_);
-    report_status();
-    xTimerStop(timeout_timer_, portMAX_DELAY);
-    close_session();
-    events_.stop();
-}
-
-void Tab5Profile::control_suspended() {
-    portENTER_CRITICAL(&lock_);
-    suspended_ = true;
-    portEXIT_CRITICAL(&lock_);
-    report_status();
-    close_session();
-}
-
-void Tab5Profile::control_resumed() {
-    portENTER_CRITICAL(&lock_);
-    suspended_ = false;
-    portEXIT_CRITICAL(&lock_);
-    report_status();
 }
 
 void Tab5Profile::control_done(usb_device::Transfer *transfer) {
     auto *self = static_cast<Tab5Profile *>(transfer->context);
     if (transfer->status == usb_device::TransferStatus::Canceled) return;
     if (transfer->status == usb_device::TransferStatus::Completed) {
-        self->received();
-        uint32_t bad_seq = 0;
-        const bool ok = tab5::for_each_message(
-            transfer->buffer, transfer->actual, &bad_seq,
-            [self](const tab5::MsgHeader &header, const uint8_t *payload) {
-                self->handle_control(header, payload);
-            });
-        if (!ok) self->events_.error(tab5::Channel::Control, tab5::ErrorCode::Malformed, bad_seq);
+        self->service_->received();
+        self->service_->control(transfer->buffer, transfer->actual);
     } else {
         ESP_LOGW(TAG, "control status %d", (int)transfer->status);
     }
     esp_err_t err = self->control_->out().submit(transfer);
     if (err != ESP_OK) ESP_LOGE(TAG, "submit control: %s", esp_err_to_name(err));
-}
-
-void Tab5Profile::handle_control(const tab5::MsgHeader &header, const uint8_t *payload) {
-    switch (static_cast<tab5::Type>(header.type)) {
-        case tab5::Type::Open:
-            open_session(header.seq);
-            return;
-        case tab5::Type::Close:
-            close_session();
-            return;
-        case tab5::Type::KeepAlive:
-            return;
-        case tab5::Type::SetVolume: {
-            tab5::VolumeMessage message;
-            if (header.length != sizeof(message)) break;
-            memcpy(&message, payload, sizeof(message));
-            if (message.stream != static_cast<uint8_t>(tab5::Stream::Bulk)) {
-                events_.error(tab5::Channel::Control, tab5::ErrorCode::Unsupported, header.seq);
-                return;
-            }
-            audio_->set_volume(message.mute, message.volume);
-            return;
-        }
-        default:
-            break;
-    }
-    events_.error(tab5::Channel::Control, tab5::ErrorCode::Malformed, header.seq);
-}
-
-void Tab5Profile::received() {
-    const int64_t now = esp_timer_get_time();
-    portENTER_CRITICAL(&lock_);
-    received_us_ = now;
-    portEXIT_CRITICAL(&lock_);
-}
-
-// What a session that ended mid-transfer left on the OUT endpoints would
-// otherwise run into the first transfers of this one.
-void Tab5Profile::open_session(uint32_t seq) {
-    std::lock_guard<std::mutex> guard(session_lock_);
-    end_session_locked();
-    flush(video_in_);
-    flush(audio_in_);
-    events_.clear();
-    received();
-    if (++sessions_ == 0) sessions_ = 1;
-    session_ = sessions_;
-    ESP_LOGI(TAG, "session %u opened", (unsigned)sessions_);
-    send_info(seq);
-}
-
-void Tab5Profile::close_session() {
-    std::lock_guard<std::mutex> guard(session_lock_);
-    if (end_session_locked()) ESP_LOGI(TAG, "session closed");
-}
-
-bool Tab5Profile::end_session_locked() {
-    if (!session_) return false;
-    session_ = 0;
-    video_->end();
-    audio_->end();
-    return true;
 }
 
 void Tab5Profile::flush(Receiver &receiver) {
@@ -415,54 +210,6 @@ void Tab5Profile::flush(Receiver &receiver) {
     }
     portEXIT_CRITICAL(&lock_);
     receiver.vendor->out().flush();
-}
-
-void Tab5Profile::check_timeout(TimerHandle_t timer) {
-    auto *self = static_cast<Tab5Profile *>(pvTimerGetTimerID(timer));
-    std::lock_guard<std::mutex> guard(self->session_lock_);
-    if (!self->session_) return;
-    portENTER_CRITICAL(&self->lock_);
-    const int64_t idle = esp_timer_get_time() - self->received_us_;
-    portEXIT_CRITICAL(&self->lock_);
-    if (idle < kSessionTimeoutUs) return;
-    ESP_LOGW(TAG, "session timed out");
-    self->end_session_locked();
-    self->events_.send(tab5::Type::Closed, 0, nullptr, 0);
-}
-
-void Tab5Profile::send_info(uint32_t seq) {
-    const bsp_size_t size = panel_size();
-    tab5::Info info = {};
-    info.protocol_version = tab5::kProtocolVersion;
-    info.panel_width = size.width;
-    info.panel_height = size.height;
-    info.pixel_format = static_cast<uint8_t>(tab5_pixel_format(panel_format()));
-    info.orientation = orientation_;
-    info.framebuffers = panel_framebuffers();
-    info.swap_window = Tab5Video::kSwapWindow;
-    info.direct_align = Tab5Video::kDirectAlign;
-    info.blit_max_width = Tab5Video::kBlitMaxSize;
-    info.blit_max_height = Tab5Video::kBlitMaxSize;
-    info.encodings = 1u << static_cast<int>(tab5::Encoding::Jpeg) |
-                     1u << static_cast<int>(tab5::Encoding::Raw) |
-                     1u << static_cast<int>(tab5::Encoding::Lz4);
-    info.max_message[static_cast<int>(tab5::Channel::Control)] = kControlBytes;
-    info.max_message[static_cast<int>(tab5::Channel::Video)] = kVideoSlotBytes;
-    info.max_message[static_cast<int>(tab5::Channel::Audio)] = kAudioSlotBytes;
-    info.epoch = video_->epoch();
-    portENTER_CRITICAL(&lock_);
-    info.overlay_visible = overlay_visible_;
-    const tab5::Rect stream = wire_rect(stream_);
-    portEXIT_CRITICAL(&lock_);
-    info.overlay_x = stream.x;
-    info.overlay_y = stream.y;
-    info.overlay_w = stream.w;
-    info.overlay_h = stream.h;
-    info.max_fps = kMaxFps;
-    info.volume[static_cast<int>(tab5::Stream::Uac)] = audio_->uac_volume();
-    info.volume[static_cast<int>(tab5::Stream::Bulk)] = audio_->volume();
-    info.audio_max_rate = Tab5Audio::kMaxRate;
-    events_.send(tab5::Type::Info, seq, &info, sizeof(info), info.epoch);
 }
 
 void Tab5Profile::configured(Receiver &receiver) {
@@ -479,9 +226,9 @@ void Tab5Profile::unconfigured(Receiver &receiver) {
     receiver.active = false;
     portEXIT_CRITICAL(&lock_);
     if (receiver.channel == tab5::Channel::Video) {
-        video_->end();
+        service_->video().end();
     } else {
-        audio_->end();
+        service_->audio().end();
     }
 }
 
@@ -521,16 +268,17 @@ void Tab5Profile::receive_done(usb_device::Transfer *transfer) {
         owner->submit(slot);
         return;
     }
-    owner->received();
-    const uint32_t session = owner->session_;
+    Tab5Service &service = *owner->service_;
+    service.received();
+    const uint32_t session = service.session();
     if (!session) {
         owner->submit(slot);
         return;
     }
     slot->state = SlotState::Busy;
     if (receiver.channel == tab5::Channel::Video) {
-        owner->video_->submit(transfer->buffer, transfer->actual, session, release, slot);
+        service.video().submit(transfer->buffer, transfer->actual, session, release, slot);
     } else {
-        owner->audio_->submit(transfer->buffer, transfer->actual, session, release, slot);
+        service.audio().submit(transfer->buffer, transfer->actual, session, release, slot);
     }
 }

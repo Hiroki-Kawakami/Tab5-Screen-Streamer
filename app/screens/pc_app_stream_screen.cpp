@@ -10,11 +10,13 @@
 #include "esp_log.h"
 #include "home_screen.hpp"
 #include "pc_app_screen.hpp"
+#include "protocols/tab5/tab5_profile.hpp"
 #include "resources.h"
 #include "screen_manager.hpp"
 #include "settings.hpp"
 #include "stream_panel.hpp"
 #include "ui_orientation.hpp"
+#include "usb/usb.hpp"
 #include "widgets.hpp"
 
 static const char *TAG = "pc_app_stream";
@@ -102,23 +104,26 @@ void PcAppStreamScreen::onEnter() {
     }, this);
     display_manager.set_outside_touch_callback(outsideTouch, this);
 
-    UsbOptions options;
-    options.audio = audio_;
-    options.hid = hid_;
     std::weak_ptr<Screen> weak = weak_from_this();
-    options.status = [weak](UsbStatus status) {
+    service_ = std::make_shared<Tab5Service>([weak](UsbStatus status) {
         lv_lock();
         lv_async_call([weak, status] {
             if (auto self = weak.lock()) static_cast<PcAppStreamScreen &>(*self).setStatus(status);
         });
         lv_unlock();
-    };
-    usb_start(UsbProfileId::Tab5, options);
+    });
+    esp_err_t err = service_->start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "tab5 service: %s", esp_err_to_name(err));
+        return;
+    }
+    usb_start(std::make_shared<Tab5Profile>(service_, audio_, hid_));
 }
 
 void PcAppStreamScreen::onExit() {
     closeOverlay();
     usb_stop();
+    service_.reset();
     display_manager.set_outside_touch_callback(nullptr);
     ui_orientation_set_listener(nullptr, nullptr);
 }

@@ -43,9 +43,11 @@ public:
     void submit(const uint8_t *data, uint32_t length, uint32_t session, Done done,
                 void *context);
     void end();
+    /* Returns once everything submitted before has been done. */
+    void sync();
 
 private:
-    enum class Op : uint8_t { Transfer, End, Quit };
+    enum class Op : uint8_t { Transfer, End, Sync, Quit };
 
     struct Item {
         Op op;
@@ -71,6 +73,7 @@ private:
     std::function<void(bool)> streaming_;
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t exited_ = nullptr;
+    SemaphoreHandle_t synced_ = nullptr;
     std::atomic<uint32_t> epoch_ = 0;
 
     int64_t stats_start_us_ = 0;

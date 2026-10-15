@@ -52,6 +52,7 @@ Tab5Audio::~Tab5Audio() {
     send(Op::Quit);
     xSemaphoreTake(exited_, portMAX_DELAY);
     vSemaphoreDelete(exited_);
+    vSemaphoreDelete(synced_);
     vQueueDelete(queue_);
     if (uac_pcm_) audf_fifo_destroy(uac_pcm_);
 }
@@ -65,7 +66,8 @@ esp_err_t Tab5Audio::start(uint32_t capacity_bytes) {
     capacity_bytes_ = capacity_bytes;
     queue_ = xQueueCreate(kQueueLength, sizeof(Item));
     exited_ = xSemaphoreCreateBinary();
-    if (!queue_ || !exited_) return ESP_ERR_NO_MEM;
+    synced_ = xSemaphoreCreateBinary();
+    if (!queue_ || !exited_ || !synced_) return ESP_ERR_NO_MEM;
     audf_fifo_config_t fifo = {};
     fifo.fmt = AUDF_FMT_S16;
     fifo.channels = kUacChannels;
@@ -97,6 +99,11 @@ void Tab5Audio::submit(const uint8_t *data, uint32_t length, uint32_t session, D
 
 void Tab5Audio::end() {
     send(Op::End);
+}
+
+void Tab5Audio::sync() {
+    send(Op::Sync);
+    xSemaphoreTake(synced_, portMAX_DELAY);
 }
 
 void Tab5Audio::apply_volume() {
@@ -197,6 +204,9 @@ void Tab5Audio::run(const Item &item) {
             uac_ = false;
             uac_playing_ = false;
             apply_volume();
+            return;
+        case Op::Sync:
+            xSemaphoreGive(synced_);
             return;
         default:
             close();

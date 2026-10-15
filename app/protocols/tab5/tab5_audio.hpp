@@ -36,6 +36,8 @@ public:
     void submit(const uint8_t *data, uint32_t length, uint32_t session, Done done,
                 void *context);
     void end();
+    /* Returns once everything submitted before has been done. */
+    void sync();
 
     /* From any task. Clamps, applies and announces the bulk stream's volume. */
     void set_volume(bool mute, int16_t volume);
@@ -55,7 +57,7 @@ public:
     tab5::Volume uac_volume();
 
 private:
-    enum class Op : uint8_t { Transfer, End, Quit, UacStart, UacStop };
+    enum class Op : uint8_t { Transfer, End, Sync, Quit, UacStart, UacStop };
 
     struct Item {
         Op op;
@@ -82,6 +84,7 @@ private:
     const std::atomic<uint32_t> &session_;
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t exited_ = nullptr;
+    SemaphoreHandle_t synced_ = nullptr;
     uint32_t capacity_bytes_ = 0;
     std::atomic<uint32_t> queued_bytes_ = 0;
     uint32_t played_ = 0;

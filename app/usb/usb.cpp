@@ -9,9 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "protocols/tab5/tab5_profile.hpp"
 #include "usb_profile.hpp"
-#include "usb_test_profile.hpp"
 
 static const char *TAG = "usb";
 
@@ -20,25 +18,15 @@ static constexpr uint32_t kTaskStackBytes = 4096;
 static constexpr int kQueueLength = 4;
 
 struct Request {
-    bool start;
-    UsbProfileId id;
-    UsbOptions options;
+    std::shared_ptr<UsbProfile> profile;
 };
 
 static QueueHandle_t s_requests;
 static std::unique_ptr<usb_device::Device> s_device;
-static std::unique_ptr<UsbProfile> s_profile;
+static std::shared_ptr<UsbProfile> s_profile;
 
-static std::unique_ptr<UsbProfile> make_profile(UsbProfileId id, const UsbOptions &options) {
-    switch (id) {
-        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>(options.audio, options.hid, options.status);
-        case UsbProfileId::Test: return std::make_unique<UsbTestProfile>();
-    }
-    return nullptr;
-}
-
-static void start(UsbProfileId id, const UsbOptions &options) {
-    s_profile = make_profile(id, options);
+static void start(std::shared_ptr<UsbProfile> profile) {
+    s_profile = std::move(profile);
     usb_device::DeviceConfig config;
     config.info = s_profile->info();
     s_device = std::make_unique<usb_device::Device>(std::move(config));
@@ -57,7 +45,7 @@ static void usb_task(void *) {
         xQueueReceive(s_requests, &request, portMAX_DELAY);
         s_device.reset();
         s_profile.reset();
-        if (request->start) start(request->id, request->options);
+        if (request->profile) start(std::move(request->profile));
         delete request;
     }
 }
@@ -71,12 +59,12 @@ esp_err_t usb_init() {
     return ESP_OK;
 }
 
-void usb_start(UsbProfileId id, UsbOptions options) {
-    auto *request = new Request{true, id, std::move(options)};
+void usb_start(std::shared_ptr<UsbProfile> profile) {
+    auto *request = new Request{std::move(profile)};
     xQueueSend(s_requests, &request, portMAX_DELAY);
 }
 
 void usb_stop() {
-    auto *request = new Request{false, UsbProfileId::Tab5, {}};
+    auto *request = new Request{};
     xQueueSend(s_requests, &request, portMAX_DELAY);
 }

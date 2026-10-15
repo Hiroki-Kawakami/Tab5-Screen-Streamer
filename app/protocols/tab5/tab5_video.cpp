@@ -27,13 +27,15 @@ Tab5Video::~Tab5Video() {
     xQueueSend(queue_, &quit, portMAX_DELAY);
     xSemaphoreTake(exited_, portMAX_DELAY);
     vSemaphoreDelete(exited_);
+    vSemaphoreDelete(synced_);
     vQueueDelete(queue_);
 }
 
 esp_err_t Tab5Video::start() {
     queue_ = xQueueCreate(kQueueLength, sizeof(Item));
     exited_ = xSemaphoreCreateBinary();
-    if (!queue_ || !exited_) return ESP_ERR_NO_MEM;
+    synced_ = xSemaphoreCreateBinary();
+    if (!queue_ || !exited_ || !synced_) return ESP_ERR_NO_MEM;
     if (xTaskCreatePinnedToCore(task, "tab5_video", kTaskStackBytes, this, kTaskPriority,
                                 nullptr, kTaskCore) != pdPASS) {
         return ESP_ERR_NO_MEM;
@@ -50,6 +52,12 @@ void Tab5Video::submit(const uint8_t *data, uint32_t length, uint32_t session, D
 void Tab5Video::end() {
     const Item item = {Op::End, nullptr, 0, 0, nullptr, nullptr};
     xQueueSend(queue_, &item, portMAX_DELAY);
+}
+
+void Tab5Video::sync() {
+    const Item item = {Op::Sync, nullptr, 0, 0, nullptr, nullptr};
+    xQueueSend(queue_, &item, portMAX_DELAY);
+    xSemaphoreTake(synced_, portMAX_DELAY);
 }
 
 void Tab5Video::task(void *arg) {
@@ -75,6 +83,10 @@ void Tab5Video::format_changed(bsp_pixel_format_t format) {
 }
 
 void Tab5Video::run(const Item &item) {
+    if (item.op == Op::Sync) {
+        xSemaphoreGive(synced_);
+        return;
+    }
     if (item.op == Op::Transfer && item.session != session_) {
         item.done(item.context);
         return;

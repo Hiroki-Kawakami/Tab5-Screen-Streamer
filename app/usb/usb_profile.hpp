@@ -13,8 +13,8 @@
 enum class UsbStatus : uint8_t { Unconfigured, Configured, Active };
 using UsbStatusListener = std::function<void(UsbStatus)>;
 
-/* One way of appearing on USB: the device identity, its functions and what
- * consumes their data. Destroyed after the Device it was added to. */
+/* One way of appearing on USB: the device identity and its functions.
+ * Destroyed after the Device it was added to. */
 class UsbProfile {
 public:
     virtual ~UsbProfile() = default;

@@ -4,9 +4,10 @@
  */
 
 #pragma once
+#include <memory>
 #include "bsp.h"
+#include "protocols/tab5/tab5_service.hpp"
 #include "screen.hpp"
-#include "usb/usb.hpp"
 
 class PcAppStreamScreen : public Screen {
 public:
@@ -18,6 +19,7 @@ public:
 private:
     bool audio_;
     bool hid_;
+    std::shared_ptr<Tab5Service> service_;
     UsbStatus status_ = UsbStatus::Unconfigured;
     bsp_rotation_t rotation_ = BSP_ROTATION_0;
 
