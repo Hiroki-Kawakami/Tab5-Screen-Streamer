@@ -10,13 +10,14 @@
 
 class PcAppStreamScreen : public Screen {
 public:
-    explicit PcAppStreamScreen(bool audio) : audio_(audio) {}
+    PcAppStreamScreen(bool audio, bool hid) : audio_(audio), hid_(hid) {}
     void build() override;
     void onEnter() override;
     void onExit() override;
 
 private:
     bool audio_;
+    bool hid_;
     UsbStatus status_ = UsbStatus::Unconfigured;
     bsp_rotation_t rotation_ = BSP_ROTATION_0;
 

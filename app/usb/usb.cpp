@@ -31,7 +31,7 @@ static std::unique_ptr<UsbProfile> s_profile;
 
 static std::unique_ptr<UsbProfile> make_profile(UsbProfileId id, const UsbOptions &options) {
     switch (id) {
-        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>(options.audio, options.status);
+        case UsbProfileId::Tab5: return std::make_unique<Tab5Profile>(options.audio, options.hid, options.status);
         case UsbProfileId::Test: return std::make_unique<UsbTestProfile>();
     }
     return nullptr;

@@ -63,7 +63,7 @@ static bool harness_mode(int argc, const char *const *argv, void *) {
     } else if (strcmp(argv[1], "pc-app") == 0) {
         screen = std::make_shared<PcAppScreen>();
     } else if (strcmp(argv[1], "usb") == 0) {
-        screen = std::make_shared<PcAppStreamScreen>(true);
+        screen = std::make_shared<PcAppStreamScreen>(true, true);
     } else if (strcmp(argv[1], "usb-test") == 0) {
         screen = std::make_shared<UsbTestScreen>();
     } else {
@@ -100,6 +100,7 @@ void app_entry() {
     bsp_config_t bsp_config = {};
     bsp_config.display.pixel_format = settings_display_pixel_format();
     bsp_config.display.fb_num = 3;
+    bsp_config.keyboard.detect = BSP_KEYBOARD_DETECT_AUTO;
     bsp_config.dispatch.task_priority = 6;
     bsp_config.dispatch.task_affinity = 1;
     bsp_init(&bsp_config);

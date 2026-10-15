@@ -104,6 +104,7 @@ void PcAppStreamScreen::onEnter() {
 
     UsbOptions options;
     options.audio = audio_;
+    options.hid = hid_;
     std::weak_ptr<Screen> weak = weak_from_this();
     options.status = [weak](UsbStatus status) {
         lv_lock();

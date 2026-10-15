@@ -127,6 +127,8 @@ Setting<"lastmode", uint8_t, +[](int mode) -> uint8_t {
 
 Setting<"usbaudio", uint8_t, sanitize_flag> s_usb_audio{1};
 
+Setting<"usbhid", uint8_t, sanitize_flag> s_usb_hid{1};
+
 template <typename Fn>
 void for_each_setting(Fn &&fn) {
     fn(s_display_brightness);
@@ -135,6 +137,7 @@ void for_each_setting(Fn &&fn) {
     fn(s_equalizer);
     fn(s_last_mode);
     fn(s_usb_audio);
+    fn(s_usb_hid);
 }
 
 }  // namespace
@@ -218,4 +221,12 @@ bool settings_usb_audio() {
 
 void settings_set_usb_audio(bool enabled) {
     s_usb_audio.set(enabled);
+}
+
+bool settings_usb_hid() {
+    return s_usb_hid.get() != 0;
+}
+
+void settings_set_usb_hid(bool enabled) {
+    s_usb_hid.set(enabled);
 }

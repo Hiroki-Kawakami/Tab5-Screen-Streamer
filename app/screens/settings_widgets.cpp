@@ -54,6 +54,16 @@ lv_obj_t *lv_setting_row_create(lv_obj_t *section, const char *label) {
     return row;
 }
 
+lv_obj_t *lv_setting_description_create(lv_obj_t *section, const char *text,
+                                       const SettingColors *colors) {
+    auto label = lv_label_create(section);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_font_role(label, LV_WIDGETS_FONT_CAPTION);
+    lv_obj_set_style_text_color(label, lv_color_hex(colors ? colors->value : kSecondaryTextColor), 0);
+    lv_label_set_text(label, text);
+    return label;
+}
+
 lv_obj_t *lv_setting_value_create(lv_obj_t *row, const SettingColors *colors) {
     auto value = lv_label_create(row);
     lv_obj_set_font_role(value, LV_WIDGETS_FONT_BODY);

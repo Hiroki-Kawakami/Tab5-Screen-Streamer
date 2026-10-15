@@ -23,6 +23,8 @@ void lv_setting_page_style(lv_obj_t *contents, const SettingColors *colors = nul
 lv_obj_t *lv_setting_section_create(lv_obj_t *contents, const char *title = nullptr,
                                     const SettingColors *colors = nullptr);
 lv_obj_t *lv_setting_row_create(lv_obj_t *section, const char *label);
+lv_obj_t *lv_setting_description_create(lv_obj_t *section, const char *text,
+                                       const SettingColors *colors = nullptr);
 lv_obj_t *lv_setting_value_create(lv_obj_t *row, const SettingColors *colors = nullptr);
 lv_obj_t *lv_setting_slider_create(lv_obj_t *section, int32_t min, int32_t max, int32_t value,
                                    const SettingColors *colors = nullptr);

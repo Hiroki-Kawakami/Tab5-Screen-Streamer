@@ -36,3 +36,6 @@ void settings_set_last_mode(AppMode mode);
 
 bool settings_usb_audio();
 void settings_set_usb_audio(bool enabled);
+
+bool settings_usb_hid();
+void settings_set_usb_hid(bool enabled);

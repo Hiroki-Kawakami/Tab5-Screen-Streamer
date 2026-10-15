@@ -56,7 +56,7 @@ void step_create(lv_obj_t *parent, int number, const char *text) {
 }
 
 std::shared_ptr<Screen> PcAppScreen::stream_screen() {
-    return std::make_shared<PcAppStreamScreen>(settings_usb_audio());
+    return std::make_shared<PcAppStreamScreen>(settings_usb_audio(), settings_usb_hid());
 }
 
 void PcAppScreen::build() {
@@ -117,6 +117,13 @@ void PcAppScreen::build() {
         settings_set_usb_audio(enabled);
         settings_commit();
     });
+    lv_setting_separator_create(section);
+    row = lv_setting_row_create(section, "USB Keyboard");
+    lv_setting_switch_create(row, settings_usb_hid(), [](lv_obj_t *, bool enabled) {
+        settings_set_usb_hid(enabled);
+        settings_commit();
+    });
+    lv_setting_description_create(section, "Use the Tab5 Keyboard on the PC.");
 
     footer_ = lv_container_create(root_, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_hor(footer_, 24, 0);

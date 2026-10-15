@@ -11,14 +11,15 @@ reading the device state, receiving input and playing audio.
 | Vendor: video | bulk OUT | Drawing commands |
 | Vendor: audio | bulk OUT | PCM and its format |
 | UAC 2.0 speaker | isochronous OUT | Audio played by the host OS |
-| HID | interrupt IN | Keyboard and touch digitizer, one report ID each |
+| HID boot keyboard | interrupt IN | Keyboard |
 
 The endpoints are split by ordering and by latency. Messages on one endpoint
 are handled in the order they were sent; nothing is ordered across endpoints.
 Audio has its own endpoint so it never waits behind a large drawing transfer,
 and the control endpoint answers while the video endpoint is busy.
 
-The HID interface is always enumerated. Whether reports are sent on it is the
+The UAC speaker and the HID keyboard are enumerated when they are enabled in
+the device's settings. Whether reports are sent on the HID interface is the
 input route (see [Input](#input)), so switching routes never re-enumerates.
 
 ## Framing

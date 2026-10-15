@@ -14,6 +14,7 @@ enum class UsbProfileId {
 
 struct UsbOptions {
     bool audio = true;
+    bool hid = true;
     UsbStatusListener status;
 };
 

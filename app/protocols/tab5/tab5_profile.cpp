@@ -36,19 +36,21 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
     return buffer;
 }
 
-Tab5Profile::Tab5Profile(bool uac, UsbStatusListener status)
+Tab5Profile::Tab5Profile(bool uac, bool hid, UsbStatusListener status)
     : video_(std::make_unique<Tab5Video>(events_, session_, [this](bool streaming) {
           portENTER_CRITICAL(&lock_);
           streaming_ = streaming;
           portEXIT_CRITICAL(&lock_);
           report_status();
       })),
-      audio_(std::make_unique<Tab5Audio>(events_, session_)), uac_(uac), status_(std::move(status)) {
+      audio_(std::make_unique<Tab5Audio>(events_, session_)), uac_(uac), hid_(hid),
+      status_(std::move(status)) {
     video_in_ = {this, tab5::Channel::Video, kVideoSlotBytes, nullptr, {}, false};
     audio_in_ = {this, tab5::Channel::Audio, kAudioSlotBytes, nullptr, {}, false};
 }
 
 Tab5Profile::~Tab5Profile() {
+    if (keyboard_) bsp_keyboard_set_event_cb(nullptr, nullptr);
     if (timeout_timer_) xTimerDelete(timeout_timer_, portMAX_DELAY);
     lv_lock();
     ui_orientation_set_observer(nullptr, nullptr);
@@ -164,6 +166,7 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     err = device.add(control_);
     if (err == ESP_OK) err = device.add(video_in_.vendor);
     if (err == ESP_OK) err = device.add(audio_in_.vendor);
+    if (err == ESP_OK && hid_) err = add_keyboard(device);
     if (err != ESP_OK || !uac_) return err;
 
     usb_device::UacSpeaker::Config speaker;
@@ -191,6 +194,34 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     });
 
     return device.add(speaker_);
+}
+
+esp_err_t Tab5Profile::add_keyboard(usb_device::Device &device) {
+    usb_device::Hid::Config config;
+    config.name = "Tab5 Keyboard";
+    config.boot = usb_device::Hid::Boot::Keyboard;
+    keyboard_ = std::make_shared<usb_device::Hid>(std::move(config));
+    bsp_keyboard_set_event_cb(keyboard_event, this);
+    return device.add(keyboard_);
+}
+
+void Tab5Profile::keyboard_event(const bsp_keyboard_event_t *event, void *arg) {
+    auto *self = static_cast<Tab5Profile *>(arg);
+    usb_device::KeyboardReport report = {};
+    switch (event->type) {
+        case BSP_KEYBOARD_EVENT_HID:
+            report.modifiers = event->hid.modifiers;
+            report.keys[0] = event->hid.keycode;
+            break;
+        case BSP_KEYBOARD_EVENT_DISCONNECTED:
+            break;
+        default:
+            return;
+    }
+    esp_err_t err = self->keyboard_->send(&report, sizeof(report));
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "keyboard report: %s", esp_err_to_name(err));
+    }
 }
 
 void Tab5Profile::orientation_changed(bsp_rotation_t rotation, void *arg) {

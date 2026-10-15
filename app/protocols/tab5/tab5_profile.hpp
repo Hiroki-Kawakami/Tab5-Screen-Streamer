@@ -16,12 +16,13 @@
 #include "tab5_events.hpp"
 #include "tab5_video.hpp"
 #include "usb/usb_profile.hpp"
+#include "usb_device_hid.hpp"
 #include "usb_device_uac.hpp"
 #include "usb_device_vendor.hpp"
 
 class Tab5Profile : public UsbProfile {
 public:
-    Tab5Profile(bool uac, UsbStatusListener status);
+    Tab5Profile(bool uac, bool hid, UsbStatusListener status);
     ~Tab5Profile() override;
     usb_device::DeviceInfo info() const override;
     esp_err_t add_functions(usb_device::Device &device) override;
@@ -44,6 +45,7 @@ private:
     static void receive_done(usb_device::Transfer *transfer);
     static void release(void *context);
     esp_err_t create(Receiver &receiver, const char *name, const char *guid, uint32_t caps);
+    esp_err_t add_keyboard(usb_device::Device &device);
     void destroy(Receiver &receiver);
     void configured(Receiver &receiver);
     void unconfigured(Receiver &receiver);
@@ -64,6 +66,7 @@ private:
     static void orientation_changed(bsp_rotation_t rotation, void *arg);
     static void format_changed(bsp_pixel_format_t format, void *arg);
     static void clip_changed(const bsp_rect_t *clip, bool front_changed, void *arg);
+    static void keyboard_event(const bsp_keyboard_event_t *event, void *arg);
 
     std::atomic<uint32_t> session_ = 0;
     Tab5Events events_;
@@ -71,6 +74,7 @@ private:
     std::unique_ptr<Tab5Audio> audio_;
     std::shared_ptr<usb_device::Vendor> control_;
     std::shared_ptr<usb_device::UacSpeaker> speaker_;
+    std::shared_ptr<usb_device::Hid> keyboard_;
     usb_device::Transfer control_transfer_ = {};
     Receiver video_in_ = {};
     Receiver audio_in_ = {};
@@ -79,6 +83,7 @@ private:
     bool overlay_visible_ = false;
     bsp_rect_t stream_ = {};
     bool uac_;
+    bool hid_;
     UsbStatusListener status_;
     bool configured_ = false;
     bool suspended_ = false;
