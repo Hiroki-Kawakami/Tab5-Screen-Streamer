@@ -4,6 +4,8 @@
  */
 
 #include "tab5_service.hpp"
+#include <algorithm>
+#include <cstring>
 #include "display/panel.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -194,6 +196,21 @@ void Tab5Service::handle_control(const tab5::MsgHeader &header, const uint8_t *p
             return;
         case tab5::Type::KeepAlive:
             return;
+        case tab5::Type::SetInputMode: {
+            tab5::InputModeMessage message;
+            if (header.length != sizeof(message)) break;
+            memcpy(&message, payload, sizeof(message));
+            if (!session_) return;
+            if (message.target >= tab5::kInputTargets ||
+                message.mode > static_cast<uint8_t>(tab5::InputMode::Hid) ||
+                !input_enabled_[message.target]) {
+                events_.error(tab5::Channel::Control, tab5::ErrorCode::Unsupported, header.seq);
+                return;
+            }
+            set_input_mode(static_cast<tab5::InputTarget>(message.target),
+                           static_cast<tab5::InputMode>(message.mode));
+            return;
+        }
         case tab5::Type::SetVolume: {
             tab5::VolumeMessage message;
             if (header.length != sizeof(message)) break;
@@ -242,6 +259,7 @@ bool Tab5Service::end_session_locked() {
     session_ = 0;
     video_->end();
     audio_->end();
+    reset_input_modes();
     return true;
 }
 
@@ -264,31 +282,114 @@ void Tab5Service::send_info(uint32_t seq) {
     info.protocol_version = tab5::kProtocolVersion;
     info.panel_width = size.width;
     info.panel_height = size.height;
-    info.pixel_format = static_cast<uint8_t>(tab5_pixel_format(panel_format()));
-    info.orientation = orientation_;
     info.framebuffers = panel_framebuffers();
     info.swap_window = Tab5Video::kSwapWindow;
-    info.direct_align = Tab5Video::kDirectAlign;
-    info.blit_max_width = Tab5Video::kBlitMaxSize;
-    info.blit_max_height = Tab5Video::kBlitMaxSize;
-    info.encodings = 1u << static_cast<int>(tab5::Encoding::Jpeg) |
-                     1u << static_cast<int>(tab5::Encoding::Raw) |
-                     1u << static_cast<int>(tab5::Encoding::Lz4);
     info.max_message[static_cast<int>(tab5::Channel::Control)] = kControlBytes;
     info.max_message[static_cast<int>(tab5::Channel::Video)] = kVideoBytes;
     info.max_message[static_cast<int>(tab5::Channel::Audio)] = kAudioBytes;
+    info.audio_max_rate = Tab5Audio::kMaxRate;
+    info.encodings = 1u << static_cast<int>(tab5::Encoding::Jpeg) |
+                     1u << static_cast<int>(tab5::Encoding::Raw) |
+                     1u << static_cast<int>(tab5::Encoding::Lz4);
+    info.direct_align = Tab5Video::kDirectAlign;
+    info.blit_max_width = Tab5Video::kBlitMaxSize;
+    info.blit_max_height = Tab5Video::kBlitMaxSize;
+    info.pixel_format = static_cast<uint8_t>(tab5_pixel_format(panel_format()));
+    info.orientation = orientation_;
     info.epoch = video_->epoch();
-    portENTER_CRITICAL(&lock_);
-    info.overlay_visible = overlay_visible_;
-    const tab5::Rect stream = wire_rect(stream_);
-    portEXIT_CRITICAL(&lock_);
-    info.overlay_x = stream.x;
-    info.overlay_y = stream.y;
-    info.overlay_w = stream.w;
-    info.overlay_h = stream.h;
     info.max_fps = kMaxFps;
+    for (int i = 0; i < tab5::kInputTargets; i++) {
+        info.input_mode[i] = static_cast<uint8_t>(input_mode_[i].load());
+    }
     info.volume[static_cast<int>(tab5::Stream::Uac)] = audio_->uac_volume();
     info.volume[static_cast<int>(tab5::Stream::Bulk)] = audio_->volume();
-    info.audio_max_rate = Tab5Audio::kMaxRate;
+    portENTER_CRITICAL(&lock_);
+    info.overlay.visible = overlay_visible_;
+    info.overlay.stream = wire_rect(stream_);
+    portEXIT_CRITICAL(&lock_);
     events_.send(tab5::Type::Info, seq, &info, sizeof(info), info.epoch);
+}
+
+void Tab5Service::set_input_listener(InputListener listener) {
+    std::lock_guard<std::mutex> guard(input_lock_);
+    input_listener_ = std::move(listener);
+}
+
+void Tab5Service::set_input_enabled(tab5::InputTarget target, bool enabled) {
+    input_enabled_[static_cast<int>(target)] = enabled;
+    set_input_mode(target, enabled ? tab5::InputMode::Hid : tab5::InputMode::None);
+}
+
+tab5::InputMode Tab5Service::input_mode(tab5::InputTarget target) const {
+    return input_mode_[static_cast<int>(target)];
+}
+
+void Tab5Service::reset_input_modes() {
+    for (int i = 0; i < tab5::kInputTargets; i++) {
+        set_input_mode(static_cast<tab5::InputTarget>(i),
+                       input_enabled_[i] ? tab5::InputMode::Hid : tab5::InputMode::None);
+    }
+}
+
+void Tab5Service::set_input_mode(tab5::InputTarget target, tab5::InputMode mode) {
+    const int index = static_cast<int>(target);
+    std::lock_guard<std::mutex> guard(input_lock_);
+    if (input_mode_[index] == mode) return;
+    if (input_mode_[index] == tab5::InputMode::Event) release_events_locked(target);
+    input_mode_[index] = mode;
+    if (input_listener_) input_listener_(target, mode);
+    const tab5::InputModeMessage message = {static_cast<uint8_t>(index),
+                                            static_cast<uint8_t>(mode), 0};
+    events_.send(tab5::Type::InputMode, 0, &message, sizeof(message));
+}
+
+void Tab5Service::release_events_locked(tab5::InputTarget target) {
+    if (target == tab5::InputTarget::Touch) {
+        if (touch_count_) send_touch_locked(nullptr, 0);
+        return;
+    }
+    static constexpr tab5::KeyEvent kReleased = {};
+    if (memcmp(&key_, &kReleased, sizeof(key_)) == 0) return;
+    key_ = kReleased;
+    events_.send(tab5::Type::Key, 0, &key_, sizeof(key_));
+}
+
+void Tab5Service::send_touch_locked(const tab5::TouchPoint *points, int count) {
+    if (count == touch_count_ &&
+        (!count || memcmp(points, touch_points_, count * sizeof(*points)) == 0)) {
+        return;
+    }
+    touch_count_ = count;
+    if (count) memcpy(touch_points_, points, count * sizeof(*points));
+    uint8_t payload[sizeof(tab5::TouchEvent) + sizeof(touch_points_)];
+    const tab5::TouchEvent event = {static_cast<uint8_t>(count), {}};
+    memcpy(payload, &event, sizeof(event));
+    if (count) memcpy(payload + sizeof(event), points, count * sizeof(*points));
+    events_.send(tab5::Type::Touch, 0, payload, sizeof(event) + count * sizeof(*points));
+}
+
+bool Tab5Service::touch(const bsp_touch_point_t *points, int count) {
+    std::lock_guard<std::mutex> guard(input_lock_);
+    if (input_mode_[static_cast<int>(tab5::InputTarget::Touch)] != tab5::InputMode::Event) {
+        return false;
+    }
+    tab5::TouchPoint wire[kMaxTouchPoints];
+    count = std::min(count, kMaxTouchPoints);
+    for (int i = 0; i < count; i++) {
+        wire[i] = {static_cast<uint8_t>(points[i].id), 0, static_cast<uint16_t>(points[i].x),
+                   static_cast<uint16_t>(points[i].y), 0};
+    }
+    send_touch_locked(wire, count);
+    return true;
+}
+
+bool Tab5Service::key(const tab5::KeyEvent &event) {
+    std::lock_guard<std::mutex> guard(input_lock_);
+    if (input_mode_[static_cast<int>(tab5::InputTarget::Keyboard)] != tab5::InputMode::Event) {
+        return false;
+    }
+    if (memcmp(&event, &key_, sizeof(key_)) == 0) return true;
+    key_ = event;
+    events_.send(tab5::Type::Key, 0, &key_, sizeof(key_));
+    return true;
 }

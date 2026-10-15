@@ -6,6 +6,7 @@ pub const HEADER_BYTES: usize = 16;
 pub const OPEN: u8 = 0x01;
 pub const CLOSE: u8 = 0x02;
 pub const KEEPALIVE: u8 = 0x03;
+pub const SET_INPUT_MODE: u8 = 0x04;
 pub const SET_VOLUME: u8 = 0x05;
 pub const INFO: u8 = 0x81;
 pub const CLOSED: u8 = 0x82;
@@ -15,6 +16,8 @@ pub const FORMAT: u8 = 0x86;
 pub const ORIENTATION: u8 = 0x87;
 pub const OVERLAY: u8 = 0x88;
 pub const DAMAGE: u8 = 0x89;
+pub const TOUCH: u8 = 0x8a;
+pub const INPUT_MODE: u8 = 0x8c;
 pub const VOLUME: u8 = 0x8d;
 pub const AUDIO: u8 = 0x8e;
 pub const AUDIO_FORMAT: u8 = 0x20;
@@ -62,6 +65,36 @@ impl PixelFormat {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum InputTarget {
+    Touch = 0,
+    Keyboard = 1,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum InputMode {
+    None = 0,
+    Event = 1,
+    Hid = 2,
+}
+
+fn input_mode(value: u8) -> Option<InputMode> {
+    match value {
+        0 => Some(InputMode::None),
+        1 => Some(InputMode::Event),
+        2 => Some(InputMode::Hid),
+        _ => None,
+    }
+}
+
+fn input_target(value: u8) -> Option<InputTarget> {
+    match value {
+        0 => Some(InputTarget::Touch),
+        1 => Some(InputTarget::Keyboard),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Info {
@@ -80,6 +113,8 @@ pub struct Info {
     pub epoch: u32,
     pub overlay_visible: bool,
     pub max_fps: u16,
+    /// By InputTarget.
+    pub input_mode: [InputMode; 2],
     pub volume: [Volume; 2],
     pub audio_max_rate: u32,
 }
@@ -116,6 +151,14 @@ fn rect_at(p: &[u8], at: usize) -> Rect {
     )
 }
 
+/// Panel-native.
+#[derive(Clone, Copy, Debug)]
+pub struct TouchPoint {
+    pub id: u8,
+    pub x: u16,
+    pub y: u16,
+}
+
 pub enum Event {
     Info { seq: u32, info: Info },
     Closed,
@@ -125,6 +168,8 @@ pub enum Event {
     Format { format: PixelFormat, epoch: u32 },
     Overlay { visible: bool, stream: Rect },
     Damage(Rect),
+    Touch(Vec<TouchPoint>),
+    InputMode(InputTarget, InputMode),
     Volume { stream: u8, mute: bool, volume: i16 },
     Audio { buffered: u32, capacity: u32 },
     Other,
@@ -192,6 +237,10 @@ pub fn audio_format(rate: u32, channels: u8, bits: u8) -> Vec<u8> {
     out
 }
 
+pub fn set_input_mode(target: InputTarget, mode: InputMode) -> Vec<u8> {
+    vec![target as u8, mode as u8, 0, 0]
+}
+
 pub fn set_volume(stream: u8, mute: bool, volume: i16) -> Vec<u8> {
     let mut out = vec![stream, mute as u8];
     out.extend_from_slice(&volume.to_le_bytes());
@@ -224,29 +273,44 @@ fn pixel_format(value: u8) -> Option<PixelFormat> {
 }
 
 fn parse_info(p: &[u8]) -> Option<Info> {
-    if p.len() < 72 {
+    if p.len() < 74 {
         return None;
     }
-    let pixel_format = pixel_format(p[6])?;
     Some(Info {
         protocol_version: u16_at(p, 0),
         panel_width: u16_at(p, 2),
         panel_height: u16_at(p, 4),
-        pixel_format,
-        orientation: p[7],
-        framebuffers: p[8],
-        swap_window: p[9],
-        direct_align: u16_at(p, 10),
-        blit_max_width: u16_at(p, 12),
-        blit_max_height: u16_at(p, 14),
-        encodings: u32_at(p, 16),
-        max_message: [u32_at(p, 20), u32_at(p, 24), u32_at(p, 28)],
-        epoch: u32_at(p, 32),
-        overlay_visible: p[36] != 0,
-        max_fps: u16_at(p, 46),
-        volume: [volume_at(p, 48), volume_at(p, 58)],
-        audio_max_rate: u32_at(p, 68),
+        framebuffers: p[6],
+        swap_window: p[7],
+        max_message: [u32_at(p, 8), u32_at(p, 12), u32_at(p, 16)],
+        audio_max_rate: u32_at(p, 20),
+        encodings: u32_at(p, 24),
+        direct_align: u16_at(p, 28),
+        blit_max_width: u16_at(p, 30),
+        blit_max_height: u16_at(p, 32),
+        pixel_format: pixel_format(p[34])?,
+        orientation: p[35],
+        epoch: u32_at(p, 36),
+        max_fps: u16_at(p, 40),
+        input_mode: [input_mode(p[42])?, input_mode(p[43])?],
+        volume: [volume_at(p, 44), volume_at(p, 54)],
+        overlay_visible: p[64] != 0,
     })
+}
+
+fn parse_touch(p: &[u8]) -> Option<Vec<TouchPoint>> {
+    let count = *p.first()? as usize;
+    let points = p.get(4..4 + count * 8)?;
+    Some(
+        points
+            .chunks_exact(8)
+            .map(|point| TouchPoint {
+                id: point[0],
+                x: u16_at(point, 2),
+                y: u16_at(point, 4),
+            })
+            .collect(),
+    )
 }
 
 /// Splits one IN transfer into events; stops at the first malformed message.
@@ -285,6 +349,16 @@ pub fn parse_events(data: &[u8]) -> Vec<Event> {
                 stream: rect_at(payload, 2),
             },
             DAMAGE if payload.len() >= 8 => Event::Damage(rect_at(payload, 0)),
+            TOUCH => match parse_touch(payload) {
+                Some(points) => Event::Touch(points),
+                None => continue,
+            },
+            INPUT_MODE if payload.len() >= 2 => {
+                match (input_target(payload[0]), input_mode(payload[1])) {
+                    (Some(target), Some(mode)) => Event::InputMode(target, mode),
+                    _ => continue,
+                }
+            }
             VOLUME if payload.len() >= 4 => Event::Volume {
                 stream: payload[0],
                 mute: payload[1] != 0,

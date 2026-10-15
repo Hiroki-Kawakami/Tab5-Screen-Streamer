@@ -15,12 +15,13 @@
 
 class Tab5Profile : public UsbProfile {
 public:
-    Tab5Profile(std::shared_ptr<Tab5Service> service, bool uac, bool hid);
+    Tab5Profile(std::shared_ptr<Tab5Service> service, bool uac, bool keyboard, bool mouse);
     ~Tab5Profile() override;
     usb_device::DeviceInfo info() const override;
     esp_err_t add_functions(usb_device::Device &device) override;
-    /* From any task; dropped while the keyboard is not enumerated. */
+    /* From any task; dropped while the device is not enumerated. */
     void keyboard_report(const usb_device::KeyboardReport &report);
+    void mouse_report(const usb_device::MouseReport &report);
 
 private:
     struct Slot;
@@ -38,6 +39,8 @@ private:
     static void control_done(usb_device::Transfer *transfer);
     static void receive_done(usb_device::Transfer *transfer);
     static void release(void *context);
+    static void send_report(usb_device::Hid *hid, const char *name, const void *report,
+                            size_t bytes);
     esp_err_t create(Receiver &receiver, const char *name, const char *guid, uint32_t caps);
     void destroy(Receiver &receiver);
     void configured(Receiver &receiver);
@@ -50,6 +53,7 @@ private:
     std::shared_ptr<usb_device::Vendor> control_;
     std::shared_ptr<usb_device::UacSpeaker> speaker_;
     std::shared_ptr<usb_device::Hid> keyboard_;
+    std::shared_ptr<usb_device::Hid> mouse_;
     usb_device::Transfer control_transfer_ = {};
     Receiver video_in_ = {};
     Receiver audio_in_ = {};

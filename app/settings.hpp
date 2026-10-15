@@ -39,3 +39,6 @@ void settings_set_usb_audio(bool enabled);
 
 bool settings_usb_hid();
 void settings_set_usb_hid(bool enabled);
+
+bool settings_touch_input();
+void settings_set_touch_input(bool enabled);

@@ -57,6 +57,12 @@ pub fn display(id: u64) -> Option<Display> {
     platform::display(id)
 }
 
+/// The display's area on the desktop (x, y, w, h), in the coordinates
+/// streamer-input takes; None when it is gone.
+pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
+    platform::bounds(id)
+}
+
 /// Capturing until dropped.
 pub struct Capture {
     platform: platform::Capture,

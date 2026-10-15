@@ -26,6 +26,12 @@ public:
     static constexpr uint32_t kVideoBytes = 16 * 65024;
     static constexpr uint32_t kAudioBytes = 16384;
     static constexpr int kQueuedMessages = 4;
+    static constexpr int kMaxTouchPoints = 10;
+
+    /* Called on every input mode change with the mode taking over, after the
+     * input sent in events is released; the listener releases what it sent on
+     * HID. It must not call back into the service. */
+    using InputListener = std::function<void(tab5::InputTarget target, tab5::InputMode mode)>;
 
     explicit Tab5Service(UsbStatusListener status);
     ~Tab5Service();
@@ -47,6 +53,16 @@ public:
     void received();
     void control(const uint8_t *data, uint32_t length);
 
+    /* Returns once the previous listener is no longer running. */
+    void set_input_listener(InputListener listener);
+    /* A disabled target stays None. Either way the target goes back to its
+     * default mode. */
+    void set_input_enabled(tab5::InputTarget target, bool enabled);
+    tab5::InputMode input_mode(tab5::InputTarget target) const;
+    /* False when the target is not in Event mode, and nothing is sent. */
+    bool touch(const bsp_touch_point_t *points, int count);
+    bool key(const tab5::KeyEvent &event);
+
 private:
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
     void open_session(uint32_t seq);
@@ -54,6 +70,10 @@ private:
     bool end_session_locked();
     static void check_timeout(TimerHandle_t timer);
     void send_info(uint32_t seq);
+    void set_input_mode(tab5::InputTarget target, tab5::InputMode mode);
+    void reset_input_modes();
+    void release_events_locked(tab5::InputTarget target);
+    void send_touch_locked(const tab5::TouchPoint *points, int count);
     void report_status();
     static void orientation_changed(bsp_rotation_t rotation, void *arg);
     static void format_changed(bsp_pixel_format_t format, void *arg);
@@ -77,4 +97,11 @@ private:
     uint32_t sessions_ = 0;
     int64_t received_us_ = 0;
     TimerHandle_t timeout_timer_ = nullptr;
+    std::mutex input_lock_;
+    InputListener input_listener_;
+    std::atomic<bool> input_enabled_[tab5::kInputTargets] = {};
+    std::atomic<tab5::InputMode> input_mode_[tab5::kInputTargets] = {};
+    int touch_count_ = 0;
+    tab5::TouchPoint touch_points_[kMaxTouchPoints] = {};
+    tab5::KeyEvent key_ = {};
 };

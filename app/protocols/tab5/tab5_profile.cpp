@@ -26,15 +26,22 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
     return buffer;
 }
 
-Tab5Profile::Tab5Profile(std::shared_ptr<Tab5Service> service, bool uac, bool hid)
+Tab5Profile::Tab5Profile(std::shared_ptr<Tab5Service> service, bool uac, bool keyboard,
+                         bool mouse)
     : service_(std::move(service)), uac_(uac) {
     video_in_ = {this, tab5::Channel::Video, Tab5Service::kVideoBytes, nullptr, {}, false};
     audio_in_ = {this, tab5::Channel::Audio, Tab5Service::kAudioBytes, nullptr, {}, false};
-    if (hid) {
+    if (keyboard) {
         usb_device::Hid::Config config;
         config.name = "Tab5 Keyboard";
         config.boot = usb_device::Hid::Boot::Keyboard;
         keyboard_ = std::make_shared<usb_device::Hid>(std::move(config));
+    }
+    if (mouse) {
+        usb_device::Hid::Config config;
+        config.name = "Tab5 Trackpad";
+        config.boot = usb_device::Hid::Boot::Mouse;
+        mouse_ = std::make_shared<usb_device::Hid>(std::move(config));
     }
 }
 
@@ -131,6 +138,7 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     if (err == ESP_OK) err = device.add(video_in_.vendor);
     if (err == ESP_OK) err = device.add(audio_in_.vendor);
     if (err == ESP_OK && keyboard_) err = device.add(keyboard_);
+    if (err == ESP_OK && mouse_) err = device.add(mouse_);
     if (err != ESP_OK || !uac_) return err;
 
     Tab5Audio &audio = service_->audio();
@@ -161,12 +169,21 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     return device.add(speaker_);
 }
 
-void Tab5Profile::keyboard_report(const usb_device::KeyboardReport &report) {
-    if (!keyboard_) return;
-    esp_err_t err = keyboard_->send(&report, sizeof(report));
+void Tab5Profile::send_report(usb_device::Hid *hid, const char *name, const void *report,
+                              size_t bytes) {
+    if (!hid) return;
+    esp_err_t err = hid->send(report, bytes);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "keyboard report: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "%s report: %s", name, esp_err_to_name(err));
     }
+}
+
+void Tab5Profile::keyboard_report(const usb_device::KeyboardReport &report) {
+    send_report(keyboard_.get(), "keyboard", &report, sizeof(report));
+}
+
+void Tab5Profile::mouse_report(const usb_device::MouseReport &report) {
+    send_report(mouse_.get(), "mouse", &report, sizeof(report));
 }
 
 void Tab5Profile::control_configured() {

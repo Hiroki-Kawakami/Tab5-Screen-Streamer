@@ -498,6 +498,7 @@ dependencies = [
  "streamer-capture",
  "streamer-core",
  "streamer-device",
+ "streamer-input",
 ]
 
 [[package]]
@@ -527,6 +528,15 @@ version = "0.1.0"
 dependencies = [
  "nusb",
  "streamer-core",
+]
+
+[[package]]
+name = "streamer-input"
+version = "0.1.0"
+dependencies = [
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "windows",
 ]
 
 [[package]]

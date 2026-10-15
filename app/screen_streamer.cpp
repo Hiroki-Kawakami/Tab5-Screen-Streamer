@@ -63,7 +63,7 @@ static bool harness_mode(int argc, const char *const *argv, void *) {
     } else if (strcmp(argv[1], "pc-app") == 0) {
         screen = std::make_shared<PcAppScreen>();
     } else if (strcmp(argv[1], "usb") == 0) {
-        screen = std::make_shared<PcAppStreamScreen>(true, true);
+        screen = std::make_shared<PcAppStreamScreen>(true, true, true);
     } else if (strcmp(argv[1], "usb-test") == 0) {
         screen = std::make_shared<UsbTestScreen>();
     } else {

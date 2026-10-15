@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use streamer_core::draw::{self, Band, Batch, Encoded};
 use streamer_core::jpeg::{self, Image};
 use streamer_core::layout::Layout;
-use streamer_core::protocol::{self, Encoding, Event, Info, Target};
+use streamer_core::protocol::{
+    self, Encoding, Event, Info, InputMode, InputTarget, Target, TouchPoint,
+};
 use streamer_device::connection::{Connection, TIMEOUT, report};
 
 const STATS_PERIOD: Duration = Duration::from_secs(5);
@@ -122,6 +124,9 @@ pub struct Presenter {
     /// The next frame covers the whole panel, letterbox included.
     pub redraw: bool,
     pub audio_level: Option<(u32, u32)>,
+    /// EV_TOUCH while touch is in Event mode, oldest first; an empty one
+    /// also when it leaves the mode.
+    pub touches: Vec<Vec<TouchPoint>>,
     pub stats: Stats,
     last_sent: Option<Instant>,
 }
@@ -143,6 +148,7 @@ impl Presenter {
             swaps: VecDeque::new(),
             redraw: true,
             audio_level: None,
+            touches: Vec::new(),
             stats: Stats::new(),
             last_sent: None,
         }
@@ -245,6 +251,19 @@ impl Presenter {
                     stream.1
                 );
                 self.info.overlay_visible = visible;
+            }
+            Event::Touch(points) => {
+                if self.info.input_mode[InputTarget::Touch as usize] == InputMode::Event {
+                    self.touches.push(points);
+                }
+            }
+            Event::InputMode(target, mode) => {
+                println!("{target:?} input {mode:?}");
+                let current = &mut self.info.input_mode[target as usize];
+                if target == InputTarget::Touch && *current == InputMode::Event {
+                    self.touches.push(Vec::new());
+                }
+                *current = mode;
             }
             Event::Damage((x, y, w, h)) => {
                 println!("damage {w}x{h} at {x},{y}");

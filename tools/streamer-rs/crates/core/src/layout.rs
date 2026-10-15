@@ -144,6 +144,29 @@ impl Layout {
         }
     }
 
+    /// Where panel point `point` falls on the source frame, as fractions of
+    /// its width and height; points off the frame are taken to its edge.
+    pub fn source_point(&self, panel_width: u32, point: (f64, f64)) -> (f64, f64) {
+        let (rotation, (x, y, w, h)) = match *self {
+            Layout::Direct {
+                frame, rotation, y, ..
+            } => {
+                let (rw, rh) = rotated(frame, rotation);
+                let origin = self.placement(panel_width).origin;
+                (rotation, (origin.0 as u32, y + origin.1 as u32, rw, rh))
+            }
+            Layout::Blit { rotation, area, .. } => (rotation, area),
+        };
+        let u = ((point.0 + 0.5 - x as f64) / w as f64).clamp(0.0, 1.0);
+        let v = ((point.1 + 0.5 - y as f64) / h as f64).clamp(0.0, 1.0);
+        match rotation % 4 {
+            1 => (1.0 - v, u),
+            2 => (1.0 - u, 1.0 - v),
+            3 => (v, 1.0 - u),
+            _ => (u, v),
+        }
+    }
+
     /// Where source rows [row, row + rows) of a blit land: the same strip of
     /// the rotated, scaled source.
     pub fn blit_band(&self, row: u32, rows: u32) -> (u32, u32, u32, u32) {
@@ -188,6 +211,22 @@ mod tests {
         assert_eq!(placement.canvas, (720, 416));
         assert_eq!(placement.origin, (0, 6));
         assert_eq!(layout.content(720), (0, 432, 720, 416));
+    }
+
+    #[test]
+    fn source_point_undoes_rotation() {
+        let close =
+            |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-2 && (a.1 - b.1).abs() < 1e-2;
+        let layout = Layout::direct((1280, 720), 1, (720, 1280), 16, true).unwrap();
+        assert!(close(layout.source_point(720, (0.0, 1279.0)), (0.0, 0.0)));
+        assert!(close(layout.source_point(720, (719.0, 0.0)), (1.0, 1.0)));
+        let layout = Layout::direct((1280, 720), 3, (720, 1280), 16, true).unwrap();
+        assert!(close(layout.source_point(720, (719.0, 0.0)), (0.0, 0.0)));
+        let layout = Layout::direct((720, 1280), 2, (720, 1280), 16, true).unwrap();
+        assert!(close(layout.source_point(720, (0.0, 0.0)), (1.0, 1.0)));
+        let layout = Layout::direct((1920, 1080), 0, (720, 1280), 16, true).unwrap();
+        assert!(close(layout.source_point(720, (359.5, 0.0)), (0.5, 0.0)));
+        assert!(close(layout.source_point(720, (359.5, 640.0)), (0.5, 0.5)));
     }
 
     #[test]

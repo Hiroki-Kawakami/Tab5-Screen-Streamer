@@ -4,6 +4,7 @@
  */
 
 #include "pc_app_stream_screen.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include "display/panel.hpp"
 #include "display_manager.hpp"
@@ -26,6 +27,8 @@ constexpr int32_t kLandscapePanelWidth = 560;
 constexpr int32_t kPortraitPanelHeight = 640;
 constexpr int kOverlayBufferLines = 32;
 constexpr int kTapSlop = 24;
+constexpr int kCornerSize = 96;
+constexpr int kSwipeDistance = 96;
 constexpr int32_t kStatusDotSize = 16;
 constexpr int32_t kExitHeight = 72;
 constexpr uint32_t kHintColor = 0x808080;
@@ -56,6 +59,33 @@ bsp_rect_t stream_area(bsp_rotation_t rotation) {
     const bsp_size_t size = logical_size(rotation);
     if (landscape(rotation)) return {{0, 0}, {size.width - kLandscapePanelWidth, size.height}};
     return {{0, 0}, {size.width, size.height - kPortraitPanelHeight}};
+}
+
+bsp_touch_point_t logical_point(const bsp_touch_point_t &point, bsp_rotation_t rotation) {
+    const bsp_size_t size = logical_size(rotation);
+    bsp_touch_point_t logical = point;
+    switch (rotation) {
+        case BSP_ROTATION_90:
+            logical.x = size.width - 1 - point.y;
+            logical.y = point.x;
+            break;
+        case BSP_ROTATION_180:
+            logical.x = size.width - 1 - point.x;
+            logical.y = size.height - 1 - point.y;
+            break;
+        case BSP_ROTATION_270:
+            logical.x = point.y;
+            logical.y = size.height - 1 - point.x;
+            break;
+        default:
+            break;
+    }
+    return logical;
+}
+
+bool in_corner(const bsp_touch_point_t &point, bsp_rotation_t rotation) {
+    const bsp_size_t size = logical_size(rotation);
+    return point.x >= size.width - kCornerSize && point.y >= size.height - kCornerSize;
 }
 
 bsp_rect_t native_rect(const bsp_rect_t &rect, bsp_rotation_t rotation) {
@@ -93,6 +123,7 @@ void PcAppStreamScreen::build() {
     lv_label_set_text(hint, "Tap to show menu");
 
     rotation_ = ui_orientation_current();
+    input_rotation_ = rotation_;
     layoutWaiting();
     updateWaiting();
 }
@@ -101,7 +132,6 @@ void PcAppStreamScreen::onEnter() {
     ui_orientation_set_listener([](bsp_rotation_t rotation, void *arg) {
         static_cast<PcAppStreamScreen *>(arg)->rotate(rotation);
     }, this);
-    display_manager.set_outside_touch_callback(outsideTouch, this);
 
     std::weak_ptr<Screen> weak = weak_from_this();
     service_ = std::make_shared<Tab5Service>([weak](UsbStatus status) {
@@ -117,12 +147,26 @@ void PcAppStreamScreen::onEnter() {
         service_.reset();
         return;
     }
+    trackpad_ = std::make_unique<Trackpad>([this](const usb_device::MouseReport &report) {
+        mouseReport(report);
+    });
+    if (trackpad_->start() != ESP_OK) trackpad_.reset();
+    service_->set_input_listener([this](tab5::InputTarget target, tab5::InputMode mode) {
+        inputModeChanged(target, mode);
+    });
+    service_->set_input_enabled(tab5::InputTarget::Touch, touch_);
+    display_manager.set_outside_touch_callback(outsideTouch, this);
     bsp_keyboard_set_event_cb(keyboardEvent, this);
     startUsb();
 }
 
+// The service and the trackpad stay until the screen is destroyed: the touch
+// and keyboard callbacks may still be running after they are unregistered.
 void PcAppStreamScreen::onExit() {
+    display_manager.set_outside_touch_callback(nullptr);
     bsp_keyboard_set_event_cb(nullptr, nullptr);
+    if (service_) service_->set_input_listener(nullptr);
+    if (trackpad_) trackpad_->set_active(false);
     closeOverlay();
     usb_stop();
     std::shared_ptr<Tab5Profile> profile;
@@ -130,8 +174,6 @@ void PcAppStreamScreen::onExit() {
         std::lock_guard<std::mutex> guard(profile_lock_);
         profile = std::move(profile_);
     }
-    service_.reset();
-    display_manager.set_outside_touch_callback(nullptr);
     ui_orientation_set_listener(nullptr, nullptr);
 }
 
@@ -139,7 +181,8 @@ void PcAppStreamScreen::onExit() {
 // detaches from the service before the next one attaches.
 void PcAppStreamScreen::startUsb() {
     keyboard_enumerated_ = hid_ && bsp_keyboard_is_connected();
-    auto profile = std::make_shared<Tab5Profile>(service_, audio_, keyboard_enumerated_);
+    service_->set_input_enabled(tab5::InputTarget::Keyboard, keyboard_enumerated_);
+    auto profile = std::make_shared<Tab5Profile>(service_, audio_, keyboard_enumerated_, touch_);
     std::shared_ptr<Tab5Profile> previous;
     {
         std::lock_guard<std::mutex> guard(profile_lock_);
@@ -164,11 +207,35 @@ void PcAppStreamScreen::keyboardEvent(const bsp_keyboard_event_t *event, void *a
         return;
     }
     if (event->type != BSP_KEYBOARD_EVENT_HID) return;
+    const tab5::KeyEvent key = {event->hid.modifiers, 0, {event->hid.keycode}};
+    if (self->service_->key(key)) return;
+    std::lock_guard<std::mutex> keyboard(self->keyboard_lock_);
+    if (!self->keyboard_hid_) return;
     usb_device::KeyboardReport report = {};
     report.modifiers = event->hid.modifiers;
     report.keys[0] = event->hid.keycode;
-    std::lock_guard<std::mutex> guard(self->profile_lock_);
-    if (self->profile_) self->profile_->keyboard_report(report);
+    self->keyboardReport(report);
+}
+
+void PcAppStreamScreen::inputModeChanged(tab5::InputTarget target, tab5::InputMode mode) {
+    if (target == tab5::InputTarget::Touch) {
+        if (trackpad_) trackpad_->set_active(mode == tab5::InputMode::Hid);
+        return;
+    }
+    std::lock_guard<std::mutex> guard(keyboard_lock_);
+    const bool released = keyboard_hid_ && mode != tab5::InputMode::Hid;
+    keyboard_hid_ = mode == tab5::InputMode::Hid;
+    if (released) keyboardReport({});
+}
+
+void PcAppStreamScreen::keyboardReport(const usb_device::KeyboardReport &report) {
+    std::lock_guard<std::mutex> guard(profile_lock_);
+    if (profile_) profile_->keyboard_report(report);
+}
+
+void PcAppStreamScreen::mouseReport(const usb_device::MouseReport &report) {
+    std::lock_guard<std::mutex> guard(profile_lock_);
+    if (profile_) profile_->mouse_report(report);
 }
 
 void PcAppStreamScreen::post(void (PcAppStreamScreen::*method)()) {
@@ -181,21 +248,60 @@ void PcAppStreamScreen::post(void (PcAppStreamScreen::*method)()) {
 }
 
 void PcAppStreamScreen::outsideTouch(const bsp_touch_point_t *points, int count, void *arg) {
-    auto *self = static_cast<PcAppStreamScreen *>(arg);
-    if (count > 0) {
-        if (!self->touching_) {
-            self->touching_ = true;
-            self->moved_ = false;
-            self->touch_start_ = points[0];
-        } else if (abs(points[0].x - self->touch_start_.x) > kTapSlop ||
-                   abs(points[0].y - self->touch_start_.y) > kTapSlop) {
-            self->moved_ = true;
+    static_cast<PcAppStreamScreen *>(arg)->handleTouch(points, count);
+}
+
+// A touch starting in the bottom-right corner is held back until it either
+// swipes inward, opening the overlay, or turns out to be input.
+void PcAppStreamScreen::handleTouch(const bsp_touch_point_t *points, int count) {
+    const bsp_rotation_t rotation = input_rotation_;
+    if (count == 0) {
+        if (gesture_ == Gesture::Corner) {
+            sendTouch(&touch_start_, 1);
+            sendTouch(points, 0);
+        } else if (gesture_ == Gesture::Input) {
+            sendTouch(points, 0);
+        } else if (gesture_ == Gesture::Overlay && !moved_) {
+            post(&PcAppStreamScreen::closeOverlay);
         }
-        return;
+        gesture_ = Gesture::None;
+    } else {
+        if (gesture_ == Gesture::None) {
+            touch_start_ = points[0];
+            moved_ = false;
+            if (overlay_open_) {
+                gesture_ = Gesture::Overlay;
+            } else if (count == 1 && in_corner(logical_point(points[0], rotation), rotation)) {
+                gesture_ = Gesture::Corner;
+            } else {
+                gesture_ = Gesture::Input;
+            }
+        }
+        moved_ |= abs(points[0].x - touch_start_.x) > kTapSlop ||
+                  abs(points[0].y - touch_start_.y) > kTapSlop;
+        if (gesture_ == Gesture::Corner) {
+            const bsp_touch_point_t start = logical_point(touch_start_, rotation);
+            const bsp_touch_point_t now = logical_point(points[0], rotation);
+            const int left = start.x - now.x, up = start.y - now.y;
+            if (count != 1 || left < -kTapSlop || up < -kTapSlop) {
+                gesture_ = Gesture::Input;
+                sendTouch(&touch_start_, 1);
+            } else if (left >= kSwipeDistance || up >= kSwipeDistance) {
+                gesture_ = Gesture::Swiped;
+                post(&PcAppStreamScreen::openOverlay);
+            }
+        }
+        if (gesture_ == Gesture::Input) sendTouch(points, count);
     }
-    if (!self->touching_) return;
-    self->touching_ = false;
-    if (!self->moved_) self->post(&PcAppStreamScreen::toggleOverlay);
+}
+
+void PcAppStreamScreen::sendTouch(const bsp_touch_point_t *points, int count) {
+    if (service_->touch(points, count) || !trackpad_) return;
+    const bsp_rotation_t rotation = input_rotation_;
+    bsp_touch_point_t logical[Tab5Service::kMaxTouchPoints];
+    count = std::min(count, Tab5Service::kMaxTouchPoints);
+    for (int i = 0; i < count; i++) logical[i] = logical_point(points[i], rotation);
+    trackpad_->touch(logical, count);
 }
 
 void PcAppStreamScreen::setStatus(UsbStatus status) {
@@ -215,6 +321,7 @@ void PcAppStreamScreen::rotate(bsp_rotation_t rotation) {
     if (reopen) closeOverlay();
     display_manager.set_rotation(lv_obj_get_display(root_), rotation);
     rotation_ = rotation;
+    input_rotation_ = rotation;
     layoutWaiting();
     if (reopen) openOverlay();
 }
@@ -280,6 +387,7 @@ void PcAppStreamScreen::openOverlay() {
     }
 
     overlay_ = overlay;
+    overlay_open_ = true;
     buildOverlay(lv_display_get_screen_active(overlay_));
 }
 
@@ -287,6 +395,7 @@ void PcAppStreamScreen::closeOverlay() {
     if (!overlay_) return;
     display_manager.delete_display(overlay_);
     overlay_ = nullptr;
+    overlay_open_ = false;
     status_dot_ = nullptr;
     status_label_ = nullptr;
     panel_set_clip(nullptr);

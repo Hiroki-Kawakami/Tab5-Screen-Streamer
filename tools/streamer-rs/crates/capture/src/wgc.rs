@@ -20,6 +20,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 use windows::core::Interface;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as CapturedFrame;
@@ -60,6 +61,20 @@ pub fn displays() -> Result<Vec<Display>, String> {
 
 pub fn display(id: u64) -> Option<Display> {
     describe(Monitor::from_raw_hmonitor(id as *mut std::ffi::c_void))
+}
+
+pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetMonitorInfoW(HMONITOR(id as *mut std::ffi::c_void), &mut info) }
+        .as_bool()
+        .then(|| {
+            let r = info.rcMonitor;
+            let (x, y) = (r.left as f64, r.top as f64);
+            (x, y, (r.right - r.left) as f64, (r.bottom - r.top) as f64)
+        })
 }
 
 pub fn mirror_primary(_id: u64) -> Option<u64> {

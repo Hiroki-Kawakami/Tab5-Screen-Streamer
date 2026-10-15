@@ -12,18 +12,19 @@ reading the device state, receiving input and playing audio.
 | Vendor: audio | bulk OUT | PCM and its format |
 | UAC 2.0 speaker | isochronous OUT | Audio played by the host OS |
 | HID boot keyboard | interrupt IN | Keyboard |
+| HID boot mouse | interrupt IN | Touch, as a trackpad |
 
 The endpoints are split by ordering and by latency. Messages on one endpoint
 are handled in the order they were sent; nothing is ordered across endpoints.
 Audio has its own endpoint so it never waits behind a large drawing transfer,
 and the control endpoint answers while the video endpoint is busy.
 
-The UAC speaker and the HID keyboard are enumerated when they are enabled in
-the device's settings, the keyboard only while a Tab5 Keyboard is attached.
-Attaching or detaching it while streaming re-enumerates the device, and the
-host reconnects as after a cable pull. Whether reports are sent on the HID
-interface is the input route (see [Input](#input)), so switching routes never
-re-enumerates.
+The UAC speaker, the HID keyboard and the HID mouse are enumerated when they
+are enabled in the device's settings, the keyboard only while a Tab5 Keyboard
+is attached. Attaching or detaching it while streaming re-enumerates the
+device, and the host reconnects as after a cable pull. Whether reports are
+sent on a HID interface is its input mode (see [Input](#input)), so switching
+modes never re-enumerates.
 
 ## Framing
 
@@ -69,7 +70,8 @@ timeout, or the end of the USB configuration.
 - The panel is taken at the first video transfer of a session. When the
   session ends the panel is given back, bulk audio stops and its buffered PCM
   is dropped.
-- Video and audio outside a session are dropped without an error.
+- Video, audio and `SET_INPUT_MODE` outside a session are dropped without an
+  error.
 - The PC sends `CLOSE` when it stops, once its video transfers have
   completed. A transfer cut short is recovered by the next `OPEN`, but the
   last frame may be lost.
@@ -116,7 +118,7 @@ format, so it is not sent.
 | 0x01 | `OPEN` | none; answered with `INFO` |
 | 0x02 | `CLOSE` | none |
 | 0x03 | `KEEPALIVE` | none |
-| 0x04 | `SET_INPUT_ROUTE` | `u8 route`, `u8 reserved[3]` |
+| 0x04 | `SET_INPUT_MODE` | `u8 target`, `u8 mode`, `u16 reserved` |
 | 0x05 | `SET_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
 
 ### Replies and events (IN)
@@ -134,7 +136,7 @@ format, so it is not sent.
 | 0x89 | `EV_DAMAGE` | `u16 x, y, w, h` |
 | 0x8a | `EV_TOUCH` | see [Input](#input) |
 | 0x8b | `EV_KEY` | see [Input](#input) |
-| 0x8c | `EV_INPUT_ROUTE` | `u8 route`, `u8 reserved[3]` |
+| 0x8c | `EV_INPUT_MODE` | `u8 target`, `u8 mode`, `u16 reserved` |
 | 0x8d | `EV_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
 | 0x8e | `EV_AUDIO` | `u32 time_us`, `u32 buffered_frames`, `u32 capacity_frames` |
 
@@ -155,29 +157,36 @@ format, so it is not sent.
 
 ```
 INFO
+  Capabilities, fixed for the device
   u16 protocol_version         1
   u16 panel_width, panel_height
-  u8  pixel_format
-  u8  orientation
   u8  framebuffers
   u8  swap_window              SWAPs the PC should keep in flight at most
+  u32 max_message[3]           control, video, audio
+  u32 audio_max_rate           highest AUDIO_FORMAT sample rate
+  u32 encodings                bit n set: encoding n supported
   u16 direct_align             DRAW_DIRECT y and height are multiples of this
   u16 blit_max_width, blit_max_height
-  u32 encodings                bit n set: encoding n supported
-  u32 max_message[3]           control, video, audio
-  u32 epoch
-  u8  overlay_visible
-  u8  input_route
-  u16 overlay_x, overlay_y, overlay_w, overlay_h
-  u16 max_fps                  frames per second the PC sends at most
-  Volume volume[2]             UAC, BULK
-  u32 audio_max_rate           highest AUDIO_FORMAT sample rate
+
+  State, updated by the events
+  u8  pixel_format             EV_FORMAT
+  u8  orientation              EV_ORIENTATION
+  u32 epoch                    EV_FORMAT
+  u16 max_fps                  EV_MAX_FPS; frames per second the PC sends at most
+  u8  input_mode[2]            EV_INPUT_MODE; Touch, Keyboard
+  Volume volume[2]             EV_VOLUME; UAC, BULK
+  Overlay overlay              EV_OVERLAY
 
 Volume
   u8  mute
   u8  reserved
   i16 volume
   i16 min, max, resolution
+
+Overlay
+  u8  visible
+  u8  reserved
+  u16 x, y, w, h
 ```
 
 ## Video endpoint
@@ -278,6 +287,10 @@ When showing the overlay changes the framebuffer on screen, the device sends
 `EV_DAMAGE` for the area the overlay covered. The device keeps no copy of what
 is under the overlay; the PC redraws damaged areas.
 
+The user opens the overlay with a swipe in from the bottom-right corner of the
+screen. That swipe is never sent as input, and no input is sent while the
+overlay is visible.
+
 ## Audio endpoint
 
 | Type | Name | Payload |
@@ -316,9 +329,31 @@ UAC feature unit; the range is in `INFO`.
 
 ## Input
 
-Touch and keyboard input goes to the vendor events, to the HID interface, or
-to both. `route` is a bit mask: bit 0 vendor events, bit 1 HID. It is set with
-`SET_INPUT_ROUTE` and every change is announced with `EV_INPUT_ROUTE`.
+Touch and keyboard input each have a mode, set with `SET_INPUT_MODE` and
+announced with `EV_INPUT_MODE` on every change.
+
+| Target | Value |
+|---|---|
+| Touch | 0 |
+| Keyboard | 1 |
+
+| Mode | Value | Input goes |
+|---|---|---|
+| None | 0 | nowhere |
+| Event | 1 | to `EV_TOUCH` or `EV_KEY` |
+| HID | 2 | to the HID interface |
+
+- Both targets are HID when a session opens and when it ends.
+- A target disabled in the device's settings is None, and so is the keyboard
+  while no Tab5 Keyboard is attached. `SET_INPUT_MODE` for it is answered with
+  `EV_ERROR` (unsupported).
+- Touch in HID is a trackpad: the device turns gestures into boot mouse
+  reports. One finger moves the pointer, a tap clicks, a two-finger tap
+  right-clicks, two fingers dragged scroll, and a tap followed by a touch that
+  moves drags.
+- Input held when the mode changes is released in the mode it was sent in
+  first: `EV_TOUCH` with no points, `EV_KEY` with no keys, or a HID report
+  with nothing pressed.
 
 ```
 EV_TOUCH
@@ -339,8 +374,4 @@ EV_KEY
 ```
 
 `EV_TOUCH` is sent on every change of the touch points, and `EV_KEY` on every
-change of the keyboard state. Both carry the same data as the HID reports.
-
-## Open
-
-- Whether the input route is switched from the Tab5 UI, the PC, or both.
+change of the keyboard state.

@@ -129,6 +129,8 @@ Setting<"usbaudio", uint8_t, sanitize_flag> s_usb_audio{1};
 
 Setting<"usbhid", uint8_t, sanitize_flag> s_usb_hid{1};
 
+Setting<"touchinput", uint8_t, sanitize_flag> s_touch_input{1};
+
 template <typename Fn>
 void for_each_setting(Fn &&fn) {
     fn(s_display_brightness);
@@ -138,6 +140,7 @@ void for_each_setting(Fn &&fn) {
     fn(s_last_mode);
     fn(s_usb_audio);
     fn(s_usb_hid);
+    fn(s_touch_input);
 }
 
 }  // namespace
@@ -229,4 +232,12 @@ bool settings_usb_hid() {
 
 void settings_set_usb_hid(bool enabled) {
     s_usb_hid.set(enabled);
+}
+
+bool settings_touch_input() {
+    return s_touch_input.get() != 0;
+}
+
+void settings_set_touch_input(bool enabled) {
+    s_touch_input.set(enabled);
 }

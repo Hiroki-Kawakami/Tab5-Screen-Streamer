@@ -9,3 +9,4 @@ publish.workspace = true
 streamer-capture.workspace = true
 streamer-core.workspace = true
 streamer-device.workspace = true
+streamer-input.workspace = true

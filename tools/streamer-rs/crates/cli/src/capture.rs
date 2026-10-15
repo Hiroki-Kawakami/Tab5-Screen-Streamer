@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use streamer_capture::{self as capture, Capture, Format, Frame, VirtualDisplay};
 use streamer_core::jpeg::{Image, Pixels};
 use streamer_core::layout::Layout;
-use streamer_core::protocol::{Encoding, Info};
+use streamer_core::protocol::{self, Encoding, Info, InputMode, InputTarget, TouchPoint};
 use streamer_device::connection::{Connection, Device};
+use streamer_input::{self as input, Injector};
 
 use crate::present::{self, LayoutKey, Presenter};
 use crate::signal;
@@ -92,7 +93,14 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
         ),
         (false, None) => Some(capture::main_display()?),
     };
+    let mut injector = Injector::new()
+        .inspect_err(|e| println!("touch input off: {e}"))
+        .ok();
     while let Some(mut connection) = crate::connect(device) {
+        if let Err(e) = take_touch(&mut connection, injector.is_some()) {
+            device.lost(connection, &e);
+            continue;
+        }
         let created = match display {
             Some(_) => None,
             None => {
@@ -109,11 +117,14 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
                 (None, Some(display)) => Source::Display(display.id),
                 (None, None) => unreachable!(),
             };
-            match Session::run(&mut connection, source, &options) {
+            match Session::run(&mut connection, source, &options, injector.as_mut()) {
                 Err(Changed) => continue,
                 stop => break stop,
             }
         };
+        if let Some(injector) = injector.as_mut() {
+            let _ = injector.touch(&[]);
+        }
         match stop {
             Ok(()) => return connection.close(),
             Err(Lost(e)) => device.lost(connection, &e),
@@ -124,6 +135,17 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
             Err(Changed) => unreachable!(),
         }
     }
+    Ok(())
+}
+
+/// Asks the device for its touches, which it sends while touch input is
+/// enabled on it.
+fn take_touch(connection: &mut Connection, injecting: bool) -> Result<()> {
+    if !injecting || connection.info.input_mode[InputTarget::Touch as usize] == InputMode::None {
+        return Ok(());
+    }
+    let payload = protocol::set_input_mode(InputTarget::Touch, InputMode::Event);
+    connection.control(protocol::SET_INPUT_MODE, &payload)?;
     Ok(())
 }
 
@@ -242,6 +264,7 @@ use Stop::{Changed, Fatal, Lost};
 
 struct Session<'a> {
     options: &'a CaptureOptions,
+    injector: Option<&'a mut Injector>,
     source: Source<'a>,
     display: u64,
     /// Sized by the session to the rotation, rather than watched.
@@ -258,6 +281,21 @@ struct Session<'a> {
     pending: bool,
 }
 
+fn desktop_point(
+    presenter: &Presenter,
+    (x, y, w, h): (f64, f64, f64, f64),
+    point: &TouchPoint,
+) -> input::Point {
+    let panel_width = presenter.info.panel_width as u32;
+    let at = (point.x as f64, point.y as f64);
+    let (u, v) = presenter.layout.source_point(panel_width, at);
+    input::Point {
+        id: point.id,
+        x: x + u * w,
+        y: y + v * h,
+    }
+}
+
 fn layout(size: (u32, u32), info: &Info, rotation: u32) -> Result<Layout> {
     let panel = (info.panel_width as u32, info.panel_height as u32);
     Layout::direct(size, rotation, panel, info.direct_align.max(1) as u32, true)
@@ -269,6 +307,7 @@ impl<'a> Session<'a> {
         connection: &mut Connection,
         source: Source<'a>,
         options: &'a CaptureOptions,
+        injector: Option<&'a mut Injector>,
     ) -> std::result::Result<(), Stop> {
         let display = source.display();
         let virtual_display = match source {
@@ -292,6 +331,7 @@ impl<'a> Session<'a> {
         let (sender, frames) = mpsc::sync_channel(1);
         let mut session = Session {
             options,
+            injector,
             source,
             display,
             virtual_display,
@@ -329,6 +369,7 @@ impl<'a> Session<'a> {
             if session.presenter.events(connection).map_err(Lost)? {
                 session.relayout().map_err(Fatal)?;
             }
+            session.inject();
             if checked.elapsed() >= DISPLAY_CHECK {
                 checked = Instant::now();
                 if session.source.changed() {
@@ -355,6 +396,26 @@ impl<'a> Session<'a> {
             session.presenter.stats.report(audio_level);
         }
         Ok(())
+    }
+
+    fn inject(&mut self) {
+        let touches = std::mem::take(&mut self.presenter.touches);
+        let Some(injector) = self.injector.as_deref_mut() else {
+            return;
+        };
+        let result = match capture::bounds(self.display) {
+            Some(bounds) => touches.iter().try_for_each(|points| {
+                let points: Vec<_> = points
+                    .iter()
+                    .map(|p| desktop_point(&self.presenter, bounds, p))
+                    .collect();
+                injector.touch(&points)
+            }),
+            None => Ok(()),
+        };
+        if let Err(e) = result.and_then(|()| injector.refresh()) {
+            eprintln!("touch: {e}");
+        }
     }
 
     fn start(&mut self) -> Result<()> {

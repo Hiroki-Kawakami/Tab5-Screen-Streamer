@@ -56,7 +56,8 @@ void step_create(lv_obj_t *parent, int number, const char *text) {
 }
 
 std::shared_ptr<Screen> PcAppScreen::stream_screen() {
-    return std::make_shared<PcAppStreamScreen>(settings_usb_audio(), settings_usb_hid());
+    return std::make_shared<PcAppStreamScreen>(settings_usb_audio(), settings_usb_hid(),
+                                               settings_touch_input());
 }
 
 void PcAppScreen::build() {
@@ -118,7 +119,13 @@ void PcAppScreen::build() {
         settings_commit();
     });
     lv_setting_separator_create(section);
-    row = lv_setting_row_create(section, "USB Keyboard");
+    row = lv_setting_row_create(section, "Touch Input");
+    lv_setting_switch_create(row, settings_touch_input(), [](lv_obj_t *, bool enabled) {
+        settings_set_touch_input(enabled);
+        settings_commit();
+    });
+    lv_setting_separator_create(section);
+    row = lv_setting_row_create(section, "Keyboard Input");
     lv_setting_switch_create(row, settings_usb_hid(), [](lv_obj_t *, bool enabled) {
         settings_set_usb_hid(enabled);
         settings_commit();

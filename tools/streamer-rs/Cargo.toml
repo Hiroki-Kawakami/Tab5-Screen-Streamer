@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/device", "crates/capture", "crates/cli"]
+members = ["crates/core", "crates/device", "crates/capture", "crates/input", "crates/cli"]
 default-members = ["crates/cli"]
 resolver = "3"
 
@@ -13,3 +13,4 @@ nusb = "0.2.7"
 streamer-capture = { path = "crates/capture" }
 streamer-core = { path = "crates/core" }
 streamer-device = { path = "crates/device" }
+streamer-input = { path = "crates/input" }

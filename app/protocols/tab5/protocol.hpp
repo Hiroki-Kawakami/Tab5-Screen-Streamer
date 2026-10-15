@@ -18,6 +18,7 @@ enum class Type : uint8_t {
     Open = 0x01,
     Close = 0x02,
     KeepAlive = 0x03,
+    SetInputMode = 0x04,
     SetVolume = 0x05,
     Info = 0x81,
     Closed = 0x82,
@@ -27,6 +28,9 @@ enum class Type : uint8_t {
     Orientation = 0x87,
     Overlay = 0x88,
     Damage = 0x89,
+    Touch = 0x8a,
+    Key = 0x8b,
+    InputMode = 0x8c,
     Volume = 0x8d,
     Audio = 0x8e,
     DrawDirect = 0x10,
@@ -51,6 +55,9 @@ enum class Stream : uint8_t { Uac = 0, Bulk = 1 };
 enum class Target : uint8_t { Front = 0, Back = 1 };
 enum class Encoding : uint8_t { Jpeg = 0, Raw = 1, Lz4 = 2 };
 enum class PixelFormat : uint8_t { Rgb565 = 1, Rgb888 = 2 };
+enum class InputTarget : uint8_t { Touch = 0, Keyboard = 1 };
+enum class InputMode : uint8_t { None = 0, Event = 1, Hid = 2 };
+constexpr int kInputTargets = 2;
 
 struct __attribute__((packed)) MsgHeader {
     uint16_t magic;
@@ -136,25 +143,49 @@ struct __attribute__((packed)) AudioEvent {
     uint32_t capacity_frames;
 };
 
+struct __attribute__((packed)) InputModeMessage {
+    uint8_t target;
+    uint8_t mode;
+    uint16_t reserved;
+};
+
+struct __attribute__((packed)) TouchEvent {
+    uint8_t count;
+    uint8_t reserved[3];
+};
+
+struct __attribute__((packed)) TouchPoint {
+    uint8_t id;
+    uint8_t reserved;
+    uint16_t x, y;
+    uint16_t reserved2;
+};
+
+struct __attribute__((packed)) KeyEvent {
+    uint8_t modifiers;
+    uint8_t reserved;
+    uint8_t keys[6];
+};
+
 struct __attribute__((packed)) Info {
     uint16_t protocol_version;
     uint16_t panel_width, panel_height;
-    uint8_t pixel_format;
-    uint8_t orientation;
     uint8_t framebuffers;
     uint8_t swap_window;
+    uint32_t max_message[3];
+    uint32_t audio_max_rate;
+    uint32_t encodings;
     uint16_t direct_align;
     uint16_t blit_max_width, blit_max_height;
-    uint32_t encodings;
-    uint32_t max_message[3];
+    uint8_t pixel_format;
+    uint8_t orientation;
     uint32_t epoch;
-    uint8_t overlay_visible;
-    uint8_t input_route;
-    uint16_t overlay_x, overlay_y, overlay_w, overlay_h;
     uint16_t max_fps;
+    uint8_t input_mode[kInputTargets];
     Volume volume[2];
-    uint32_t audio_max_rate;
+    OverlayEvent overlay;
 };
+static_assert(sizeof(Info) == 74);
 
 /* Calls `fn(header, payload)` for each message. Returns false at the first
  * malformed one, with its seq (0 when its header is cut short) in `bad_seq`;
