@@ -15,6 +15,7 @@ static constexpr int32_t kSwitchKnobInset = 4;
 static constexpr uint32_t kTrackColor = 0xe0e0e0;
 static constexpr uint32_t kActiveColor = 0x2196f3;
 static constexpr uint32_t kSecondaryTextColor = 0x808080;
+static constexpr uint32_t kWarningColor = 0xf57c00;
 
 void lv_setting_page_style(lv_obj_t *contents, const SettingColors *colors) {
     lv_obj_set_style_bg_color(contents, lv_color_hex(colors ? colors->page_bg : 0xeeeeee), 0);
@@ -60,6 +61,15 @@ lv_obj_t *lv_setting_description_create(lv_obj_t *section, const char *text,
     lv_obj_set_width(label, LV_PCT(100));
     lv_obj_set_font_role(label, LV_WIDGETS_FONT_CAPTION);
     lv_obj_set_style_text_color(label, lv_color_hex(colors ? colors->value : kSecondaryTextColor), 0);
+    lv_label_set_text(label, text);
+    return label;
+}
+
+lv_obj_t *lv_setting_warning_create(lv_obj_t *section, const char *text) {
+    auto label = lv_label_create(section);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_font_role(label, LV_WIDGETS_FONT_CAPTION);
+    lv_obj_set_style_text_color(label, lv_color_hex(kWarningColor), 0);
     lv_label_set_text(label, text);
     return label;
 }

@@ -19,8 +19,11 @@ Audio has its own endpoint so it never waits behind a large drawing transfer,
 and the control endpoint answers while the video endpoint is busy.
 
 The UAC speaker and the HID keyboard are enumerated when they are enabled in
-the device's settings. Whether reports are sent on the HID interface is the
-input route (see [Input](#input)), so switching routes never re-enumerates.
+the device's settings, the keyboard only while a Tab5 Keyboard is attached.
+Attaching or detaching it while streaming re-enumerates the device, and the
+host reconnects as after a cable pull. Whether reports are sent on the HID
+interface is the input route (see [Input](#input)), so switching routes never
+re-enumerates.
 
 ## Framing
 

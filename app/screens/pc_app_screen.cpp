@@ -124,6 +124,8 @@ void PcAppScreen::build() {
         settings_commit();
     });
     lv_setting_description_create(section, "Use the Tab5 Keyboard on the PC.");
+    keyboard_warning_ = lv_setting_warning_create(section, "Tab5 Keyboard is not connected.");
+    updateKeyboardWarning();
 
     footer_ = lv_container_create(root_, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_hor(footer_, 24, 0);
@@ -144,6 +146,32 @@ void PcAppScreen::build() {
 
 void PcAppScreen::back() {
     screen_manager.load(std::make_shared<HomeScreen>());
+}
+
+void PcAppScreen::onEnter() {
+    bsp_keyboard_set_event_cb(keyboardEvent, this);
+    updateKeyboardWarning();
+}
+
+void PcAppScreen::onExit() {
+    bsp_keyboard_set_event_cb(nullptr, nullptr);
+}
+
+void PcAppScreen::updateKeyboardWarning() {
+    lv_obj_set_hidden(keyboard_warning_, bsp_keyboard_is_connected());
+}
+
+void PcAppScreen::keyboardEvent(const bsp_keyboard_event_t *event, void *arg) {
+    if (event->type != BSP_KEYBOARD_EVENT_CONNECTED &&
+        event->type != BSP_KEYBOARD_EVENT_DISCONNECTED) {
+        return;
+    }
+    std::weak_ptr<Screen> weak = static_cast<PcAppScreen *>(arg)->weak_from_this();
+    lv_lock();
+    lv_async_call([weak] {
+        if (auto self = weak.lock()) static_cast<PcAppScreen &>(*self).updateKeyboardWarning();
+    });
+    lv_unlock();
 }
 
 void PcAppScreen::layout() {

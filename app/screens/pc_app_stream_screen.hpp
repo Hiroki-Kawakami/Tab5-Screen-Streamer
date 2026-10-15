@@ -5,7 +5,9 @@
 
 #pragma once
 #include <memory>
+#include <mutex>
 #include "bsp.h"
+#include "protocols/tab5/tab5_profile.hpp"
 #include "protocols/tab5/tab5_service.hpp"
 #include "screen.hpp"
 
@@ -20,6 +22,9 @@ private:
     bool audio_;
     bool hid_;
     std::shared_ptr<Tab5Service> service_;
+    std::mutex profile_lock_;
+    std::shared_ptr<Tab5Profile> profile_;
+    bool keyboard_enumerated_ = false;
     UsbStatus status_ = UsbStatus::Unconfigured;
     bsp_rotation_t rotation_ = BSP_ROTATION_0;
 
@@ -45,5 +50,8 @@ private:
     void openOverlay();
     void closeOverlay();
     void buildOverlay(lv_obj_t *screen);
+    void startUsb();
+    void keyboardChanged();
     static void outsideTouch(const bsp_touch_point_t *points, int count, void *arg);
+    static void keyboardEvent(const bsp_keyboard_event_t *event, void *arg);
 };

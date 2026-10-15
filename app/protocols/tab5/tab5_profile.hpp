@@ -7,7 +7,6 @@
 
 #pragma once
 #include <memory>
-#include "bsp.h"
 #include "tab5_service.hpp"
 #include "usb/usb_profile.hpp"
 #include "usb_device_hid.hpp"
@@ -20,6 +19,8 @@ public:
     ~Tab5Profile() override;
     usb_device::DeviceInfo info() const override;
     esp_err_t add_functions(usb_device::Device &device) override;
+    /* From any task; dropped while the keyboard is not enumerated. */
+    void keyboard_report(const usb_device::KeyboardReport &report);
 
 private:
     struct Slot;
@@ -44,8 +45,6 @@ private:
     void submit(Slot *slot);
     void control_configured();
     void flush(Receiver &receiver);
-    esp_err_t add_keyboard(usb_device::Device &device);
-    static void keyboard_event(const bsp_keyboard_event_t *event, void *arg);
 
     std::shared_ptr<Tab5Service> service_;
     std::shared_ptr<usb_device::Vendor> control_;
@@ -56,6 +55,5 @@ private:
     Receiver audio_in_ = {};
     portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
     bool uac_;
-    bool hid_;
     bool attached_ = false;
 };

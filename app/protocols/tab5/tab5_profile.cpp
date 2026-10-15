@@ -27,13 +27,18 @@ static uint8_t *alloc_buffer(uint32_t bytes, uint32_t caps) {
 }
 
 Tab5Profile::Tab5Profile(std::shared_ptr<Tab5Service> service, bool uac, bool hid)
-    : service_(std::move(service)), uac_(uac), hid_(hid) {
+    : service_(std::move(service)), uac_(uac) {
     video_in_ = {this, tab5::Channel::Video, Tab5Service::kVideoBytes, nullptr, {}, false};
     audio_in_ = {this, tab5::Channel::Audio, Tab5Service::kAudioBytes, nullptr, {}, false};
+    if (hid) {
+        usb_device::Hid::Config config;
+        config.name = "Tab5 Keyboard";
+        config.boot = usb_device::Hid::Boot::Keyboard;
+        keyboard_ = std::make_shared<usb_device::Hid>(std::move(config));
+    }
 }
 
 Tab5Profile::~Tab5Profile() {
-    if (keyboard_) bsp_keyboard_set_event_cb(nullptr, nullptr);
     if (attached_) service_->detach();
     if (speaker_) service_->audio().set_uac_feedback(nullptr);
     heap_caps_free(control_transfer_.buffer);
@@ -125,7 +130,7 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     err = device.add(control_);
     if (err == ESP_OK) err = device.add(video_in_.vendor);
     if (err == ESP_OK) err = device.add(audio_in_.vendor);
-    if (err == ESP_OK && hid_) err = add_keyboard(device);
+    if (err == ESP_OK && keyboard_) err = device.add(keyboard_);
     if (err != ESP_OK || !uac_) return err;
 
     Tab5Audio &audio = service_->audio();
@@ -156,29 +161,9 @@ esp_err_t Tab5Profile::add_functions(usb_device::Device &device) {
     return device.add(speaker_);
 }
 
-esp_err_t Tab5Profile::add_keyboard(usb_device::Device &device) {
-    usb_device::Hid::Config config;
-    config.name = "Tab5 Keyboard";
-    config.boot = usb_device::Hid::Boot::Keyboard;
-    keyboard_ = std::make_shared<usb_device::Hid>(std::move(config));
-    bsp_keyboard_set_event_cb(keyboard_event, this);
-    return device.add(keyboard_);
-}
-
-void Tab5Profile::keyboard_event(const bsp_keyboard_event_t *event, void *arg) {
-    auto *self = static_cast<Tab5Profile *>(arg);
-    usb_device::KeyboardReport report = {};
-    switch (event->type) {
-        case BSP_KEYBOARD_EVENT_HID:
-            report.modifiers = event->hid.modifiers;
-            report.keys[0] = event->hid.keycode;
-            break;
-        case BSP_KEYBOARD_EVENT_DISCONNECTED:
-            break;
-        default:
-            return;
-    }
-    esp_err_t err = self->keyboard_->send(&report, sizeof(report));
+void Tab5Profile::keyboard_report(const usb_device::KeyboardReport &report) {
+    if (!keyboard_) return;
+    esp_err_t err = keyboard_->send(&report, sizeof(report));
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "keyboard report: %s", esp_err_to_name(err));
     }

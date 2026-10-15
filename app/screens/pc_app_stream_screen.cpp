@@ -10,7 +10,6 @@
 #include "esp_log.h"
 #include "home_screen.hpp"
 #include "pc_app_screen.hpp"
-#include "protocols/tab5/tab5_profile.hpp"
 #include "resources.h"
 #include "screen_manager.hpp"
 #include "settings.hpp"
@@ -115,17 +114,61 @@ void PcAppStreamScreen::onEnter() {
     esp_err_t err = service_->start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "tab5 service: %s", esp_err_to_name(err));
+        service_.reset();
         return;
     }
-    usb_start(std::make_shared<Tab5Profile>(service_, audio_, hid_));
+    bsp_keyboard_set_event_cb(keyboardEvent, this);
+    startUsb();
 }
 
 void PcAppStreamScreen::onExit() {
+    bsp_keyboard_set_event_cb(nullptr, nullptr);
     closeOverlay();
     usb_stop();
+    std::shared_ptr<Tab5Profile> profile;
+    {
+        std::lock_guard<std::mutex> guard(profile_lock_);
+        profile = std::move(profile_);
+    }
     service_.reset();
     display_manager.set_outside_touch_callback(nullptr);
     ui_orientation_set_listener(nullptr, nullptr);
+}
+
+// The previous profile is let go before the next one is queued, so that it
+// detaches from the service before the next one attaches.
+void PcAppStreamScreen::startUsb() {
+    keyboard_enumerated_ = hid_ && bsp_keyboard_is_connected();
+    auto profile = std::make_shared<Tab5Profile>(service_, audio_, keyboard_enumerated_);
+    std::shared_ptr<Tab5Profile> previous;
+    {
+        std::lock_guard<std::mutex> guard(profile_lock_);
+        previous = std::move(profile_);
+        profile_ = profile;
+    }
+    previous.reset();
+    usb_start(std::move(profile));
+}
+
+void PcAppStreamScreen::keyboardChanged() {
+    if (!service_ || (hid_ && bsp_keyboard_is_connected()) == keyboard_enumerated_) return;
+    ESP_LOGI(TAG, "keyboard %s, restarting usb", keyboard_enumerated_ ? "detached" : "attached");
+    startUsb();
+}
+
+void PcAppStreamScreen::keyboardEvent(const bsp_keyboard_event_t *event, void *arg) {
+    auto *self = static_cast<PcAppStreamScreen *>(arg);
+    if (event->type == BSP_KEYBOARD_EVENT_CONNECTED ||
+        event->type == BSP_KEYBOARD_EVENT_DISCONNECTED) {
+        self->post(&PcAppStreamScreen::keyboardChanged);
+        return;
+    }
+    if (event->type != BSP_KEYBOARD_EVENT_HID) return;
+    usb_device::KeyboardReport report = {};
+    report.modifiers = event->hid.modifiers;
+    report.keys[0] = event->hid.keycode;
+    std::lock_guard<std::mutex> guard(self->profile_lock_);
+    if (self->profile_) self->profile_->keyboard_report(report);
 }
 
 void PcAppStreamScreen::post(void (PcAppStreamScreen::*method)()) {
