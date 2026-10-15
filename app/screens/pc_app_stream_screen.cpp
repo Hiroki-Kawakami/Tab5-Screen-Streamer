@@ -28,7 +28,7 @@ constexpr int32_t kPortraitPanelHeight = 640;
 constexpr int kOverlayBufferLines = 32;
 constexpr int kTapSlop = 24;
 constexpr int kCornerSize = 96;
-constexpr int kSwipeDistance = 96;
+constexpr int kSwipeDistance = 48;
 constexpr int32_t kStatusDotSize = 16;
 constexpr int32_t kExitHeight = 72;
 constexpr uint32_t kHintColor = 0x808080;
@@ -105,11 +105,17 @@ bsp_rect_t native_rect(const bsp_rect_t &rect, bsp_rotation_t rotation) {
 void PcAppStreamScreen::build() {
     lv_obj_set_style_bg_color(root_, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(root_, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(root_, lv_color_white(), 0);
-    lv_obj_set_scrollable(root_, false);
-    lv_obj_add_event_fn(root_, LV_EVENT_CLICKED, [this](lv_event_t *) { toggleOverlay(); });
+    rotation_ = ui_orientation_current();
+    input_rotation_ = rotation_;
+}
 
-    waiting_ = lv_container_create(root_, LV_FLEX_FLOW_COLUMN);
+void PcAppStreamScreen::buildWaiting(lv_obj_t *screen) {
+    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(screen, lv_color_white(), 0);
+    lv_obj_set_scrollable(screen, false);
+
+    waiting_ = lv_container_create(screen, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_clickable(waiting_, false);
     lv_obj_set_style_pad_row(waiting_, 16, 0);
 
@@ -120,10 +126,9 @@ void PcAppStreamScreen::build() {
     auto hint = lv_label_create(waiting_);
     lv_obj_set_font_role(hint, LV_WIDGETS_FONT_BODY);
     lv_obj_set_style_text_color(hint, lv_color_hex(kHintColor), 0);
-    lv_label_set_text(hint, "Tap to show menu");
+    lv_label_set_text(hint, touch_ ? "Swipe in from the bottom-right corner to show menu"
+                                   : "Tap to show menu");
 
-    rotation_ = ui_orientation_current();
-    input_rotation_ = rotation_;
     layoutWaiting();
     updateWaiting();
 }
@@ -132,6 +137,8 @@ void PcAppStreamScreen::onEnter() {
     ui_orientation_set_listener([](bsp_rotation_t rotation, void *arg) {
         static_cast<PcAppStreamScreen *>(arg)->rotate(rotation);
     }, this);
+    waiting_display_ = panel_idle_display_create(rotation_);
+    buildWaiting(waiting_display_ ? lv_display_get_screen_active(waiting_display_) : root_);
 
     std::weak_ptr<Screen> weak = weak_from_this();
     service_ = std::make_shared<Tab5Service>([weak](UsbStatus status) {
@@ -168,6 +175,8 @@ void PcAppStreamScreen::onExit() {
     if (service_) service_->set_input_listener(nullptr);
     if (trackpad_) trackpad_->set_active(false);
     closeOverlay();
+    panel_idle_display_delete();
+    waiting_display_ = nullptr;
     usb_stop();
     std::shared_ptr<Tab5Profile> profile;
     {
@@ -261,16 +270,16 @@ void PcAppStreamScreen::handleTouch(const bsp_touch_point_t *points, int count) 
             sendTouch(points, 0);
         } else if (gesture_ == Gesture::Input) {
             sendTouch(points, 0);
-        } else if (gesture_ == Gesture::Overlay && !moved_) {
-            post(&PcAppStreamScreen::closeOverlay);
+        } else if (gesture_ == Gesture::Menu && !moved_) {
+            post(&PcAppStreamScreen::toggleOverlay);
         }
         gesture_ = Gesture::None;
     } else {
         if (gesture_ == Gesture::None) {
             touch_start_ = points[0];
             moved_ = false;
-            if (overlay_open_) {
-                gesture_ = Gesture::Overlay;
+            if (overlay_open_ || !touch_) {
+                gesture_ = Gesture::Menu;
             } else if (count == 1 && in_corner(logical_point(points[0], rotation), rotation)) {
                 gesture_ = Gesture::Corner;
             } else {
@@ -308,18 +317,13 @@ void PcAppStreamScreen::setStatus(UsbStatus status) {
     status_ = status;
     updateWaiting();
     updateStatusRow();
-    // The UI draws over the overlay, both when it comes back after a stream
-    // and when the waiting text under the overlay changes.
-    if (overlay_ && !panel_acquired()) {
-        lv_refr_now(lv_obj_get_display(root_));
-        lv_obj_invalidate(lv_display_get_screen_active(overlay_));
-    }
 }
 
 void PcAppStreamScreen::rotate(bsp_rotation_t rotation) {
     const bool reopen = overlay_ != nullptr;
     if (reopen) closeOverlay();
     display_manager.set_rotation(lv_obj_get_display(root_), rotation);
+    panel_idle_display_set_rotation(rotation);
     rotation_ = rotation;
     input_rotation_ = rotation;
     layoutWaiting();
@@ -399,7 +403,7 @@ void PcAppStreamScreen::closeOverlay() {
     status_dot_ = nullptr;
     status_label_ = nullptr;
     panel_set_clip(nullptr);
-    lv_obj_invalidate(root_);
+    lv_obj_invalidate(lv_obj_get_screen(waiting_));
 }
 
 void PcAppStreamScreen::buildOverlay(lv_obj_t *screen) {

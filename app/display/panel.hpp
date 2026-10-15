@@ -50,6 +50,15 @@ void panel_acquire();
 void panel_release();
 bool panel_acquired();
 
+/* An LVGL display drawn into the front buffer, upright at `rotation`, while
+ * the panel is not acquired. It stands in for the main UI, which stays hidden
+ * until the display is deleted: it renders in the main UI's draw buffers. It
+ * has no input device, so touches go to the outside touch callback. Call these
+ * from the LVGL context. */
+lv_display_t *panel_idle_display_create(bsp_rotation_t rotation);
+void panel_idle_display_set_rotation(bsp_rotation_t rotation);
+void panel_idle_display_delete();
+
 void panel_swap();
 esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888);
 /* Full-width rows in the panel's format. */

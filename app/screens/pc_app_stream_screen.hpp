@@ -33,6 +33,7 @@ private:
     bsp_rotation_t rotation_ = BSP_ROTATION_0;
     std::atomic<bsp_rotation_t> input_rotation_ = BSP_ROTATION_0;
 
+    lv_display_t *waiting_display_ = nullptr;
     lv_obj_t *waiting_ = nullptr;
     lv_obj_t *waiting_icon_ = nullptr;
     lv_obj_t *waiting_message_ = nullptr;
@@ -41,7 +42,7 @@ private:
     lv_obj_t *status_dot_ = nullptr;
     lv_obj_t *status_label_ = nullptr;
 
-    enum class Gesture : uint8_t { None, Corner, Swiped, Input, Overlay };
+    enum class Gesture : uint8_t { None, Corner, Swiped, Input, Menu };
 
     std::unique_ptr<Trackpad> trackpad_;
     std::mutex keyboard_lock_;
@@ -54,6 +55,7 @@ private:
     void post(void (PcAppStreamScreen::*method)());
     void setStatus(UsbStatus status);
     void rotate(bsp_rotation_t rotation);
+    void buildWaiting(lv_obj_t *screen);
     void layoutWaiting();
     void updateWaiting();
     void updateStatusRow();

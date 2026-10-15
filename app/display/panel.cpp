@@ -29,6 +29,10 @@ static constexpr size_t kLz4Window = 65536;
 static constexpr int kStrips = 2;
 
 static lv_display_t *s_ui;
+static uint8_t *s_sram;
+static size_t s_sram_bytes;
+static lv_display_t *s_idle;
+static bsp_rotation_t s_idle_rotation;
 static SemaphoreHandle_t s_lock;
 static std::atomic<int> s_preempting;
 static PanelFormatListener s_format_listener;
@@ -105,6 +109,8 @@ static void wait_strip(int index) {
 
 esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes) {
     s_ui = ui;
+    s_sram = sram;
+    s_sram_bytes = sram_bytes;
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
     s_strip_bytes = sram_bytes / kStrips;
@@ -188,7 +194,11 @@ void panel_unlock() {
 
 void panel_acquire() {
     lv_lock();
-    set_ui_visible(false);
+    if (s_idle) {
+        lv_timer_pause(lv_display_get_refr_timer(s_idle));
+    } else {
+        set_ui_visible(false);
+    }
     panel_lock();
     // A partial LVGL display always presents framebuffer 0.
     s_front = 0;
@@ -208,8 +218,76 @@ void panel_release() {
     s_front = 0;
     s_acquired = false;
     panel_unlock();
-    set_ui_visible(true);
+    if (s_idle) {
+        lv_timer_resume(lv_display_get_refr_timer(s_idle));
+        lv_obj_invalidate(lv_display_get_screen_active(s_idle));
+    } else {
+        set_ui_visible(true);
+    }
     lv_unlock();
+}
+
+static bsp_size_t idle_size(bsp_rotation_t rotation) {
+    const bool transposed = rotation == BSP_ROTATION_90 || rotation == BSP_ROTATION_270;
+    return transposed ? bsp_size_t{s_size.height, s_size.width} : s_size;
+}
+
+static void idle_flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels) {
+    const bsp_size_t size = idle_size(s_idle_rotation);
+    const int x = area->x1, y = area->y1;
+    const int w = lv_area_get_width(area), h = lv_area_get_height(area);
+    bsp_rect_t native;
+    switch (s_idle_rotation) {
+        case BSP_ROTATION_90: native = {{y, size.width - x - w}, {h, w}}; break;
+        case BSP_ROTATION_180: native = {{size.width - x - w, size.height - y - h}, {w, h}}; break;
+        case BSP_ROTATION_270: native = {{size.height - y - h, x}, {h, w}}; break;
+        default: native = {{x, y}, {w, h}}; break;
+    }
+    const PanelBlit blit = {PanelBuffer::Front, {w, h}, BSP_PIXEL_FORMAT_RGB565, s_idle_rotation,
+                            native};
+    panel_lock();
+    const esp_err_t err = panel_blit(blit, pixels);
+    panel_unlock();
+    if (err != ESP_OK) ESP_LOGE(TAG, "idle display flush: %s", esp_err_to_name(err));
+    lv_display_flush_ready(display);
+}
+
+// lv_display_create() makes the display the default one, which the screen
+// manager loads its screens into.
+lv_display_t *panel_idle_display_create(bsp_rotation_t rotation) {
+    if (s_idle) return nullptr;
+    const bsp_size_t size = idle_size(rotation);
+    lv_display_t *main = lv_display_get_default();
+    lv_display_t *display = lv_display_create(size.width, size.height);
+    lv_display_set_default(main);
+    if (!display) {
+        ESP_LOGE(TAG, "no memory for the idle display");
+        return nullptr;
+    }
+    if (!s_acquired) set_ui_visible(false);
+    s_idle = display;
+    s_idle_rotation = rotation;
+    lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_buffers(display, s_sram, s_sram + s_sram_bytes / 2, s_sram_bytes / 2,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_flush_cb(display, idle_flush);
+    if (s_acquired) lv_timer_pause(lv_display_get_refr_timer(display));
+    return display;
+}
+
+void panel_idle_display_set_rotation(bsp_rotation_t rotation) {
+    if (!s_idle || rotation == s_idle_rotation) return;
+    s_idle_rotation = rotation;
+    const bsp_size_t size = idle_size(rotation);
+    lv_display_set_resolution(s_idle, size.width, size.height);
+    lv_obj_invalidate(lv_display_get_screen_active(s_idle));
+}
+
+void panel_idle_display_delete() {
+    if (!s_idle) return;
+    lv_display_delete(s_idle);
+    s_idle = nullptr;
+    if (!s_acquired) set_ui_visible(true);
 }
 
 esp_err_t panel_set_format(bsp_pixel_format_t format) {
@@ -222,7 +300,7 @@ esp_err_t panel_set_format(bsp_pixel_format_t format) {
     }
     if (s_acquired) {
         delete_pipeline();
-    } else {
+    } else if (!s_idle) {
         set_ui_visible(false);
     }
     esp_err_t err = bsp_display_reconfigure(format, 0);
@@ -232,6 +310,8 @@ esp_err_t panel_set_format(bsp_pixel_format_t format) {
     if (s_acquired) {
         s_front = 0;
         create_pipeline();
+    } else if (s_idle) {
+        lv_obj_invalidate(lv_display_get_screen_active(s_idle));
     } else {
         set_ui_visible(true);
     }
