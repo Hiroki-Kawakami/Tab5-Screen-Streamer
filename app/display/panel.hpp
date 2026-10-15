@@ -33,9 +33,10 @@ void panel_set_format_listener(PanelFormatListener listener, void *arg);
 /* While a clip is set, framebuffer 0 is on screen and swaps are held: Back is
  * the framebuffer on screen and panel_swap() presents nothing. Every draw is
  * cut to the clip, leaving up to a scaled source pixel along its edges
- * undrawn. Null clears it. Waits for panel_unlock(); the listener runs
- * inside, `front_changed` when setting the clip put another framebuffer on
- * screen. */
+ * undrawn. Null clears it. While acquired, what a new clip or null hands back
+ * from outside the old clip turns black. Waits for panel_unlock(); the
+ * listener runs inside, `front_changed` when setting the clip put another
+ * framebuffer on screen. */
 using PanelClipListener = void (*)(const bsp_rect_t *clip, bool front_changed, void *arg);
 esp_err_t panel_set_clip(const bsp_rect_t *clip);
 bool panel_clip(bsp_rect_t *clip);
@@ -60,6 +61,10 @@ void panel_idle_display_set_rotation(bsp_rotation_t rotation);
 void panel_idle_display_delete();
 
 void panel_swap();
+/* Blackens every framebuffer with the CPU; the one on screen only inside the
+ * clip while one is set. PPA fills of large areas starve the DSI of PSRAM
+ * bandwidth and underrun it. */
+void panel_clear();
 esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888);
 /* Full-width rows in the panel's format. */
 esp_err_t panel_write_rows(PanelBuffer buffer, int y, int height, const uint8_t *pixels);

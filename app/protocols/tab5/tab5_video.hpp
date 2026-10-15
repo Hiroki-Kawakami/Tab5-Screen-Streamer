@@ -66,6 +66,7 @@ private:
     void draw_blit(const tab5::MsgHeader &header, const uint8_t *payload);
     void fill(const tab5::MsgHeader &header, const uint8_t *payload);
     void swap(const tab5::MsgHeader &header);
+    void clear(const tab5::MsgHeader &header);
     void count(uint32_t bytes);
 
     Tab5Events &events_;

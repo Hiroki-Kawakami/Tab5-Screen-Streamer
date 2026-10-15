@@ -27,6 +27,7 @@ pub const DRAW_DIRECT: u8 = 0x10;
 pub const DRAW_BLIT: u8 = 0x11;
 pub const FILL: u8 = 0x12;
 pub const SWAP: u8 = 0x13;
+pub const CLEAR: u8 = 0x14;
 
 pub const VIDEO: usize = 1;
 

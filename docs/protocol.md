@@ -197,6 +197,7 @@ Overlay
 | 0x11 | `DRAW_BLIT` |
 | 0x12 | `FILL` |
 | 0x13 | `SWAP` |
+| 0x14 | `CLEAR` |
 
 ```
 DRAW_DIRECT
@@ -222,6 +223,9 @@ FILL
 
 SWAP
   u32 reserved
+
+CLEAR
+  u32 reserved
 ```
 
 - **`DRAW_DIRECT`** writes full-width rows straight into the framebuffer. RAW
@@ -234,8 +238,9 @@ SWAP
   sixteenths (`dst_w` = rotated width × n / 16, likewise for the height);
   any other size is answered with `EV_ERROR` (unsupported). `src_w` and
   `src_h` are at most `blit_max_width` and `blit_max_height`.
-- **`FILL`** paints a solid rectangle, such as letterbox bars. The color is
-  RGB888 whatever the panel format.
+- **`FILL`** paints a solid rectangle. The color is RGB888 whatever the panel
+  format. Large fills can underrun the display; blacken the panel with `CLEAR`.
+- **`CLEAR`** blackens every framebuffer, including the one on screen.
 - Commands are executed in order and never dropped, except for the epoch
   check below.
 
@@ -245,11 +250,15 @@ SWAP
 on screen.
 
 - **Partial updates go to `FRONT`.** They may tear and need no `SWAP`.
-- **Tear-free updates draw the whole panel into `BACK` and then `SWAP`.** After
-  a `SWAP` the content of `BACK` is undefined, so every frame covers the panel
-  completely, letterbox included.
+- **Tear-free updates draw the whole content into `BACK` and then `SWAP`.**
+  Each framebuffer holds what was last drawn into it, and `BACK` is a
+  different one after each `SWAP`, so every frame covers the content
+  completely.
+- After a `CLEAR`, what no command draws stays black in every framebuffer,
+  such as letterbox bars. The PC sends `CLEAR` when it opens the session
+  and when it changes the layout.
 - Moving from `BACK` + `SWAP` to `FRONT` updates needs nothing. Moving the
-  other way, the first frame drawn into `BACK` covers the whole panel.
+  other way, the first frame drawn into `BACK` covers the whole content.
 - `SWAP_DONE` is sent when the device accepts the swap, not at the vertical
   sync. The PC keeps at most `swap_window` swaps unanswered; waiting for each
   one before sending the next frame would serialise encoding, transfer and
@@ -265,8 +274,8 @@ The epoch increases whenever the panel's pixel format changes and is announced
 with `EV_FORMAT`. The PC puts the latest epoch it has seen in every video
 message. A `DRAW_DIRECT` with RAW or LZ4 whose epoch differs is dropped
 without an error, since its bytes are in the old format. Every framebuffer is
-undefined after a format change, so on `EV_FORMAT` the PC redraws the whole
-panel.
+undefined after a format change, so on `EV_FORMAT` the PC sends `CLEAR` and
+redraws the whole content.
 
 ### Overlay
 
@@ -284,8 +293,9 @@ While it is visible:
 
 When showing the overlay changes the framebuffer on screen, the device sends
 `EV_DAMAGE` for the stream rectangle. When the overlay hides, it sends
-`EV_DAMAGE` for the area the overlay covered. The device keeps no copy of what
-is under the overlay; the PC redraws damaged areas.
+`EV_DAMAGE` for the area the overlay covered, which it has turned black. The
+device keeps no copy of what is under the overlay; the PC redraws damaged
+areas, except what is black after `CLEAR`.
 
 The user opens the overlay with a swipe in from the bottom-right corner of the
 screen. That swipe is never sent as input, and no input is sent while the

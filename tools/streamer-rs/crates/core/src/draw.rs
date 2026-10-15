@@ -37,26 +37,6 @@ impl Batch {
     }
 }
 
-/// FILLs painting the panel around `content` (x, y, w, h) in black.
-pub fn letterbox(target: Target, info: &Info, content: (u32, u32, u32, u32)) -> Vec<(u8, Vec<u8>)> {
-    let (pw, ph) = (info.panel_width as u32, info.panel_height as u32);
-    let (x, y, w, h) = content;
-    let rects = [
-        (0, 0, pw, y),
-        (0, y + h, pw, ph - y - h),
-        (0, y, x, h),
-        (x + w, y, pw - x - w, h),
-    ];
-    rects
-        .into_iter()
-        .filter(|&(_, _, rw, rh)| rw > 0 && rh > 0)
-        .map(|(rx, ry, rw, rh)| {
-            let payload = protocol::fill(target, rx as u16, ry as u16, rw as u16, rh as u16, 0);
-            (protocol::FILL, payload)
-        })
-        .collect()
-}
-
 /// Rows of `row_bytes` per message, in multiples of 16, that fit `limit` even
 /// when LZ4 cannot shrink them.
 fn band_rows(limit: usize, header: usize, row_bytes: usize) -> u32 {

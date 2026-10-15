@@ -6,6 +6,7 @@
 #include "panel.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <numeric>
 #include "display_manager.hpp"
 #include "driver/ppa.h"
@@ -74,6 +75,20 @@ static bool intersect(bsp_rect_t *area, const bsp_rect_t &clip) {
     if (x1 <= x0 || y1 <= y0) return false;
     *area = {{x0, y0}, {x1 - x0, y1 - y0}};
     return true;
+}
+
+static void clear_area(int index, bsp_rect_t area) {
+    if (area.size.width <= 0 || area.size.height <= 0) return;
+    auto *fb = static_cast<uint8_t *>(bsp_display_get_frame_buffer(index));
+    const size_t bytes = bsp_pixel_format_bytes(s_format);
+    uint8_t *rows = fb + area.origin.y * s_stride;
+    for (int y = 0; y < area.size.height; y++) {
+        memset(rows + y * s_stride + area.origin.x * bytes, 0, area.size.width * bytes);
+    }
+#ifdef ESP_PLATFORM
+    esp_cache_msync(rows, area.size.height * s_stride,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+#endif
 }
 
 static PanelBlit rows_blit(PanelBuffer buffer, int y, int height) {
@@ -246,7 +261,8 @@ static void idle_flush(lv_display_t *display, const lv_area_t *area, uint8_t *pi
     const PanelBlit blit = {PanelBuffer::Front, {w, h}, BSP_PIXEL_FORMAT_RGB565, s_idle_rotation,
                             native};
     panel_lock();
-    const esp_err_t err = panel_blit(blit, pixels);
+    // An invalidation resumes the refresh timer panel_acquire() paused.
+    const esp_err_t err = s_acquired ? ESP_OK : panel_blit(blit, pixels);
     panel_unlock();
     if (err != ESP_OK) ESP_LOGE(TAG, "idle display flush: %s", esp_err_to_name(err));
     lv_display_flush_ready(display);
@@ -343,6 +359,21 @@ esp_err_t panel_set_clip(const bsp_rect_t *clip) {
         return ESP_ERR_INVALID_ARG;
     }
     preempt_lock();
+    if (s_clipped && s_acquired) {
+        const bsp_rect_t old = s_clip;
+        const int right = old.origin.x + old.size.width;
+        const int bottom = old.origin.y + old.size.height;
+        bsp_rect_t outside[] = {
+            {{0, 0}, {s_size.width, old.origin.y}},
+            {{0, bottom}, {s_size.width, s_size.height - bottom}},
+            {{0, old.origin.y}, {old.origin.x, old.size.height}},
+            {{right, old.origin.y}, {s_size.width - right, old.size.height}},
+        };
+        for (bsp_rect_t &area : outside) {
+            if (area.size.width <= 0 || area.size.height <= 0) continue;
+            if (!clip || intersect(&area, *clip)) clear_area(s_front, area);
+        }
+    }
     s_clipped = clip != nullptr;
     if (clip) s_clip = *clip;
     // Whatever the overlay draws, a partial LVGL display presents framebuffer 0.
@@ -384,6 +415,12 @@ void panel_swap() {
     if (s_clipped) return;
     s_front = (s_front + 1) % s_framebuffers;
     display_manager.present(s_front);
+}
+
+void panel_clear() {
+    for (int i = 0; i < s_framebuffers; i++) {
+        clear_area(i, s_clipped && i == s_front ? s_clip : bsp_rect_t{{0, 0}, s_size});
+    }
 }
 
 esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888) {

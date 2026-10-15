@@ -452,7 +452,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         self.presenter.layout = layout(self.size, &self.presenter.info, rotation)?;
-        self.presenter.redraw = true;
+        self.presenter.clear();
         self.started = started;
         self.restart()
     }

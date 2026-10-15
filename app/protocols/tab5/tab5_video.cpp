@@ -162,6 +162,9 @@ void Tab5Video::execute(const tab5::MsgHeader &header, const uint8_t *payload) {
         case tab5::Type::DrawBlit:
             draw_blit(header, payload);
             return;
+        case tab5::Type::Clear:
+            clear(header);
+            return;
         default:
             events_.error(Channel::Video, ErrorCode::Malformed, header.seq);
             return;
@@ -296,4 +299,12 @@ void Tab5Video::swap(const tab5::MsgHeader &header) {
     stats_swaps_++;
     const tab5::SwapDoneEvent done = {static_cast<uint32_t>(esp_timer_get_time())};
     events_.send(tab5::Type::SwapDone, header.seq, &done, sizeof(done));
+}
+
+void Tab5Video::clear(const tab5::MsgHeader &header) {
+    if (header.length != sizeof(uint32_t)) {
+        events_.error(Channel::Video, ErrorCode::Malformed, header.seq);
+        return;
+    }
+    panel_clear();
 }

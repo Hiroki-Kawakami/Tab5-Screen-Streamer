@@ -121,8 +121,10 @@ pub struct Presenter {
     /// Fixed, or the device's orientation when None.
     rotation: Option<u32>,
     swaps: VecDeque<u32>,
-    /// The next frame covers the whole panel, letterbox included.
+    /// The next frame covers the whole content.
     pub redraw: bool,
+    /// The next frame starts with CLEAR.
+    clear: bool,
     pub audio_level: Option<(u32, u32)>,
     /// EV_TOUCH while touch is in Event mode, oldest first; an empty one
     /// also when it leaves the mode.
@@ -147,11 +149,18 @@ impl Presenter {
             rotation,
             swaps: VecDeque::new(),
             redraw: true,
+            clear: true,
             audio_level: None,
             touches: Vec::new(),
             stats: Stats::new(),
             last_sent: None,
         }
+    }
+
+    /// Blackens the panel before the next frame, which covers the whole content.
+    pub fn clear(&mut self) {
+        self.clear = true;
+        self.redraw = true;
     }
 
     pub fn rotation(&self) -> u32 {
@@ -161,7 +170,7 @@ impl Presenter {
     pub fn connected(&mut self, info: Info) {
         self.info = info;
         self.swaps.clear();
-        self.redraw = true;
+        self.clear();
         self.audio_level = None;
     }
 
@@ -273,7 +282,7 @@ impl Presenter {
                 println!("pixel format {format:?}, epoch {epoch}");
                 self.info.pixel_format = format;
                 self.info.epoch = epoch;
-                self.redraw = true;
+                self.clear();
             }
             event => report(&event),
         }
@@ -287,12 +296,12 @@ impl Presenter {
         } else {
             Target::Back
         };
-        let panel_width = self.info.panel_width as u32;
         let mut batch = Batch::new(self.info.max_message[protocol::VIDEO] as usize);
         let mut messages = Vec::new();
-        if !self.front || self.redraw {
-            messages = draw::letterbox(target, &self.info, self.layout.content(panel_width));
+        if self.clear {
+            messages.push((protocol::CLEAR, vec![0; 4]));
         }
+        self.clear = false;
         self.redraw = false;
         messages.extend(draw::frame_messages(
             &self.layout,

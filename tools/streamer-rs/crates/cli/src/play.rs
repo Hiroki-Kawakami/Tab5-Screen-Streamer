@@ -136,7 +136,7 @@ impl Player {
             },
         }
         self.key = key;
-        self.presenter.redraw = true;
+        self.presenter.clear();
         self.presenter.describe();
         Ok(())
     }

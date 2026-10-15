@@ -37,6 +37,7 @@ enum class Type : uint8_t {
     DrawBlit = 0x11,
     Fill = 0x12,
     Swap = 0x13,
+    Clear = 0x14,
     AudioFormat = 0x20,
     AudioData = 0x21,
 };
