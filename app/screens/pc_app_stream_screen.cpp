@@ -128,6 +128,8 @@ void PcAppStreamScreen::buildWaiting(lv_obj_t *screen) {
     lv_obj_set_style_text_font(waiting_icon_, &icon_96, 0);
     waiting_message_ = lv_label_create(waiting_);
     lv_obj_set_font_role(waiting_message_, LV_WIDGETS_FONT_HEADING);
+    lv_obj_set_width(waiting_message_, LV_PCT(90));
+    lv_obj_set_style_text_align(waiting_message_, LV_TEXT_ALIGN_CENTER, 0);
     auto hint = lv_label_create(waiting_);
     lv_obj_set_font_role(hint, LV_WIDGETS_FONT_BODY);
     lv_obj_set_style_text_color(hint, lv_color_hex(kHintColor), 0);
@@ -379,8 +381,9 @@ void PcAppStreamScreen::layoutWaiting() {
 void PcAppStreamScreen::updateWaiting() {
     const bool connected = status_ != UsbStatus::Unconfigured;
     lv_label_set_text(waiting_icon_, connected ? TABLER_DEVICE_DESKTOP : TABLER_USB);
-    lv_label_set_text(waiting_message_, connected ? "Open Tab5 Streamer on your computer"
-                                                  : "Connect Tab5 to your computer");
+    lv_label_set_text(waiting_message_,
+                      connected ? "Open Tab5 Streamer and start stream on your computer"
+                                : "Connect Tab5 to your computer");
 }
 
 void PcAppStreamScreen::updateStatusRow() {
