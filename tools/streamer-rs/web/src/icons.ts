@@ -1,3 +1,4 @@
+import adjustmentsHorizontal from "@tabler/icons/outline/adjustments-horizontal.svg?raw";
 import alertTriangle from "@tabler/icons/outline/alert-triangle.svg?raw";
 import arrowsShuffle from "@tabler/icons/outline/arrows-shuffle.svg?raw";
 import brandGithub from "@tabler/icons/outline/brand-github.svg?raw";
@@ -26,6 +27,7 @@ import stop from "@tabler/icons/filled/player-stop.svg?raw";
 import appIcon from "../../../../assets/app-icon.svg?raw";
 
 export const icons = {
+  adjustmentsHorizontal,
   alertTriangle,
   arrowsShuffle,
   brandGithub,

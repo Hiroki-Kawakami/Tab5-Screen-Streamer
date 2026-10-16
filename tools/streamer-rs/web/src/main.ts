@@ -54,6 +54,18 @@ interface Card {
   outputs: HTMLButtonElement[];
 }
 
+interface AllCard {
+  root: HTMLDivElement;
+  row: HTMLButtonElement;
+  summary: HTMLSpanElement;
+  body: HTMLDivElement;
+  brightness: HTMLInputElement;
+  brightnessValue: HTMLSpanElement;
+  audio: HTMLDivElement;
+  volume: HTMLInputElement;
+  volumeValue: HTMLSpanElement;
+}
+
 /** Back to the start of the file rather than the previous one past this. */
 const RESTART_US = 3_000_000;
 const SLIDER_MS = 100;
@@ -394,7 +406,7 @@ ui.addDevice.onclick = async () => {
 
 let devices: Device[] = [];
 let nextDevice = 1;
-let expanded: number | null = null;
+let expanded: number | "all" | null = null;
 let draggingSlider = false;
 
 function nameOf(device: Device): string {
@@ -416,13 +428,27 @@ function removeDevice(device: Device) {
   if (devices.length === 1) show("landing");
   toDevice({ type: "remove", device: device.id });
   devices = devices.filter((d) => d !== device);
-  if (expanded === device.id) expanded = devices[0]?.id ?? null;
+  if (expanded === device.id || (expanded === "all" && devices.length < 2)) {
+    expanded = devices.length >= 2 ? "all" : (devices[0]?.id ?? null);
+  }
   renderDevices();
 }
 
 function percent(device: Device, volume: number): number {
   const { min, max } = device.info!.volume;
   return max > min ? Math.round(((volume - min) * 100) / (max - min)) : 0;
+}
+
+function sendVolume(device: Device, level: number) {
+  if (!device.info) return;
+  const { min, max } = device.info.volume;
+  const value = min + Math.round((level * (max - min)) / 100);
+  toDevice({ type: "volume", device: device.id, value, mute: false });
+}
+
+function trackDrag(slider: HTMLInputElement) {
+  slider.addEventListener("pointerdown", () => (draggingSlider = true));
+  slider.addEventListener("pointerup", () => (draggingSlider = false));
 }
 
 function newCard(device: Device): Card {
@@ -492,10 +518,8 @@ function newCard(device: Device): Card {
     outputs.append(button);
     card.outputs.push(button);
   }
-  for (const slider of [card.brightness, card.volume]) {
-    slider.addEventListener("pointerdown", () => (draggingSlider = true));
-    slider.addEventListener("pointerup", () => (draggingSlider = false));
-  }
+  trackDrag(card.brightness);
+  trackDrag(card.volume);
   const sendBrightness = throttled(() =>
     toDevice({ type: "brightness", device: device.id, value: Number(card.brightness.value) }),
   );
@@ -503,17 +527,123 @@ function newCard(device: Device): Card {
     card.brightnessValue.textContent = `${card.brightness.value}%`;
     sendBrightness();
   };
-  const sendVolume = throttled(() => {
-    if (!device.info) return;
-    const { min, max } = device.info.volume;
-    const value = min + Math.round((Number(card.volume.value) * (max - min)) / 100);
-    toDevice({ type: "volume", device: device.id, value, mute: false });
+  const sendLevel = throttled(() => sendVolume(device, Number(card.volume.value)));
+  card.volume.oninput = () => {
+    card.volumeValue.textContent = `${card.volume.value}%`;
+    sendLevel();
+  };
+  return card;
+}
+
+function newAllCard(): AllCard {
+  const root = document.createElement("div");
+  root.className = "cm-card";
+  root.innerHTML = `
+    <div class="cm-head">
+      <button class="cm-row" type="button">
+        <span class="cm-all-icon">${icon("adjustmentsHorizontal", 18)}</span>
+        <span class="cm-text"><span class="cm-name">All Devices</span><span class="cm-summary"></span></span>
+        ${icon("chevronDown", 16)}
+      </button>
+    </div>
+    <div class="cm-body">
+      <div class="cm-control">
+        <div class="control-head">
+          <label for="brightness-all" class="control-label">${icon("sun", 18)}Brightness</label>
+          <span class="control-value cm-brightness"></span>
+        </div>
+        <input id="brightness-all" type="range" min="0" max="100" step="1" />
+      </div>
+      <div class="cm-control cm-audio">
+        <div class="control-head">
+          <label for="volume-all" class="control-label">${icon("volume", 18)}Volume</label>
+          <span class="control-value cm-volume"></span>
+        </div>
+        <input id="volume-all" type="range" min="0" max="100" step="1" />
+      </div>
+    </div>`;
+  const find = <T extends Element>(selector: string) => root.querySelector(selector) as T;
+  const card: AllCard = {
+    root,
+    row: find(".cm-row"),
+    summary: find(".cm-summary"),
+    body: find(".cm-body"),
+    brightness: find("#brightness-all"),
+    brightnessValue: find(".cm-brightness"),
+    audio: find(".cm-audio"),
+    volume: find("#volume-all"),
+    volumeValue: find(".cm-volume"),
+  };
+  card.row.onclick = () => {
+    expanded = expanded === "all" ? null : "all";
+    renderDevices();
+  };
+  trackDrag(card.brightness);
+  trackDrag(card.volume);
+  const sendBrightness = throttled(() => {
+    const value = Number(card.brightness.value);
+    for (const device of devices) {
+      if (device.info) toDevice({ type: "brightness", device: device.id, value });
+    }
+  });
+  card.brightness.oninput = () => {
+    card.brightnessValue.textContent = `${card.brightness.value}%`;
+    card.brightnessValue.classList.remove("off");
+    renderAllSummary();
+    sendBrightness();
+  };
+  const sendLevel = throttled(() => {
+    for (const device of devices) sendVolume(device, Number(card.volume.value));
   });
   card.volume.oninput = () => {
     card.volumeValue.textContent = `${card.volume.value}%`;
-    sendVolume();
+    card.volumeValue.classList.remove("off");
+    renderAllSummary();
+    sendLevel();
   };
   return card;
+}
+
+const allCard = newAllCard();
+
+function renderLevel(slider: HTMLInputElement, label: HTMLSpanElement, levels: number[]) {
+  const mixed = levels.some((level) => level !== levels[0]);
+  slider.value = String(levels[0]);
+  label.textContent = mixed ? "Mixed" : `${levels[0]}%`;
+  label.classList.toggle("off", mixed);
+}
+
+function renderAllSummary() {
+  const card = allCard;
+  if (!devices.some((d) => d.info !== null)) {
+    card.summary.textContent = "Connecting…";
+    return;
+  }
+  const brightness = `Brightness ${card.brightnessValue.textContent}`;
+  card.summary.textContent = view === "player" ? `${brightness} · Volume ${card.volumeValue.textContent}` : brightness;
+}
+
+function renderAll() {
+  const card = allCard;
+  const open = expanded === "all";
+  const ready = devices.filter((d) => d.info !== null);
+  card.root.classList.toggle("expanded", open);
+  card.row.setAttribute("aria-expanded", String(open));
+  card.body.hidden = !open;
+  card.audio.hidden = view !== "player";
+  for (const control of [card.brightness, card.volume]) control.disabled = ready.length === 0;
+  if (ready.length === 0) {
+    card.brightnessValue.textContent = "";
+    card.volumeValue.textContent = "";
+  } else if (!draggingSlider) {
+    renderLevel(card.brightness, card.brightnessValue, ready.map((d) => d.info!.brightness));
+    renderLevel(
+      card.volume,
+      card.volumeValue,
+      ready.map((d) => (d.info!.volume.mute ? 0 : percent(d, d.info!.volume.volume))),
+    );
+  }
+  renderAllSummary();
 }
 
 function renderDevice(device: Device) {
@@ -555,11 +685,14 @@ function renderDevice(device: Device) {
 }
 
 function renderDevices() {
+  const multi = devices.length >= 2;
   const cards = devices.map((d) => d.card.root);
+  if (multi) cards.unshift(allCard.root);
   const shown = ui.devices.children;
   if (cards.length !== shown.length || cards.some((card, i) => card !== shown[i])) {
     ui.devices.replaceChildren(...cards);
   }
+  if (multi) renderAll();
   for (const device of devices) renderDevice(device);
   const count = devices.length;
   const connected = devices.some((d) => d.info !== null);

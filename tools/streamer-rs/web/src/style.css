@@ -411,6 +411,13 @@ input[type="range"] {
   box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.18);
 }
 
+.cm-all-icon {
+  flex: none;
+  display: inline-flex;
+  margin: 0 -5px;
+  color: var(--accent);
+}
+
 .cm-text {
   flex: 1;
   min-width: 0;
