@@ -77,6 +77,10 @@ pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
         })
 }
 
+pub fn asleep(_id: u64) -> bool {
+    false
+}
+
 pub fn mirror_primary(_id: u64) -> Option<u64> {
     None
 }

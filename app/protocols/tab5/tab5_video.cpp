@@ -165,6 +165,9 @@ void Tab5Video::execute(const tab5::MsgHeader &header, const uint8_t *payload) {
         case tab5::Type::Clear:
             clear(header);
             return;
+        case tab5::Type::DisplayPower:
+            display_power(header, payload);
+            return;
         default:
             events_.error(Channel::Video, ErrorCode::Malformed, header.seq);
             return;
@@ -307,4 +310,15 @@ void Tab5Video::clear(const tab5::MsgHeader &header) {
         return;
     }
     panel_clear();
+}
+
+void Tab5Video::display_power(const tab5::MsgHeader &header, const uint8_t *payload) {
+    tab5::ByteEvent power;
+    if (header.length != sizeof(power)) {
+        events_.error(Channel::Video, ErrorCode::Malformed, header.seq);
+        return;
+    }
+    memcpy(&power, payload, sizeof(power));
+    display_power_(power.value != 0);
+    if (!power.value) panel_clear();
 }

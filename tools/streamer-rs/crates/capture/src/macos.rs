@@ -11,8 +11,8 @@ use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, class, define_class, msg_send, sel};
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{
-    CGDisplayBounds, CGDisplayIsInMirrorSet, CGDisplayPixelsHigh, CGDisplayPixelsWide,
-    CGDisplayPrimaryDisplay, CGMainDisplayID, CGPreflightScreenCaptureAccess,
+    CGDisplayBounds, CGDisplayIsAsleep, CGDisplayIsInMirrorSet, CGDisplayPixelsHigh,
+    CGDisplayPixelsWide, CGDisplayPrimaryDisplay, CGMainDisplayID, CGPreflightScreenCaptureAccess,
     CGRequestScreenCaptureAccess, kCGDisplayStreamYCbCrMatrix_ITU_R_601_4,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
@@ -111,6 +111,10 @@ pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
     let rect = CGDisplayBounds(id as u32);
     let (w, h) = (rect.size.width, rect.size.height);
     (w > 0.0 && h > 0.0).then_some((rect.origin.x, rect.origin.y, w, h))
+}
+
+pub fn asleep(id: u64) -> bool {
+    CGDisplayIsAsleep(id as u32)
 }
 
 pub fn mirror_primary(id: u64) -> Option<u64> {

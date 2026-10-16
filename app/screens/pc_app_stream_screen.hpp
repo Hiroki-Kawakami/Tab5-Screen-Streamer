@@ -48,6 +48,8 @@ private:
     std::mutex keyboard_lock_;
     bool keyboard_hid_ = false;
     std::atomic<bool> overlay_open_ = false;
+    std::mutex brightness_lock_;
+    std::atomic<bool> display_on_ = true;
     Gesture gesture_ = Gesture::None;
     bool moved_ = false;
     bsp_touch_point_t touch_start_ = {};
@@ -59,6 +61,7 @@ private:
     void layoutWaiting();
     void updateWaiting();
     void updateStatusRow();
+    void applyBrightness();
     void toggleOverlay();
     void openOverlay();
     void closeOverlay();

@@ -38,6 +38,7 @@ enum class Type : uint8_t {
     Fill = 0x12,
     Swap = 0x13,
     Clear = 0x14,
+    DisplayPower = 0x15,
     AudioFormat = 0x20,
     AudioData = 0x21,
 };

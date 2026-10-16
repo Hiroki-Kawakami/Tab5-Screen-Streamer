@@ -198,6 +198,7 @@ Overlay
 | 0x12 | `FILL` |
 | 0x13 | `SWAP` |
 | 0x14 | `CLEAR` |
+| 0x15 | `DISPLAY_POWER` |
 
 ```
 DRAW_DIRECT
@@ -226,6 +227,10 @@ SWAP
 
 CLEAR
   u32 reserved
+
+DISPLAY_POWER
+  u8  on
+  u8  reserved[3]
 ```
 
 - **`DRAW_DIRECT`** writes full-width rows straight into the framebuffer. RAW
@@ -241,6 +246,8 @@ CLEAR
 - **`FILL`** paints a solid rectangle. The color is RGB888 whatever the panel
   format. Large fills can underrun the display; blacken the panel with `CLEAR`.
 - **`CLEAR`** blackens every framebuffer, including the one on screen.
+- **`DISPLAY_POWER`** turns the display off or back on, like a monitor
+  following the host's display sleep. See [Display power](#display-power).
 - Commands are executed in order and never dropped, except for the epoch
   check below.
 
@@ -276,6 +283,18 @@ message. A `DRAW_DIRECT` with RAW or LZ4 whose epoch differs is dropped
 without an error, since its bytes are in the old format. Every framebuffer is
 undefined after a format change, so on `EV_FORMAT` the PC sends `CLEAR` and
 redraws the whole content.
+
+### Display power
+
+- Off turns the backlight off and then blackens every framebuffer as `CLEAR`
+  does. While the overlay is visible the backlight stays on, showing the
+  overlay next to the black stream rectangle.
+- On turns the backlight back on and draws nothing. The PC draws the whole
+  content first and then sends `DISPLAY_POWER` on, so the panel lights up on
+  the new frame.
+- Drawing while off is executed as usual; the backlight stays off.
+- The display is on when a session opens and once it ends.
+- Input is sent while off as usual, so a touch can wake the host.
 
 ### Overlay
 

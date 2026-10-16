@@ -125,6 +125,8 @@ pub struct Presenter {
     pub redraw: bool,
     /// The next frame starts with CLEAR.
     clear: bool,
+    /// The display is off until the next frame.
+    off: bool,
     pub audio_level: Option<(u32, u32)>,
     /// EV_TOUCH while touch is in Event mode, oldest first; an empty one
     /// also when it leaves the mode.
@@ -150,6 +152,7 @@ impl Presenter {
             swaps: VecDeque::new(),
             redraw: true,
             clear: true,
+            off: false,
             audio_level: None,
             touches: Vec::new(),
             stats: Stats::new(),
@@ -171,6 +174,7 @@ impl Presenter {
         self.info = info;
         self.swaps.clear();
         self.clear();
+        self.off = false;
         self.audio_level = None;
     }
 
@@ -189,6 +193,16 @@ impl Presenter {
             self.info.pixel_format,
             if self.front { "FRONT" } else { "BACK + SWAP" }
         );
+    }
+
+    /// Turns the display off, which blackens it; the next frame turns it on.
+    pub fn power_off(&mut self, connection: &mut Connection) -> Result<()> {
+        let seq = connection.next_video_seq();
+        let message = protocol::message(protocol::DISPLAY_POWER, seq, self.info.epoch, &[0; 4]);
+        connection.send_video(message)?;
+        self.off = true;
+        self.redraw = true;
+        Ok(())
     }
 
     /// How long until a frame stays within max_fps; zero when it does now.
@@ -319,6 +333,16 @@ impl Presenter {
             let seq = connection.next_video_seq();
             batch.push(protocol::message(protocol::SWAP, seq, epoch, &[0; 4]))?;
             self.swaps.push_back(seq);
+        }
+        if self.off {
+            let seq = connection.next_video_seq();
+            batch.push(protocol::message(
+                protocol::DISPLAY_POWER,
+                seq,
+                epoch,
+                &[1, 0, 0, 0],
+            ))?;
+            self.off = false;
         }
         for transfer in batch.transfers {
             self.stats.bytes += transfer.len();

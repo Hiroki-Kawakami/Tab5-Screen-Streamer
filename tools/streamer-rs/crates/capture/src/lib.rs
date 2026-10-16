@@ -63,6 +63,11 @@ pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
     platform::bounds(id)
 }
 
+/// Whether the display is asleep; false where the OS does not tell.
+pub fn asleep(id: u64) -> bool {
+    platform::asleep(id)
+}
+
 /// Capturing until dropped.
 pub struct Capture {
     platform: platform::Capture,

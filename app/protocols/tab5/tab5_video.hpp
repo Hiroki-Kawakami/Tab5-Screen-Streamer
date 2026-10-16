@@ -28,11 +28,13 @@ public:
     static constexpr int kDirectAlign = 16;
     static constexpr int kBlitMaxSize = 1280;
 
-    /* `streaming` runs on the video task when the panel is taken and given back.
-     * Transfers of a session other than `session` are dropped unread. */
+    /* `streaming` runs on the video task when the panel is taken and given back,
+     * `display_power` on DISPLAY_POWER. Transfers of a session other than
+     * `session` are dropped unread. */
     Tab5Video(Tab5Events &events, const std::atomic<uint32_t> &session,
-              std::function<void(bool)> streaming)
-        : events_(events), session_(session), streaming_(std::move(streaming)) {}
+              std::function<void(bool)> streaming, std::function<void(bool)> display_power)
+        : events_(events), session_(session), streaming_(std::move(streaming)),
+          display_power_(std::move(display_power)) {}
     ~Tab5Video();
     esp_err_t start();
     uint32_t epoch() const { return epoch_; }
@@ -67,11 +69,13 @@ private:
     void fill(const tab5::MsgHeader &header, const uint8_t *payload);
     void swap(const tab5::MsgHeader &header);
     void clear(const tab5::MsgHeader &header);
+    void display_power(const tab5::MsgHeader &header, const uint8_t *payload);
     void count(uint32_t bytes);
 
     Tab5Events &events_;
     const std::atomic<uint32_t> &session_;
     std::function<void(bool)> streaming_;
+    std::function<void(bool)> display_power_;
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t exited_ = nullptr;
     SemaphoreHandle_t synced_ = nullptr;

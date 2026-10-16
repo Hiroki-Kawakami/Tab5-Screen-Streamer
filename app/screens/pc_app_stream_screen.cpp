@@ -161,6 +161,10 @@ void PcAppStreamScreen::onEnter() {
     service_->set_input_listener([this](tab5::InputTarget target, tab5::InputMode mode) {
         inputModeChanged(target, mode);
     });
+    service_->set_display_power_listener([this](bool on) {
+        display_on_ = on;
+        applyBrightness();
+    });
     service_->set_input_enabled(tab5::InputTarget::Touch, touch_);
     display_manager.set_outside_touch_callback(outsideTouch, this);
     bsp_keyboard_set_event_cb(keyboardEvent, this);
@@ -172,9 +176,14 @@ void PcAppStreamScreen::onEnter() {
 void PcAppStreamScreen::onExit() {
     display_manager.set_outside_touch_callback(nullptr);
     bsp_keyboard_set_event_cb(nullptr, nullptr);
-    if (service_) service_->set_input_listener(nullptr);
+    if (service_) {
+        service_->set_input_listener(nullptr);
+        service_->set_display_power_listener(nullptr);
+    }
     if (trackpad_) trackpad_->set_active(false);
+    display_on_ = true;
     closeOverlay();
+    applyBrightness();
     panel_idle_display_delete();
     waiting_display_ = nullptr;
     usb_stop();
@@ -393,6 +402,7 @@ void PcAppStreamScreen::openOverlay() {
     overlay_ = overlay;
     overlay_open_ = true;
     buildOverlay(lv_display_get_screen_active(overlay_));
+    applyBrightness();
 }
 
 void PcAppStreamScreen::closeOverlay() {
@@ -404,6 +414,12 @@ void PcAppStreamScreen::closeOverlay() {
     status_label_ = nullptr;
     panel_set_clip(nullptr);
     lv_obj_invalidate(lv_obj_get_screen(waiting_));
+    applyBrightness();
+}
+
+void PcAppStreamScreen::applyBrightness() {
+    std::lock_guard<std::mutex> guard(brightness_lock_);
+    bsp_display_set_brightness(display_on_ || overlay_open_ ? settings_display_brightness() : 0);
 }
 
 void PcAppStreamScreen::buildOverlay(lv_obj_t *screen) {

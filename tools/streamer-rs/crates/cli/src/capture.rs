@@ -274,6 +274,8 @@ struct Session<'a> {
     /// What the running capture was started for.
     started: (LayoutKey, (u32, u32)),
     capture: Option<Capture>,
+    /// The device's display is off, with no capture, until the display wakes.
+    asleep: bool,
     frames: mpsc::Receiver<Frame>,
     sender: mpsc::SyncSender<Frame>,
     last: Option<Frame>,
@@ -339,6 +341,7 @@ impl<'a> Session<'a> {
             started: (present::layout_key(&info, rotation), found.size),
             presenter: Presenter::new(info, layout, Encoding::Jpeg, false, options.rotation),
             capture: None,
+            asleep: false,
             frames,
             sender,
             last: None,
@@ -364,7 +367,13 @@ impl<'a> Session<'a> {
             if let Some(reason) = session.capture.as_ref().and_then(Capture::stopped) {
                 println!("capture stopped ({reason}), restarting");
                 thread::sleep(RESTART_DELAY);
-                session.restart().map_err(Fatal)?;
+                let restarted = match capture::asleep(display) {
+                    true => Err("display asleep".into()),
+                    false => session.restart(),
+                };
+                if let Err(e) = restarted {
+                    session.sleep(connection, &e)?;
+                }
             }
             if session.presenter.events(connection).map_err(Lost)? {
                 session.relayout().map_err(Fatal)?;
@@ -372,6 +381,13 @@ impl<'a> Session<'a> {
             session.inject();
             if checked.elapsed() >= DISPLAY_CHECK {
                 checked = Instant::now();
+                if session.asleep {
+                    if !capture::asleep(display) {
+                        session.wake();
+                    }
+                } else if capture::asleep(display) {
+                    session.sleep(connection, "display asleep")?;
+                }
                 if session.source.changed() {
                     println!("display mirroring changed");
                     return Err(Changed);
@@ -462,7 +478,33 @@ impl<'a> Session<'a> {
         while self.frames.try_recv().is_ok() {}
         self.last = None;
         self.pending = false;
-        self.start()
+        match self.asleep {
+            true => Ok(()),
+            false => self.start(),
+        }
+    }
+
+    /// Stops capturing and turns the device's display off.
+    fn sleep(
+        &mut self,
+        connection: &mut Connection,
+        reason: &str,
+    ) -> std::result::Result<(), Stop> {
+        println!("display off ({reason})");
+        self.asleep = true;
+        self.restart().map_err(Fatal)?;
+        self.presenter.power_off(connection).map_err(Lost)
+    }
+
+    /// Captures again; the next frame sent turns the device's display on.
+    fn wake(&mut self) {
+        match self.start() {
+            Ok(()) => {
+                println!("display on");
+                self.asleep = false;
+            }
+            Err(e) => println!("capture: {e}"),
+        }
     }
 
     fn send(&mut self, connection: &mut Connection) -> Result<()> {

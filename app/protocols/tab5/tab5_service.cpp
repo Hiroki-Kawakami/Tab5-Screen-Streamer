@@ -19,12 +19,16 @@ static constexpr int64_t kSessionTimeoutUs = 3 * 1000 * 1000;
 static constexpr TickType_t kTimeoutCheck = pdMS_TO_TICKS(250);
 
 Tab5Service::Tab5Service(UsbStatusListener status)
-    : video_(std::make_unique<Tab5Video>(events_, session_, [this](bool streaming) {
-          portENTER_CRITICAL(&lock_);
-          streaming_ = streaming;
-          portEXIT_CRITICAL(&lock_);
-          report_status();
-      })),
+    : video_(std::make_unique<Tab5Video>(
+          events_, session_,
+          [this](bool streaming) {
+              portENTER_CRITICAL(&lock_);
+              streaming_ = streaming;
+              portEXIT_CRITICAL(&lock_);
+              report_status();
+              if (!streaming) set_display_power(true);
+          },
+          [this](bool on) { set_display_power(on); })),
       audio_(std::make_unique<Tab5Audio>(events_, session_)), status_(std::move(status)) {}
 
 Tab5Service::~Tab5Service() {
@@ -392,4 +396,17 @@ bool Tab5Service::key(const tab5::KeyEvent &event) {
     key_ = event;
     events_.send(tab5::Type::Key, 0, &key_, sizeof(key_));
     return true;
+}
+
+void Tab5Service::set_display_power_listener(DisplayPowerListener listener) {
+    std::lock_guard<std::mutex> guard(display_lock_);
+    display_listener_ = std::move(listener);
+}
+
+void Tab5Service::set_display_power(bool on) {
+    std::lock_guard<std::mutex> guard(display_lock_);
+    if (display_on_ == on) return;
+    display_on_ = on;
+    ESP_LOGI(TAG, "display %s", on ? "on" : "off");
+    if (display_listener_) display_listener_(on);
 }
