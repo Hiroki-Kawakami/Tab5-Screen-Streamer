@@ -26,7 +26,6 @@ Tab5Service::Tab5Service(UsbStatusListener status)
               streaming_ = streaming;
               portEXIT_CRITICAL(&lock_);
               report_status();
-              if (!streaming) set_display_power(true);
           },
           [this](bool on) { set_display_power(on); })),
       audio_(std::make_unique<Tab5Audio>(events_, session_)), status_(std::move(status)) {}
@@ -250,6 +249,7 @@ void Tab5Service::open_session(uint32_t seq) {
     if (++sessions_ == 0) sessions_ = 1;
     session_ = sessions_;
     ESP_LOGI(TAG, "session %u opened", (unsigned)sessions_);
+    set_display_power(true);
     send_info(seq);
 }
 
@@ -405,8 +405,6 @@ void Tab5Service::set_display_power_listener(DisplayPowerListener listener) {
 
 void Tab5Service::set_display_power(bool on) {
     std::lock_guard<std::mutex> guard(display_lock_);
-    if (display_on_ == on) return;
-    display_on_ = on;
     ESP_LOGI(TAG, "display %s", on ? "on" : "off");
     if (display_listener_) display_listener_(on);
 }

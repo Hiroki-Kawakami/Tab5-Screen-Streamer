@@ -32,8 +32,8 @@ public:
      * input sent in events is released; the listener releases what it sent on
      * HID. It must not call back into the service. */
     using InputListener = std::function<void(tab5::InputTarget target, tab5::InputMode mode)>;
-    /* Called on every change of the display power the host sets, which is on
-     * again once the session ends. Off is blackened once the listener returns. */
+    /* Called with every display power the host sets, and with on when a
+     * session opens. Off is blackened once the listener returns. */
     using DisplayPowerListener = std::function<void(bool on)>;
 
     explicit Tab5Service(UsbStatusListener status);
@@ -113,5 +113,4 @@ private:
     tab5::KeyEvent key_ = {};
     std::mutex display_lock_;
     DisplayPowerListener display_listener_;
-    bool display_on_ = true;
 };

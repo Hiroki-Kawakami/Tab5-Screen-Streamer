@@ -8,6 +8,8 @@
 #include <memory>
 #include <mutex>
 #include "bsp.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include "input/trackpad.hpp"
 #include "protocols/tab5/tab5_profile.hpp"
 #include "protocols/tab5/tab5_service.hpp"
@@ -17,6 +19,7 @@ class PcAppStreamScreen : public Screen {
 public:
     PcAppStreamScreen(bool audio, bool hid, bool touch)
         : audio_(audio), hid_(hid), touch_(touch) {}
+    ~PcAppStreamScreen() override;
     void build() override;
     void onEnter() override;
     void onExit() override;
@@ -30,6 +33,7 @@ private:
     std::shared_ptr<Tab5Profile> profile_;
     bool keyboard_enumerated_ = false;
     UsbStatus status_ = UsbStatus::Unconfigured;
+    std::atomic<bool> streaming_ = false;
     bsp_rotation_t rotation_ = BSP_ROTATION_0;
     std::atomic<bsp_rotation_t> input_rotation_ = BSP_ROTATION_0;
 
@@ -42,7 +46,7 @@ private:
     lv_obj_t *status_dot_ = nullptr;
     lv_obj_t *status_label_ = nullptr;
 
-    enum class Gesture : uint8_t { None, Corner, Swiped, Input, Menu };
+    enum class Gesture : uint8_t { None, Corner, Swiped, Input, Menu, Wake };
 
     std::unique_ptr<Trackpad> trackpad_;
     std::mutex keyboard_lock_;
@@ -50,6 +54,8 @@ private:
     std::atomic<bool> overlay_open_ = false;
     std::mutex brightness_lock_;
     std::atomic<bool> display_on_ = true;
+    TimerHandle_t idle_timer_ = nullptr;
+    std::atomic<bool> idle_enabled_ = false;
     Gesture gesture_ = Gesture::None;
     bool moved_ = false;
     bsp_touch_point_t touch_start_ = {};
@@ -62,6 +68,8 @@ private:
     void updateWaiting();
     void updateStatusRow();
     void applyBrightness();
+    void restartIdle();
+    static void idleTimeout(TimerHandle_t timer);
     void toggleOverlay();
     void openOverlay();
     void closeOverlay();

@@ -293,7 +293,7 @@ redraws the whole content.
   content first and then sends `DISPLAY_POWER` on, so the panel lights up on
   the new frame.
 - Drawing while off is executed as usual; the backlight stays off.
-- The display is on when a session opens and once it ends.
+- The display turns on when a session opens.
 - Input is sent while off as usual, so a touch can wake the host.
 
 ### Overlay

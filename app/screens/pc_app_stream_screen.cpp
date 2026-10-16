@@ -32,6 +32,7 @@ constexpr int kSwipeDistance = 48;
 constexpr int32_t kStatusDotSize = 16;
 constexpr int32_t kExitHeight = 72;
 constexpr uint32_t kHintColor = 0x808080;
+constexpr TickType_t kIdleTimeout = pdMS_TO_TICKS(3 * 60 * 1000);
 
 bool transposed(bsp_rotation_t rotation) {
     return rotation == BSP_ROTATION_90 || rotation == BSP_ROTATION_270;
@@ -102,6 +103,10 @@ bsp_rect_t native_rect(const bsp_rect_t &rect, bsp_rotation_t rotation) {
 
 }
 
+PcAppStreamScreen::~PcAppStreamScreen() {
+    if (idle_timer_) xTimerDelete(idle_timer_, portMAX_DELAY);
+}
+
 void PcAppStreamScreen::build() {
     lv_obj_set_style_bg_color(root_, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(root_, LV_OPA_COVER, 0);
@@ -139,6 +144,10 @@ void PcAppStreamScreen::onEnter() {
     }, this);
     waiting_display_ = panel_idle_display_create(rotation_);
     buildWaiting(waiting_display_ ? lv_display_get_screen_active(waiting_display_) : root_);
+    idle_timer_ = xTimerCreate("pc_app_idle", kIdleTimeout, pdFALSE, this, idleTimeout);
+    if (!idle_timer_) ESP_LOGE(TAG, "no memory for the idle timer");
+    idle_enabled_ = true;
+    restartIdle();
 
     std::weak_ptr<Screen> weak = weak_from_this();
     service_ = std::make_shared<Tab5Service>([weak](UsbStatus status) {
@@ -164,6 +173,7 @@ void PcAppStreamScreen::onEnter() {
     service_->set_display_power_listener([this](bool on) {
         display_on_ = on;
         applyBrightness();
+        if (on) restartIdle();
     });
     service_->set_input_enabled(tab5::InputTarget::Touch, touch_);
     display_manager.set_outside_touch_callback(outsideTouch, this);
@@ -181,6 +191,8 @@ void PcAppStreamScreen::onExit() {
         service_->set_display_power_listener(nullptr);
     }
     if (trackpad_) trackpad_->set_active(false);
+    idle_enabled_ = false;
+    if (idle_timer_) xTimerStop(idle_timer_, portMAX_DELAY);
     display_on_ = true;
     closeOverlay();
     applyBrightness();
@@ -225,6 +237,7 @@ void PcAppStreamScreen::keyboardEvent(const bsp_keyboard_event_t *event, void *a
         return;
     }
     if (event->type != BSP_KEYBOARD_EVENT_HID) return;
+    self->restartIdle();
     const tab5::KeyEvent key = {event->hid.modifiers, 0, {event->hid.keycode}};
     if (self->service_->key(key)) return;
     std::lock_guard<std::mutex> keyboard(self->keyboard_lock_);
@@ -287,7 +300,13 @@ void PcAppStreamScreen::handleTouch(const bsp_touch_point_t *points, int count) 
         if (gesture_ == Gesture::None) {
             touch_start_ = points[0];
             moved_ = false;
-            if (overlay_open_ || !touch_) {
+            restartIdle();
+            if (!display_on_ && !overlay_open_ && !streaming_) {
+                gesture_ = Gesture::Wake;
+                ESP_LOGI(TAG, "display on (tap)");
+                display_on_ = true;
+                applyBrightness();
+            } else if (overlay_open_ || !touch_) {
                 gesture_ = Gesture::Menu;
             } else if (count == 1 && in_corner(logical_point(points[0], rotation), rotation)) {
                 gesture_ = Gesture::Corner;
@@ -324,6 +343,8 @@ void PcAppStreamScreen::sendTouch(const bsp_touch_point_t *points, int count) {
 
 void PcAppStreamScreen::setStatus(UsbStatus status) {
     status_ = status;
+    const bool streaming = status == UsbStatus::Active;
+    if (streaming_.exchange(streaming) && !streaming) restartIdle();
     updateWaiting();
     updateStatusRow();
 }
@@ -415,11 +436,26 @@ void PcAppStreamScreen::closeOverlay() {
     panel_set_clip(nullptr);
     lv_obj_invalidate(lv_obj_get_screen(waiting_));
     applyBrightness();
+    restartIdle();
 }
 
 void PcAppStreamScreen::applyBrightness() {
     std::lock_guard<std::mutex> guard(brightness_lock_);
     bsp_display_set_brightness(display_on_ || overlay_open_ ? settings_display_brightness() : 0);
+}
+
+void PcAppStreamScreen::restartIdle() {
+    if (idle_timer_) xTimerReset(idle_timer_, 0);
+}
+
+void PcAppStreamScreen::idleTimeout(TimerHandle_t timer) {
+    auto *self = static_cast<PcAppStreamScreen *>(pvTimerGetTimerID(timer));
+    if (!self->idle_enabled_ || self->streaming_ || self->overlay_open_ || !self->display_on_) {
+        return;
+    }
+    ESP_LOGI(TAG, "display off (idle)");
+    self->display_on_ = false;
+    self->applyBrightness();
 }
 
 void PcAppStreamScreen::buildOverlay(lv_obj_t *screen) {
