@@ -9,6 +9,15 @@ use crate::error::{Context, Result};
 const EBML: u32 = 0x1A45DFA3;
 const DOC_TYPE: u32 = 0x4282;
 const SEGMENT: u32 = 0x18538067;
+const SEEK_HEAD: u32 = 0x114D9B74;
+const SEEK: u32 = 0x4DBB;
+const SEEK_ID: u32 = 0x53AB;
+const SEEK_POSITION: u32 = 0x53AC;
+const CUES: u32 = 0x1C53BB6B;
+const CUE_POINT: u32 = 0xBB;
+const CUE_TIME: u32 = 0xB3;
+const CUE_TRACK_POSITIONS: u32 = 0xB7;
+const CUE_CLUSTER_POSITION: u32 = 0xF1;
 const INFO: u32 = 0x1549A966;
 const TIMESTAMP_SCALE: u32 = 0x2AD7B1;
 const DURATION: u32 = 0x4489;
@@ -80,6 +89,15 @@ impl<S: Source> Input<S> {
         }
         let start = (pos - self.buf_start) as usize;
         Ok(&self.buf[start..start + len])
+    }
+
+    /// Reads at most `len` bytes at `pos` without replacing the buffer, for
+    /// reads scattered over the file.
+    fn peek(&mut self, pos: u64, len: usize) -> Result<Vec<u8>> {
+        let mut out = vec![0; len.min(self.len.saturating_sub(pos) as usize)];
+        let filled = self.source.read_upto(pos, &mut out)?;
+        out.truncate(filled);
+        Ok(out)
     }
 
     fn header(&mut self, pos: u64) -> Result<Option<(u32, Option<u64>, u64)>> {
@@ -348,10 +366,49 @@ pub struct Demuxer<S> {
     info: Info,
     tracks: Vec<TrackState>,
     timestamp_scale: u64,
+    segment: u64,
+    first_cluster: u64,
+    cues: Option<u64>,
+    /// Cluster times, in timestamp_scale units, and positions; read at the
+    /// first seek.
+    index: Option<Vec<(i64, u64)>>,
     pos: u64,
     end: u64,
     cluster_time: i64,
     queue: VecDeque<Packet>,
+}
+
+fn parse_cues(data: &[u8], segment: u64) -> Result<Vec<(i64, u64)>> {
+    let mut index = Vec::new();
+    for item in elements(data) {
+        let (id, point) = item?;
+        if id != CUE_POINT {
+            continue;
+        }
+        let mut time = None;
+        let mut position = None;
+        for item in elements(point) {
+            let (id, value) = item?;
+            match id {
+                CUE_TIME => time = Some(uint(value) as i64),
+                CUE_TRACK_POSITIONS => {
+                    for item in elements(value) {
+                        let (id, value) = item?;
+                        if id == CUE_CLUSTER_POSITION {
+                            position = Some(segment + uint(value));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (Some(time), Some(position)) = (time, position) {
+            index.push((time, position));
+        }
+    }
+    index.sort_unstable();
+    index.dedup_by_key(|entry| entry.1);
+    Ok(index)
 }
 
 impl<S: Source> Demuxer<S> {
@@ -384,6 +441,8 @@ impl<S: Source> Demuxer<S> {
             bail!("no Matroska segment");
         }
         let end = size.map_or(len, |s| (pos + s).min(len));
+        let segment = pos;
+        let mut cues = None;
 
         let mut timestamp_scale = 1_000_000u64;
         let mut duration = None;
@@ -398,6 +457,28 @@ impl<S: Source> Demuxer<S> {
             }
             let size = size.context("element of unknown size before the first cluster")?;
             match id {
+                SEEK_HEAD if size <= MAX_ELEMENT => {
+                    let data = input.read(body, size as usize)?.to_vec();
+                    for item in elements(&data) {
+                        let (id, seek) = item?;
+                        if id != SEEK {
+                            continue;
+                        }
+                        let (mut target, mut position) = (None, None);
+                        for item in elements(seek) {
+                            let (id, value) = item?;
+                            match id {
+                                SEEK_ID => target = Some(uint(value) as u32),
+                                SEEK_POSITION => position = Some(uint(value)),
+                                _ => {}
+                            }
+                        }
+                        if let (Some(CUES), Some(position)) = (target, position) {
+                            cues = Some(segment + position);
+                        }
+                    }
+                }
+                CUES => cues = Some(pos),
                 INFO | TRACKS => {
                     if size > MAX_ELEMENT {
                         bail!("element too large");
@@ -435,6 +516,10 @@ impl<S: Source> Demuxer<S> {
             info: Info { duration, tracks },
             tracks: states,
             timestamp_scale,
+            segment,
+            first_cluster: pos,
+            cues,
+            index: None,
             pos,
             end,
             cluster_time: 0,
@@ -446,6 +531,10 @@ impl<S: Source> Demuxer<S> {
         &self.info
     }
 
+    pub(super) fn info_mut(&mut self) -> &mut Info {
+        &mut self.info
+    }
+
     pub fn select(&mut self, tracks: &[u32]) {
         for (i, state) in self.tracks.iter_mut().enumerate() {
             state.selected = tracks.contains(&(i as u32));
@@ -454,6 +543,65 @@ impl<S: Source> Demuxer<S> {
 
     fn us(&self, time: i64) -> i64 {
         (time as i128 * self.timestamp_scale as i128 / 1000) as i64
+    }
+
+    fn read_cues(&mut self, pos: u64) -> Result<Option<Vec<(i64, u64)>>> {
+        let Some((CUES, Some(size), body)) = self.input.header(pos)? else {
+            return Ok(None);
+        };
+        if size > MAX_ELEMENT {
+            bail!("cues too large");
+        }
+        let data = self.input.peek(body, size as usize)?;
+        let index = parse_cues(&data, self.segment)?;
+        Ok((!index.is_empty()).then_some(index))
+    }
+
+    /// Every cluster's time, from their headers, for files without cues.
+    fn scan_clusters(&mut self) -> Result<Vec<(i64, u64)>> {
+        let mut index = Vec::new();
+        let mut pos = self.first_cluster;
+        while pos < self.end {
+            let head = self.input.peek(pos, 32)?;
+            let mut r = Reader::new(&head);
+            let (Ok(id), Ok(size)) = (element_id(&mut r), element_size(&mut r)) else {
+                break;
+            };
+            let body = pos + (head.len() - r.remaining()) as u64;
+            if id == CLUSTER
+                && let Ok(TIMESTAMP) = element_id(&mut r)
+                && let Ok(Some(length)) = element_size(&mut r)
+                && let Ok(value) = r.take(length as usize)
+            {
+                index.push((uint(value) as i64, pos));
+            }
+            let Some(size) = size else {
+                bail!("cannot seek: element of unknown size");
+            };
+            pos = body + size;
+        }
+        Ok(index)
+    }
+
+    pub fn seek(&mut self, us: i64) -> Result<()> {
+        if self.index.is_none() {
+            let cues = match self.cues {
+                Some(pos) => self.read_cues(pos)?,
+                None => None,
+            };
+            let index = match cues {
+                Some(index) => index,
+                None => self.scan_clusters()?,
+            };
+            self.index = Some(index);
+        }
+        let index = self.index.as_deref().unwrap_or_default();
+        let time = (us as i128 * 1000 / self.timestamp_scale as i128) as i64;
+        let at = index.partition_point(|&(t, _)| t <= time).saturating_sub(1);
+        self.pos = index.get(at).map_or(self.first_cluster, |&(_, pos)| pos);
+        self.cluster_time = 0;
+        self.queue.clear();
+        Ok(())
     }
 
     pub fn next_packet(&mut self) -> Result<Option<Packet>> {
@@ -677,5 +825,44 @@ mod tests {
         let sizes: Vec<usize> = got.iter().map(|p| p.1.len()).collect();
         assert_eq!(sizes, [3, 300, 5, 3, 300, 5, 3, 3, 3, 5]);
         assert!(got[1].1.iter().all(|&x| x == 2));
+    }
+
+    #[test]
+    fn seeks_to_a_cluster() {
+        let track = [
+            element(TRACK_NUMBER, &[1]),
+            element(TRACK_TYPE, &[2]),
+            element(CODEC_ID, b"A_MPEG/L3"),
+            element(AUDIO, &element(CHANNELS, &[2])),
+        ]
+        .concat();
+        let cluster = |time: u8| {
+            let blocks = [
+                element(TIMESTAMP, &[time]),
+                element(SIMPLE_BLOCK, &block(0, &[], &[&[time]])),
+            ];
+            element(CLUSTER, &blocks.concat())
+        };
+        let segment = [
+            element(INFO, &element(TIMESTAMP_SCALE, &[0x0F, 0x42, 0x40])),
+            element(TRACKS, &element(TRACK_ENTRY, &track)),
+            cluster(0),
+            cluster(10),
+            cluster(20),
+        ]
+        .concat();
+        let data = [
+            element(EBML, &element(DOC_TYPE, b"matroska")),
+            element(SEGMENT, &segment),
+        ]
+        .concat();
+        let mut demuxer = Demuxer::open(&data[..]).unwrap();
+        demuxer.seek(15_000).unwrap();
+        let next = |d: &mut Demuxer<&[u8]>| d.next_packet().unwrap().map(|p| p.data[0]);
+        assert_eq!(next(&mut demuxer), Some(10));
+        assert_eq!(next(&mut demuxer), Some(20));
+        assert_eq!(next(&mut demuxer), None);
+        demuxer.seek(0).unwrap();
+        assert_eq!(next(&mut demuxer), Some(0));
     }
 }

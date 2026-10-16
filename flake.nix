@@ -24,7 +24,10 @@
             pkgs.clippy
             pkgs.rustfmt
             pkgs.ffmpeg
+            pkgs.nodejs
+            pkgs.wasm-bindgen-cli_0_2_126
           ];
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER = "${pkgs.lld}/bin/wasm-ld";
         };
       }
     );
