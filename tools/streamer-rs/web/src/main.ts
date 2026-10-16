@@ -1,7 +1,7 @@
 import "./style.css";
 
 import { DeviceHost, PRODUCT_ID, VENDOR_ID } from "./device";
-import { icon } from "./icons";
+import { type IconName, icon } from "./icons";
 import type {
   DeviceCommand,
   DeviceInfo,
@@ -591,6 +591,7 @@ ui.scAction.onclick = () => {
 };
 
 let items: Item[] = [];
+const rows = new Map<number, HTMLLIElement>();
 let nextId = 1;
 let current: number | null = null;
 let shuffled: number[] = [];
@@ -694,27 +695,37 @@ function remove(id: number) {
     items = items.filter((item) => item.id !== id);
     shuffled = shuffled.filter((s) => s !== id);
   }
+  rows.delete(id);
   render();
 }
 
 function row(item: Item): HTMLLIElement {
+  let li = rows.get(item.id);
+  if (!li) {
+    li = newRow(item);
+    rows.set(item.id, li);
+  }
+  li.classList.toggle("current", item.id === current);
+  const thumb = li.querySelector(".pl-thumb")!;
+  if (item.thumbnail && !thumb.querySelector("img")) thumb.innerHTML = `<img src="${item.thumbnail}" alt="" />`;
+  const meta = li.querySelector<HTMLSpanElement>(".pl-meta")!;
+  meta.textContent = item.error ?? (item.duration ? clock(item.duration) : "--:--");
+  meta.classList.toggle("error", item.error !== null);
+  return li;
+}
+
+function newRow(item: Item): HTMLLIElement {
   const li = document.createElement("li");
   li.className = "pl-row";
-  li.classList.toggle("current", item.id === current);
   li.draggable = true;
   const select = document.createElement("button");
   select.type = "button";
   select.className = "pl-select";
   select.setAttribute("aria-label", `Play ${item.file.name}`);
   select.innerHTML = `
-    <span class="pl-thumb" style="background: ${THUMBS[item.id % THUMBS.length]}">${
-      item.thumbnail ? `<img src="${item.thumbnail}" alt="" />` : icon("movie", 20)
-    }</span>
+    <span class="pl-thumb" style="background: ${THUMBS[item.id % THUMBS.length]}">${icon("movie", 20)}</span>
     <span class="pl-text"><span class="pl-name"></span><span class="pl-meta"></span></span>`;
   select.querySelector(".pl-name")!.textContent = item.file.name;
-  const meta = select.querySelector<HTMLSpanElement>(".pl-meta")!;
-  meta.textContent = item.error ?? (item.duration ? clock(item.duration) : "--:--");
-  meta.classList.toggle("error", item.error !== null);
   select.onclick = () => playItem(item.id);
   const close = document.createElement("button");
   close.type = "button";
@@ -740,25 +751,39 @@ function row(item: Item): HTMLLIElement {
   return li;
 }
 
+function setIcon(button: HTMLElement, name: IconName, size: number) {
+  if (button.dataset.icon === name) return;
+  button.dataset.icon = name;
+  button.innerHTML = icon(name, size);
+}
+
 function render() {
-  ui.queue.replaceChildren(...items.map(row));
+  const children = items.map(row);
+  const shown = ui.queue.children;
+  if (children.length !== shown.length || children.some((child, i) => child !== shown[i])) {
+    ui.queue.replaceChildren(...children);
+  }
   ui.count.textContent = `${items.length} ${items.length === 1 ? "video" : "videos"}`;
   ui.nowName.textContent = items.find((i) => i.id === current)?.file.name ?? "—";
-  ui.play.innerHTML = playing ? icon("pause", 28) : icon("play", 28);
+  setIcon(ui.play, playing ? "pause" : "play", 28);
   ui.play.classList.toggle("paused", !playing);
   ui.play.setAttribute("aria-label", playing ? "Pause" : "Play");
   ui.shuffle.classList.toggle("on", shuffle);
   ui.shuffle.setAttribute("aria-pressed", String(shuffle));
-  ui.repeat.innerHTML = icon(repeat === "one" ? "repeatOnce" : "repeat", 22);
+  setIcon(ui.repeat, repeat === "one" ? "repeatOnce" : "repeat", 22);
   ui.repeat.classList.toggle("on", repeat !== "off");
   ui.repeat.setAttribute("aria-label", { off: "Repeat: off", all: "Repeat: all", one: "Repeat: one" }[repeat]);
   const empty = items.length === 0;
   for (const button of [ui.prev, ui.play, ui.next]) button.disabled = empty;
   ui.seek.disabled = current === null || !duration;
   ui.seek.max = String(duration ?? 0);
+  ui.duration.textContent = clock(duration ?? 0);
+  renderPosition();
+}
+
+function renderPosition() {
   if (!seeking) ui.seek.value = String(position / 1e6);
   ui.time.textContent = clock(seeking ? Number(ui.seek.value) : position / 1e6);
-  ui.duration.textContent = clock(duration ?? 0);
 }
 
 playerWorker.onmessage = (event: MessageEvent<PlayerStatus>) => {
@@ -777,7 +802,8 @@ playerWorker.onmessage = (event: MessageEvent<PlayerStatus>) => {
     }
     case "position":
       position = status.us;
-      break;
+      renderPosition();
+      return;
     case "ended":
       if (repeat === "one" && current !== null) playItem(current);
       else advance();
