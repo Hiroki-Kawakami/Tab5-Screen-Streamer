@@ -119,6 +119,24 @@ impl Plane {
     }
 }
 
+/// Plane `index` of `source` from its offset, and its stride.
+fn plane<'a>(
+    source: &Source<'a>,
+    index: usize,
+    width: usize,
+    height: usize,
+    step: usize,
+) -> Result<(&'a [u8], usize)> {
+    let Some(&(offset, stride)) = source.planes.get(index) else {
+        bail!("missing plane {index}");
+    };
+    let needed = offset + stride * (height.max(1) - 1) + width * step;
+    if source.data.len() < needed {
+        bail!("plane {index} is truncated");
+    }
+    Ok((&source.data[offset..], stride))
+}
+
 fn read(
     source: &Source,
     index: usize,
@@ -127,16 +145,10 @@ fn read(
     step: usize,
     phase: usize,
 ) -> Result<Plane> {
-    let Some(&(offset, stride)) = source.planes.get(index) else {
-        bail!("missing plane {index}");
-    };
-    let needed = offset + stride * (height.max(1) - 1) + width * step;
-    if source.data.len() < needed {
-        bail!("plane {index} is truncated");
-    }
+    let (data, stride) = plane(source, index, width, height, step)?;
     let mut out = Plane::new(width, height);
     for (y, dst) in out.data.chunks_exact_mut(width).enumerate() {
-        let row = &source.data[offset + y * stride..];
+        let row = &data[y * stride..];
         if step == 1 {
             dst.copy_from_slice(&row[..width]);
         } else {
@@ -182,10 +194,32 @@ fn halve(plane: &Plane, horizontal: bool, vertical: bool) -> Plane {
     out
 }
 
-pub fn to_i420(source: &Source) -> Result<[Plane; 3]> {
+/// Plane `index` of `source`, read straight into the resampler when it is
+/// scaled.
+fn scaled(
+    source: &Source,
+    index: usize,
+    (width, height): (usize, usize),
+    (dw, dh): (usize, usize),
+    cache: &mut Option<Resampler>,
+) -> Result<Plane> {
+    if (dw, dh) == (width, height) {
+        return read(source, index, width, height, 1, 0);
+    }
+    let (data, stride) = plane(source, index, width, height, 1)?;
+    let fresh = |r: &Resampler| r.src != (width, height) || r.dst != (dw, dh);
+    if cache.as_ref().is_none_or(fresh) {
+        *cache = Some(Resampler::new(width, height, dw, dh));
+    }
+    let mut out = Plane::new(dw, dh);
+    let resampler = cache.as_mut().expect("resampler was just made");
+    resampler.plane(data, stride, &mut out.data);
+    Ok(out)
+}
+
+fn chroma_planes(source: &Source) -> Result<[Plane; 2]> {
     let (w, h) = (source.width, source.height);
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-    let y = read(source, 0, w, h, 1, 0)?;
     let (u, v) = match source.layout {
         Layout::I420 => (
             read(source, 1, cw, ch, 1, 0)?,
@@ -204,6 +238,12 @@ pub fn to_i420(source: &Source) -> Result<[Plane; 3]> {
             halve(&read(source, 2, w, h, 1, 0)?, true, true),
         ),
     };
+    Ok([u, v])
+}
+
+pub fn to_i420(source: &Source) -> Result<[Plane; 3]> {
+    let y = read(source, 0, source.width, source.height, 1, 0)?;
+    let [u, v] = chroma_planes(source)?;
     Ok([y, u, v])
 }
 
@@ -332,7 +372,6 @@ impl Converter {
 
     pub fn convert(&mut self, source: &Source, color: SourceColor) -> Result<Vec<u8>> {
         let g = self.geometry;
-        let [y, u, v] = to_i420(source)?;
         let (sw, sh) = g.scaled;
         let (dw, dh) = if g.source_rotation % 180 == 90 {
             (sh, sw)
@@ -345,19 +384,31 @@ impl Converter {
         }
         let (x0, y0) = (((sw - w) / 2) & !1, ((sh - h) / 2) & !1);
         let back = (360 - g.output_rotation % 360) % 360;
-        let luma = y
-            .resize(dw, dh, &mut self.luma)
+        let size = (source.width, source.height);
+        let luma = scaled(source, 0, size, (dw, dh), &mut self.luma)?
             .turned(g.source_rotation)
             .crop(x0, y0, w, h)
             .turned(back);
-        let chroma = |p: Plane, cache: &mut Option<Resampler>| {
-            p.resize(dw.div_ceil(2), dh.div_ceil(2), cache)
-                .turned(g.source_rotation)
+        let chroma_size = (dw.div_ceil(2), dh.div_ceil(2));
+        let finish = |p: Plane| {
+            p.turned(g.source_rotation)
                 .crop(x0 / 2, y0 / 2, w.div_ceil(2), h.div_ceil(2))
                 .turned(back)
         };
-        let u = chroma(u, &mut self.chroma);
-        let v = chroma(v, &mut self.chroma);
+        let (u, v) = if source.layout == Layout::I420 {
+            let size = (size.0.div_ceil(2), size.1.div_ceil(2));
+            (
+                scaled(source, 1, size, chroma_size, &mut self.chroma)?,
+                scaled(source, 2, size, chroma_size, &mut self.chroma)?,
+            )
+        } else {
+            let [u, v] = chroma_planes(source)?;
+            (
+                u.resize(chroma_size.0, chroma_size.1, &mut self.chroma),
+                v.resize(chroma_size.0, chroma_size.1, &mut self.chroma),
+            )
+        };
+        let (u, v) = (finish(u), finish(v));
         if (luma.width, luma.height) != g.stored {
             bail!(
                 "converted picture is {}x{}, expected {}x{}",
@@ -532,6 +583,27 @@ mod tests {
         };
         let [_, u, _] = to_i420(&i444).unwrap();
         assert_eq!(u.data, vec![35, 55]);
+    }
+
+    #[test]
+    fn scales_strided_planes() {
+        let (w, h, stride) = (16, 8, 20);
+        let data: Vec<u8> = (0..stride * h + 2 * 10 * h / 2)
+            .map(|i| (i * 7 % 251) as u8)
+            .collect();
+        let source = Source {
+            layout: Layout::I420,
+            width: w,
+            height: h,
+            data: &data,
+            planes: &[(0, stride), (stride * h, 10), (stride * h + 10 * h / 2, 10)],
+        };
+        let [y, u, _] = to_i420(&source).unwrap();
+        let mut cache = None;
+        let direct = scaled(&source, 0, (w, h), (6, 4), &mut cache).unwrap();
+        assert_eq!(direct, y.resize(6, 4, &mut None));
+        let direct = scaled(&source, 1, (8, 4), (3, 2), &mut cache).unwrap();
+        assert_eq!(direct, u.resize(3, 2, &mut None));
     }
 
     #[test]

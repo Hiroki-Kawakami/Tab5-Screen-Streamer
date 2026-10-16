@@ -1,10 +1,11 @@
 // Frames from the screen capture or the player, scaled, encoded and laid out
 // for the device. Only the latest frame waits to be sent; older ones are
-// dropped.
+// dropped. The next frame is scaled while the last one is encoded.
 
 import { drawFrame } from "./draw";
+import { Scaler } from "./scaler";
 import init, { Video } from "./wasm/streamer.js";
-import type { FrameMessage, FromVideo, ToVideo, VideoCommand, VideoStatus } from "./messages";
+import type { BandJob, FrameMessage, FromVideo, ToVideo, VideoCommand, VideoStatus } from "./messages";
 
 const YUV_FORMATS = new Set(["I420", "I420A", "NV12", "I422", "I422A", "I444", "I444A"]);
 /** Frames handed to the device worker and not yet sent. */
@@ -17,9 +18,17 @@ let preview: OffscreenCanvasRenderingContext2D | null = null;
 let device: MessagePort | null = null;
 let pending: FrameMessage | null = null;
 let inflight = 0;
-let busy = false;
+let ingesting = false;
+let encoding = false;
+/** A frame was taken since the last one was sent. */
+let fresh = false;
+let resets = 0;
 let timer = 0;
+let scaler = Scaler.create();
 let stats = { start: performance.now(), frames: 0, bytes: 0, quality: 0 };
+const encoders: Worker[] = [];
+
+type Prepared = Omit<BandJob, "row" | "rows"> & { bands: Uint32Array };
 
 const status = (message: VideoStatus) => postMessage(message);
 
@@ -27,30 +36,81 @@ function matrixCode(space: VideoColorSpace): number {
   return space.matrix === "bt709" ? 1 : 6;
 }
 
-async function take(message: FrameMessage) {
+async function copy(frame: VideoFrame, size: number, options: VideoFrameCopyToOptions): Promise<PlaneLayout[]> {
+  for (;;) {
+    const data = video!.input(size);
+    const layout = await frame.copyTo(data, options);
+    // The view is detached, and nothing was copied, if the memory grew meanwhile.
+    if (data.byteLength > 0) return layout;
+  }
+}
+
+async function scaled(frame: VideoFrame, [width, height]: Uint32Array): Promise<boolean> {
+  try {
+    await scaler!.scale(frame, width, height, (size) => video!.input(size));
+    return true;
+  } catch (err) {
+    scaler = null;
+    status({ type: "error", message: `GPU scaling failed, scaling on the CPU: ${err instanceof Error ? err.message : err}` });
+    return false;
+  }
+}
+
+/** Whether `message` became the latest frame, rather than a reset coming
+ * first. */
+async function take(message: FrameMessage): Promise<boolean> {
   const { frame, display, turn, color } = message;
+  const epoch = resets;
   try {
     const rect = frame.visibleRect!;
-    if (frame.format && YUV_FORMATS.has(frame.format)) {
-      const data = new Uint8Array(frame.allocationSize({ rect }));
-      const layout = await frame.copyTo(data, { rect });
+    const size = scaler && video!.size(...display, turn);
+    if (size && (await scaled(frame, size))) {
+      if (epoch !== resets) return false;
+      const [w, h] = size;
+      const planes = new Uint32Array([0, w, w * h, w / 2, (w * h * 5) / 4, w / 2]);
+      video!.frameYuv("I420", w, h, planes, 6, true, ...display, turn);
+    } else if (frame.format && YUV_FORMATS.has(frame.format)) {
+      const layout = await copy(frame, frame.allocationSize({ rect }), { rect });
+      if (epoch !== resets) return false;
       const planes = new Uint32Array(layout.flatMap((p) => [p.offset, p.stride]));
       const matrix = color?.matrix ?? matrixCode(frame.colorSpace);
       const fullRange = color?.fullRange ?? frame.colorSpace.fullRange ?? false;
-      video!.frameYuv(frame.format, rect.width, rect.height, data, planes, matrix, fullRange, ...display, turn);
+      video!.frameYuv(frame.format, rect.width, rect.height, planes, matrix, fullRange, ...display, turn);
     } else {
       const options = { rect, format: "BGRX", colorSpace: "srgb" } as VideoFrameCopyToOptions;
-      const data = new Uint8Array(rect.width * rect.height * 4);
-      await frame.copyTo(data, options);
-      video!.frameBgrx(rect.width, rect.height, data, ...display, turn);
+      await copy(frame, rect.width * rect.height * 4, options);
+      if (epoch !== resets) return false;
+      video!.frameBgrx(rect.width, rect.height, ...display, turn);
     }
+    return true;
   } finally {
     frame.close();
   }
 }
 
-function send(now: number) {
-  const transfers = video!.encode(now) as Uint8Array<ArrayBuffer>[];
+function encode({ bands, picture, ...rest }: Prepared): Promise<Uint8Array[]> {
+  const count = bands.length / 2;
+  while (encoders.length < count) {
+    encoders.push(new Worker(new URL("./encoder.worker.ts", import.meta.url), { type: "module" }));
+  }
+  return Promise.all(
+    Array.from({ length: count }, (_, i) => {
+      const encoder = encoders[i];
+      return new Promise<Uint8Array>((resolve, reject) => {
+        encoder.onmessage = (e: MessageEvent<Uint8Array>) => resolve(e.data);
+        encoder.onerror = (e) => reject(new Error(`JPEG encoder: ${e.message}`));
+        const job: BandJob = { ...rest, picture, row: bands[2 * i], rows: bands[2 * i + 1] };
+        encoder.postMessage(job, i === count - 1 ? [picture.buffer] : []);
+      });
+    }),
+  );
+}
+
+async function send(now: number) {
+  const prepared = video!.prepare(now) as Prepared | null;
+  if (!prepared) return;
+  const jpegs = await encode(prepared);
+  const transfers = video!.finish(jpegs) as Uint8Array<ArrayBuffer>[];
   if (transfers.length === 0) return;
   const buffers = transfers.map((t) => t.buffer);
   inflight += 1;
@@ -70,34 +130,50 @@ function report(now: number) {
   stats = { start: now, frames: 0, bytes: 0, quality: 0 };
 }
 
-async function pump() {
-  if (busy || !video) return;
+function pump() {
+  if (!video) return;
+  if (pending && !ingesting) void ingest();
+  if (encoding) return;
   clearTimeout(timer);
   const now = performance.now();
   report(now);
-  if (inflight >= INFLIGHT || !(pending || video.redraw())) return;
+  if (inflight >= INFLIGHT || !(fresh || video.redraw())) return;
   if (!video.ready(now)) {
     const wait = video.untilDue(now);
     if (wait > 0) timer = setTimeout(pump, wait);
     return;
   }
-  busy = true;
+  void deliver();
+}
+
+async function ingest() {
+  ingesting = true;
+  const message = pending!;
+  pending = null;
   try {
-    const before = video.describe();
-    if (pending) {
-      const message = pending;
-      pending = null;
-      await take(message);
-    }
-    const after = video.describe();
+    const before = video!.describe();
+    if (await take(message)) fresh = true;
+    const after = video!.describe();
     if (after && after !== before) status({ type: "layout", text: after });
-    send(performance.now());
   } catch (err) {
     status({ type: "error", message: err instanceof Error ? err.message : String(err) });
   } finally {
-    busy = false;
+    ingesting = false;
   }
-  void pump();
+  pump();
+}
+
+async function deliver() {
+  encoding = true;
+  fresh = false;
+  try {
+    await send(performance.now());
+  } catch (err) {
+    status({ type: "error", message: err instanceof Error ? err.message : String(err) });
+  } finally {
+    encoding = false;
+  }
+  pump();
 }
 
 function fromDevice(message: ToVideo) {
@@ -106,7 +182,7 @@ function fromDevice(message: ToVideo) {
   } catch (err) {
     status({ type: "error", message: err instanceof Error ? err.message : String(err) });
   }
-  void pump();
+  pump();
 }
 
 function apply(message: ToVideo) {
@@ -138,7 +214,7 @@ function frame(message: FrameMessage) {
   draw(message);
   pending?.frame.close();
   pending = message;
-  void pump();
+  pump();
 }
 
 self.onmessage = async (event: MessageEvent<VideoCommand>) => {
@@ -158,6 +234,8 @@ self.onmessage = async (event: MessageEvent<VideoCommand>) => {
     case "reset":
       pending?.frame.close();
       pending = null;
+      fresh = false;
+      resets += 1;
       video?.reset();
       preview?.clearRect(0, 0, preview.canvas.width, preview.canvas.height);
       break;

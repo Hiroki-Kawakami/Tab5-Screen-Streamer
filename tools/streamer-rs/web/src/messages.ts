@@ -84,6 +84,23 @@ export type VideoCommand =
   | FrameMessage
   | { type: "reset" };
 
+/** Video worker to an encoder worker: rows [row, row + rows) of a frame's
+ * canvas to encode as a JPEG, answered with its bytes. */
+export interface BandJob {
+  picture: Uint8Array;
+  width: number;
+  height: number;
+  yuv: boolean;
+  rotation: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  originX: number;
+  originY: number;
+  quality: number;
+  row: number;
+  rows: number;
+}
+
 export type VideoStatus =
   | { type: "stats"; fps: number; rate: number; quality: number }
   | { type: "layout"; text: string }

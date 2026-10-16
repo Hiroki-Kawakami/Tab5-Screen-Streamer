@@ -11,7 +11,7 @@ use wasm_bindgen::JsValue;
 pub use audio::AudioConverter;
 pub use media::{Media, Packet};
 pub use protocol::*;
-pub use video::Video;
+pub use video::{Video, encode_band};
 
 fn object(entries: &[(&str, JsValue)]) -> JsValue {
     let object = Object::new();

@@ -1,10 +1,10 @@
 //! Frames to the device's video endpoint, for the video worker. Times are
 //! milliseconds from `performance.now()`.
 
-use js_sys::{Array, Uint8Array};
+use js_sys::{Array, Uint8Array, Uint32Array};
 use streamer_core::color::Matrix;
-use streamer_core::draw::Encoded;
-use streamer_core::jpeg::{Image, Pixels};
+use streamer_core::draw::{Band, Encoded};
+use streamer_core::jpeg::{self, Image, Pixels, Placement};
 use streamer_core::layout::Layout;
 use streamer_core::present::{self, LayoutKey, Presenter, Quality};
 use streamer_core::protocol::{self, Encoding, Event, Info};
@@ -33,6 +33,13 @@ struct Frame {
     turn: u32,
 }
 
+/// A frame whose bands are being encoded.
+struct Pending {
+    generation: u32,
+    now: u64,
+    bands: Vec<(u32, u32)>,
+}
+
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct Video {
@@ -40,6 +47,11 @@ pub struct Video {
     presenter: Option<Presenter>,
     seq: u32,
     frame: Option<Frame>,
+    /// Where the next frame's pixels are copied; the data of the frame before.
+    input: Vec<u8>,
+    /// Changes whenever bands being encoded no longer fit the presenter.
+    generation: u32,
+    pending: Option<Pending>,
     /// `frame` at the layout's frame size: I420 or BGRX.
     picture: Option<Vec<u8>>,
     built: Option<(LayoutKey, (u32, u32))>,
@@ -50,6 +62,66 @@ pub struct Video {
 
 fn us(ms: f64) -> u64 {
     (ms * 1000.0).max(0.0) as u64
+}
+
+fn image(picture: &[u8], width: usize, height: usize, yuv: bool) -> Image<'_> {
+    let pixels = match yuv {
+        true => {
+            let (y, chroma) = picture.split_at(width * height);
+            let (cb, cr) = chroma.split_at(width * height / 4);
+            Pixels::I420 {
+                y,
+                y_stride: width,
+                cb,
+                cr,
+                c_stride: width / 2,
+            }
+        }
+        false => Pixels::Bgrx {
+            data: picture,
+            stride: width * 4,
+        },
+    };
+    Image {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// Rows [row, row + rows) of the canvas of a frame from `Video::prepare`, as
+/// a JPEG.
+#[wasm_bindgen(js_name = encodeBand)]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_band(
+    picture: &[u8],
+    width: usize,
+    height: usize,
+    yuv: bool,
+    rotation: u32,
+    canvas_width: usize,
+    canvas_height: usize,
+    origin_x: usize,
+    origin_y: usize,
+    quality: u8,
+    row: usize,
+    rows: usize,
+) -> Vec<u8> {
+    let placement = Placement {
+        rotation,
+        canvas: (canvas_width, canvas_height),
+        origin: (origin_x, origin_y),
+    };
+    let mut out = Vec::new();
+    let image = image(picture, width, height, yuv);
+    jpeg::encode(&image, placement, row..row + rows, quality, &mut out);
+    out
+}
+
+fn direct(info: &Info, display: (u32, u32), rotation: u32) -> Result<Layout, JsError> {
+    let panel = (info.panel_width as u32, info.panel_height as u32);
+    let align = info.direct_align.max(1) as u32;
+    Layout::direct(display, rotation, panel, align, true).map_err(|e| JsError::new(&e))
 }
 
 fn matrix(code: u8) -> Matrix {
@@ -77,6 +149,7 @@ impl Video {
             })
             .ok_or_else(|| JsError::new("no INFO in the transfer"))?;
         self.seq = 0;
+        self.generation += 1;
         if let Some(presenter) = &mut self.presenter {
             presenter.connected(info.clone());
         }
@@ -88,6 +161,7 @@ impl Video {
         self.info = None;
         self.presenter = None;
         self.built = None;
+        self.generation += 1;
     }
 
     /// Applies the events of a control IN transfer.
@@ -105,8 +179,31 @@ impl Video {
         }
     }
 
-    /// Takes a frame in a planar YUV `format` of `VideoFrame`; `planes` are
-    /// its offsets and strides.
+    /// The size a frame shown at `display` after `turn` is scaled to, or none
+    /// before a session opens.
+    pub fn size(
+        &self,
+        display_width: u32,
+        display_height: u32,
+        turn: u32,
+    ) -> Result<Option<Vec<u32>>, JsError> {
+        let Some(info) = self.session_info() else {
+            return Ok(None);
+        };
+        let rotation = (info.orientation as u32 + turn) % 4;
+        let (w, h) = direct(info, (display_width, display_height), rotation)?.frame();
+        Ok(Some(vec![w, h]))
+    }
+
+    /// `size` bytes of wasm memory to copy the next frame's pixels into. The
+    /// view is detached if the memory grows before the frame is taken.
+    pub fn input(&mut self, size: usize) -> Uint8Array {
+        self.input.resize(size, 0);
+        unsafe { Uint8Array::view(&self.input) }
+    }
+
+    /// Takes a frame in a planar YUV `format` of `VideoFrame` from `input`;
+    /// `planes` are its offsets and strides.
     #[wasm_bindgen(js_name = frameYuv)]
     #[allow(clippy::too_many_arguments)]
     pub fn frame_yuv(
@@ -114,7 +211,6 @@ impl Video {
         format: &str,
         width: usize,
         height: usize,
-        data: Vec<u8>,
         planes: &[u32],
         matrix_code: u8,
         full_range: bool,
@@ -137,6 +233,7 @@ impl Video {
             planes,
             color,
         };
+        let data = std::mem::take(&mut self.input);
         self.take(Frame {
             width,
             height,
@@ -147,17 +244,17 @@ impl Video {
         })
     }
 
-    /// Takes a frame of B, G, R and one ignored byte per pixel.
+    /// Takes a frame of B, G, R and one ignored byte per pixel from `input`.
     #[wasm_bindgen(js_name = frameBgrx)]
     pub fn frame_bgrx(
         &mut self,
         width: usize,
         height: usize,
-        data: Vec<u8>,
         display_width: u32,
         display_height: u32,
         turn: u32,
     ) -> Result<(), JsError> {
+        let data = std::mem::take(&mut self.input);
         self.take(Frame {
             width,
             height,
@@ -182,6 +279,7 @@ impl Video {
     pub fn reset(&mut self) {
         self.frame = None;
         self.picture = None;
+        self.generation += 1;
     }
 
     /// Milliseconds until a frame stays within max_fps.
@@ -207,45 +305,59 @@ impl Video {
         self.quality
     }
 
-    /// The transfers drawing the latest frame, as `Uint8Array`s.
-    pub fn encode(&mut self, now: f64) -> Result<Array, JsError> {
+    /// Starts sending the latest frame: the picture and placement to encode
+    /// with `encodeBand` for each pair of `bands`, or null.
+    pub fn prepare(&mut self, now: f64) -> Result<JsValue, JsError> {
         let now = us(now);
         self.convert()?;
         let (Some(presenter), Some(frame), Some(picture)) =
             (&mut self.presenter, &self.frame, &self.picture)
         else {
-            return Ok(Array::new());
+            return Ok(JsValue::NULL);
         };
         let (w, h) = presenter.layout.frame();
-        let (w, h) = (w as usize, h as usize);
-        let pixels = match frame.kind {
-            Kind::Yuv { .. } => {
-                let (y, chroma) = picture.split_at(w * h);
-                let (cb, cr) = chroma.split_at(w * h / 4);
-                Pixels::I420 {
-                    y,
-                    y_stride: w,
-                    cb,
-                    cr,
-                    c_stride: w / 2,
-                }
-            }
-            Kind::Bgrx => Pixels::Bgrx {
-                data: picture,
-                stride: w * 4,
-            },
-        };
-        let image = Image {
-            width: w,
-            height: h,
-            pixels,
-        };
         presenter.start_frame(now);
         self.quality = presenter.quality(now);
-        let bands = present::jpeg_bands(&presenter.layout, &presenter.info)
+        let placement = presenter.layout.placement(presenter.info.panel_width as u32);
+        let bands = present::jpeg_bands(&presenter.layout, &presenter.info);
+        let rows: Vec<u32> = bands.iter().flat_map(|&(row, rows)| [row, rows]).collect();
+        self.pending = Some(Pending {
+            generation: self.generation,
+            now,
+            bands,
+        });
+        Ok(crate::object(&[
+            ("picture", Uint8Array::from(&picture[..]).into()),
+            ("width", w.into()),
+            ("height", h.into()),
+            ("yuv", matches!(frame.kind, Kind::Yuv { .. }).into()),
+            ("rotation", placement.rotation.into()),
+            ("canvasWidth", (placement.canvas.0 as u32).into()),
+            ("canvasHeight", (placement.canvas.1 as u32).into()),
+            ("originX", (placement.origin.0 as u32).into()),
+            ("originY", (placement.origin.1 as u32).into()),
+            ("quality", self.quality.into()),
+            ("bands", Uint32Array::from(&rows[..]).into()),
+        ]))
+    }
+
+    /// The transfers drawing the prepared frame from its bands' JPEGs, as
+    /// `Uint8Array`s; none if the session or layout changed meanwhile.
+    pub fn finish(&mut self, jpegs: Array) -> Result<Array, JsError> {
+        let (Some(presenter), Some(pending)) = (&mut self.presenter, self.pending.take()) else {
+            return Ok(Array::new());
+        };
+        if pending.generation != self.generation {
+            return Ok(Array::new());
+        }
+        let bands = pending
+            .bands
             .into_iter()
-            .map(|rows| {
-                present::encode_band(&image, &presenter.layout, &presenter.info, self.quality, rows)
+            .zip(jpegs.iter())
+            .map(|((row, rows), jpeg)| Band {
+                row,
+                rows,
+                jpeg: Uint8Array::new(&jpeg).to_vec(),
             })
             .collect();
         let seq = &mut self.seq;
@@ -254,7 +366,7 @@ impl Video {
             *seq
         };
         let transfers = presenter
-            .frame(Encoded::Jpeg(bands), now, &mut next)
+            .frame(Encoded::Jpeg(bands), pending.now, &mut next)
             .map_err(|e| JsError::new(&e))?;
         Ok(transfers
             .iter()
@@ -265,21 +377,24 @@ impl Video {
 
 impl Video {
     fn take(&mut self, frame: Frame) -> Result<(), JsError> {
-        self.frame = Some(frame);
+        if let Some(old) = self.frame.replace(frame) {
+            self.input = old.data;
+        }
         self.picture = None;
         self.relayout()
     }
 
+    fn session_info(&self) -> Option<&Info> {
+        let info = self.info.as_ref()?;
+        Some(self.presenter.as_ref().map_or(info, |presenter| &presenter.info))
+    }
+
     /// Lays the latest frame out for the device, once both are known.
     fn relayout(&mut self) -> Result<(), JsError> {
-        let (Some(info), Some(frame)) = (&self.info, &self.frame) else {
+        let (Some(info), Some(frame)) = (self.session_info(), &self.frame) else {
             return Ok(());
         };
-        let info = self
-            .presenter
-            .as_ref()
-            .map_or(info, |presenter| &presenter.info)
-            .clone();
+        let info = info.clone();
         let turn = frame.turn;
         let display = frame.display;
         let rotation = (info.orientation as u32 + turn) % 4;
@@ -287,10 +402,7 @@ impl Video {
         if self.built == Some(key) {
             return Ok(());
         }
-        let panel = (info.panel_width as u32, info.panel_height as u32);
-        let align = info.direct_align.max(1) as u32;
-        let layout = Layout::direct(display, rotation, panel, align, true)
-            .map_err(|e| JsError::new(&e))?;
+        let layout = direct(&info, display, rotation)?;
         match &mut self.presenter {
             Some(presenter) => {
                 presenter.layout = layout;
@@ -308,6 +420,7 @@ impl Video {
             }
         }
         self.built = Some(key);
+        self.generation += 1;
         self.picture = None;
         Ok(())
     }
