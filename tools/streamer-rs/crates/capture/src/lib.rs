@@ -87,8 +87,8 @@ impl Capture {
         Ok(Capture { platform })
     }
 
-    /// Why the OS has stopped the capture, once it has; for instance when the
-    /// display is reconfigured.
+    /// Why the capture has to be restarted, once it has; for instance when the
+    /// OS stops it as the display is reconfigured.
     pub fn stopped(&self) -> Option<String> {
         self.platform.stopped()
     }

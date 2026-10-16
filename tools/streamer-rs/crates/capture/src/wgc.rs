@@ -2,9 +2,13 @@
 //! processor.
 
 use std::mem::ManuallyDrop;
+use std::sync::Once;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
+use std::thread;
 use std::time::Duration;
 
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
     D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -21,7 +25,18 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
-use windows::core::Interface;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Power::{POWERBROADCAST_SETTING, RegisterPowerSettingNotification};
+use windows::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
+};
+use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DispatchMessageW, GetMessageW,
+    HWND_MESSAGE, MSG, PBT_POWERSETTINGCHANGE, RegisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_UNLOCK,
+};
+use windows::core::{Interface, w};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as CapturedFrame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
@@ -77,8 +92,90 @@ pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
         })
 }
 
+/// GUID_CONSOLE_DISPLAY_STATE: 0 off, 1 on, 2 dimmed.
+static DISPLAY_STATE: AtomicU32 = AtomicU32::new(1);
+static UNLOCKS: AtomicU32 = AtomicU32::new(0);
+static WATCH_SESSION: Once = Once::new();
+
+fn watch_session() {
+    WATCH_SESSION.call_once(|| {
+        thread::spawn(|| {
+            if let Err(e) = receive_session_events() {
+                eprintln!("session events: {e}");
+            }
+        });
+    });
+}
+
+/// Windows reports one state for all displays.
 pub fn asleep(_id: u64) -> bool {
-    false
+    watch_session();
+    DISPLAY_STATE.load(Ordering::Relaxed) == 0
+}
+
+/// Receives display state and session changes on a message-only window, the
+/// current display state first; returns only on failure.
+fn receive_session_events() -> windows::core::Result<()> {
+    let class = w!("StreamerSessionEvents");
+    let instance = unsafe { GetModuleHandleW(None) }?;
+    let window_class = WNDCLASSW {
+        lpfnWndProc: Some(session_events_proc),
+        hInstance: instance.into(),
+        lpszClassName: class,
+        ..Default::default()
+    };
+    if unsafe { RegisterClassW(&window_class) } == 0 {
+        return Err(windows::core::Error::from_thread());
+    }
+    let window = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            class,
+            None,
+            WINDOW_STYLE::default(),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            Some(instance.into()),
+            None,
+        )
+    }?;
+    unsafe {
+        RegisterPowerSettingNotification(
+            HANDLE(window.0),
+            &GUID_CONSOLE_DISPLAY_STATE,
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        )
+    }?;
+    unsafe { WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) }?;
+    let mut message = MSG::default();
+    while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
+        unsafe { DispatchMessageW(&message) };
+    }
+    Ok(())
+}
+
+extern "system" fn session_events_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_POWERBROADCAST && wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
+        let setting = unsafe { &*(lparam.0 as *const POWERBROADCAST_SETTING) };
+        if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE && setting.DataLength >= 4 {
+            let state = unsafe { setting.Data.as_ptr().cast::<u32>().read_unaligned() };
+            DISPLAY_STATE.store(state, Ordering::Relaxed);
+        }
+        return LRESULT(1);
+    }
+    if message == WM_WTSSESSION_CHANGE && wparam.0 as u32 == WTS_SESSION_UNLOCK {
+        UNLOCKS.fetch_add(1, Ordering::Relaxed);
+    }
+    unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
 
 pub fn mirror_primary(_id: u64) -> Option<u64> {
@@ -334,6 +431,9 @@ impl GraphicsCaptureApiHandler for Handler {
 
 pub struct Capture {
     control: Option<CaptureControl<Handler, Error>>,
+    /// A capture started on the lock screen yields only black frames once the
+    /// session is unlocked, so every unlock after the start restarts it.
+    unlocks: u32,
 }
 
 impl Capture {
@@ -343,6 +443,8 @@ impl Capture {
         max_fps: u32,
         frames: SyncSender<Frame>,
     ) -> Result<Self, String> {
+        watch_session();
+        let unlocks = UNLOCKS.load(Ordering::Relaxed);
         let monitor = Monitor::from_raw_hmonitor(id as *mut std::ffi::c_void);
         let interval = Duration::from_secs_f64(1.0 / max_fps.max(1) as f64);
         let settings = Settings::new(
@@ -359,14 +461,17 @@ impl Capture {
             Handler::start_free_threaded(settings).map_err(|e| format!("start capture: {e}"))?;
         Ok(Capture {
             control: Some(control),
+            unlocks,
         })
     }
 }
 
 impl Capture {
     pub fn stopped(&self) -> Option<String> {
-        let finished = self.control.as_ref().is_none_or(|c| c.is_finished());
-        finished.then(|| "capture ended".into())
+        if self.control.as_ref().is_none_or(|c| c.is_finished()) {
+            return Some("capture ended".into());
+        }
+        (UNLOCKS.load(Ordering::Relaxed) != self.unlocks).then(|| "session unlocked".into())
     }
 }
 
