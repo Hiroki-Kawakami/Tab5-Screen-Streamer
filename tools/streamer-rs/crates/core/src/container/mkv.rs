@@ -72,7 +72,7 @@ impl<S: Source> Input<S> {
         if pos >= self.buf_start && pos + len as u64 <= buf_end {
             return Ok(len);
         }
-        let size = len.max(READ_CHUNK).min((self.len - pos) as usize);
+        let size = (self.len - pos).min(len.max(READ_CHUNK) as u64) as usize;
         self.buf.resize(size, 0);
         let filled = self.source.read_upto(pos, &mut self.buf)?;
         self.buf.truncate(filled);
@@ -94,7 +94,7 @@ impl<S: Source> Input<S> {
     /// Reads at most `len` bytes at `pos` without replacing the buffer, for
     /// reads scattered over the file.
     fn peek(&mut self, pos: u64, len: usize) -> Result<Vec<u8>> {
-        let mut out = vec![0; len.min(self.len.saturating_sub(pos) as usize)];
+        let mut out = vec![0; self.len.saturating_sub(pos).min(len as u64) as usize];
         let filled = self.source.read_upto(pos, &mut out)?;
         out.truncate(filled);
         Ok(out)
