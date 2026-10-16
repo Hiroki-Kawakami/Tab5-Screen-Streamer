@@ -20,8 +20,8 @@
   --accent-tint: rgba(255, 138, 61, 0.12);
   --good: #4ade80;
   --bad: #ff8080;
-  --sans: "DM Sans", system-ui, sans-serif;
-  --display: "Space Grotesk", sans-serif;
+  --sans: "Montserrat", system-ui, sans-serif;
+  --display: "Montserrat", sans-serif;
   --mono: "JetBrains Mono", monospace;
 }
 
