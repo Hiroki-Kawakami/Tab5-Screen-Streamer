@@ -357,12 +357,12 @@ overlay is visible.
 | Clock | Value | Pacing |
 |---|---|---|
 | Device | 0 | The PC paces its writes from the `EV_AUDIO` buffer level, the usual feedback for a sink that owns the clock. |
-| Host | 1 | The PC writes at the nominal rate in its own clock. The device buffers the PCM and resamples it to keep that buffer at a fixed level, 60 ms, so it plays at the rate the PCM arrives. |
+| Host | 1 | The PC writes at the nominal rate in its own clock. The device plays the PCM a fixed 100 ms after it arrives, resampling it to the rate it arrives at. |
 
-- In the host clock, the device plays silence while its buffer fills to that
-  level, and again once the buffer runs dry, until it has refilled. Devices
-  given the same PCM at the same time therefore play it together, also after
-  the PC pauses longer than the buffer.
+- In the host clock, the device plays silence until 60 ms of PCM has arrived,
+  and again once its buffer runs dry, until it has refilled. Devices given the
+  same PCM at the same time therefore play it together, also after the PC
+  pauses longer than the buffer.
 - The PC keeps the buffer level well below `capacity_frames`. A full audio
   endpoint refuses data, and some hosts then stall the device's other
   endpoints along with it.

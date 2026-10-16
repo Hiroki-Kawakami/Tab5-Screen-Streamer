@@ -221,6 +221,7 @@ class AudioBus {
     out.output = output;
     out.formatSent = false;
     this.refresh();
+    this.resync();
   }
 
   opened(out: AudioOut) {

@@ -68,6 +68,7 @@ private:
         uint32_t session;
         Done done;
         void *context;
+        int64_t received_us;
     };
 
     static void task(void *arg);
@@ -79,6 +80,7 @@ private:
     void close_host();
     void drain_host();
     void write_host(const uint8_t *pcm, uint32_t bytes);
+    void start_host(double offset_frames);
     void output_host();
     void play_host();
     void dequeue(uint32_t bytes);
@@ -119,7 +121,10 @@ private:
     audf_node_t *host_out_ = nullptr;
     uint8_t *host_buffer_ = nullptr;
     uint32_t host_chunk_ = 0;
+    int64_t received_us_ = 0;
     int64_t host_input_us_ = 0;
+    bool host_started_ = false;
+    double host_latency_ = 0;
     int64_t host_stats_us_ = 0;
 
     std::mutex volume_lock_;

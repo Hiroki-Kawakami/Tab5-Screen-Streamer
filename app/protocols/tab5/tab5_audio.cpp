@@ -41,8 +41,14 @@ static constexpr double kUacFeedbackGain = 0.002;
 static constexpr int64_t kUacStatsPeriodUs = 5 * 1000 * 1000;
 
 static constexpr uint32_t kHostTargetMs = 60;
+// From the arrival of PCM to its playing: the buffer, the output's DMA ring
+// and some margin, so the start can always be aligned by adding silence.
+static constexpr uint32_t kHostLatencyMs = 100;
 static constexpr uint32_t kHostCapacityMs = 250;
 static constexpr uint32_t kHostChunksPerSecond = 250;
+// The host clock output stays stereo, so changing the channels never reopens
+// it, which takes tens of ms and clicks.
+static constexpr uint8_t kHostChannels = 2;
 static constexpr int64_t kHostStatsPeriodUs = 5 * 1000 * 1000;
 
 using tab5::Channel;
@@ -67,7 +73,7 @@ Tab5Audio::~Tab5Audio() {
 }
 
 void Tab5Audio::send(Op op) {
-    const Item item = {op, nullptr, 0, 0, nullptr, nullptr};
+    const Item item = {op, nullptr, 0, 0, nullptr, nullptr, 0};
     xQueueSend(queue_, &item, portMAX_DELAY);
 }
 
@@ -102,7 +108,7 @@ esp_err_t Tab5Audio::start(uint32_t capacity_bytes) {
 void Tab5Audio::submit(const uint8_t *data, uint32_t length, uint32_t session, Done done,
                        void *context) {
     queued_bytes_ += length;
-    const Item item = {Op::Transfer, data, length, session, done, context};
+    const Item item = {Op::Transfer, data, length, session, done, context, esp_timer_get_time()};
     xQueueSend(queue_, &item, portMAX_DELAY);
 }
 
@@ -237,6 +243,7 @@ void Tab5Audio::run(const Item &item) {
         return;
     }
     played_ = 0;
+    received_us_ = item.received_us;
     uint32_t bad_seq = 0;
     const bool ok = tab5::for_each_message(
         item.data, item.length, &bad_seq,
@@ -294,7 +301,8 @@ void Tab5Audio::play(const tab5::MsgHeader &header, const uint8_t *pcm) {
         return;
     }
     if (format_.clock == static_cast<uint8_t>(tab5::AudioClock::Host)) {
-        if (!host_ || memcmp(&host_format_, &format_, sizeof(format_)) != 0) {
+        if (!host_ || host_format_.sample_rate != format_.sample_rate ||
+            (host_format_.bits == 16) != (format_.bits == 16)) {
             esp_err_t err = open_host();
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "open host %u Hz %u ch %u bit: %s", (unsigned)format_.sample_rate,
@@ -349,7 +357,7 @@ esp_err_t Tab5Audio::open_host() {
     drain_host();
     close_host();
     const uint32_t rate = format_.sample_rate;
-    const uint8_t channels = format_.channels;
+    const uint8_t channels = kHostChannels;
     const audf_fmt_t fmt = format_.bits == 16 ? AUDF_FMT_S16 : AUDF_FMT_S32;
     const size_t target = (size_t)rate * kHostTargetMs / 1000;
     host_chunk_ = std::max<uint32_t>(rate / kHostChunksPerSecond, 1);
@@ -380,10 +388,10 @@ esp_err_t Tab5Audio::open_host() {
     if (err == ESP_OK) {
         audf_drift_config_t drift = {};
         drift.sample_rate = rate;
-        drift.target_frames = target;
+        drift.target_frames = (size_t)rate * kHostLatencyMs / 1000;
         audf_drift_init(&host_drift_, &drift);
         audf_node_t *queued = audf_graph_add_fifo(host_graph_, nullptr, host_pcm_);
-        host_out_ = audf_graph_add_resampler(host_graph_, queued, host_resampler_, &host_drift_);
+        host_out_ = audf_graph_add_resampler(host_graph_, queued, host_resampler_, nullptr);
         err = audf_graph_build(host_graph_);
     }
     if (err == ESP_OK) {
@@ -399,6 +407,7 @@ esp_err_t Tab5Audio::open_host() {
         return err;
     }
     host_ = true;
+    host_started_ = false;
     host_format_ = format_;
     host_input_us_ = esp_timer_get_time();
     return ESP_OK;
@@ -422,26 +431,83 @@ void Tab5Audio::drain_host() {
     while (audf_fifo_primed(host_pcm_) && audf_fifo_level(host_pcm_) > 0) output_host();
 }
 
-void Tab5Audio::write_host(const uint8_t *pcm, uint32_t bytes) {
-    host_input_us_ = esp_timer_get_time();
-    const uint8_t channels = host_format_.channels;
-    uint32_t frames = bytes / frame_bytes();
-    if (host_format_.bits == 16) {
-        audf_fifo_write(host_pcm_, pcm, frames);
-        return;
+template <typename T>
+static void duplicate_mono(void *data, uint32_t frames) {
+    T *samples = static_cast<T *>(data);
+    for (uint32_t i = frames; i-- > 0;) {
+        const T sample = samples[i];
+        samples[2 * i] = sample;
+        samples[2 * i + 1] = sample;
     }
-    const audf_pcm_t layout = host_format_.bits == 24 ? AUDF_PCM_S24 : AUDF_PCM_S32;
-    while (frames) {
+}
+
+// The arrival is when the transfer came in, not when this task got to it,
+// which reopening the output or a burst of transfers can hold up.
+void Tab5Audio::write_host(const uint8_t *pcm, uint32_t bytes) {
+    host_input_us_ = received_us_;
+    const uint8_t channels = format_.channels;
+    const uint32_t frame = frame_bytes();
+    const audf_pcm_t layout = format_.bits == 24 ? AUDF_PCM_S24 : AUDF_PCM_S32;
+    for (uint32_t frames = bytes / frame; frames > 0;) {
         const uint32_t n = std::min(frames, host_chunk_);
-        audf_convert_from_pcm(pcm, layout, host_buffer_, AUDF_FMT_S32, n * channels);
+        if (format_.bits == 16) {
+            memcpy(host_buffer_, pcm, n * frame);
+            if (channels == 1) duplicate_mono<int16_t>(host_buffer_, n);
+        } else {
+            audf_convert_from_pcm(pcm, layout, host_buffer_, AUDF_FMT_S32, n * channels);
+            if (channels == 1) duplicate_mono<int32_t>(host_buffer_, n);
+        }
         audf_fifo_write(host_pcm_, host_buffer_, n);
-        pcm += n * frame_bytes();
+        pcm += n * frame;
         frames -= n;
     }
 }
 
+// Plays silence or drops PCM so the newest PCM plays kHostLatencyMs after it
+// arrived, which the same PCM does on every device fed at the same time.
+void Tab5Audio::start_host(double offset_frames) {
+    const uint32_t frame = kHostChannels * (host_format_.bits == 16 ? 2 : 4);
+    if (offset_frames >= 0) {
+        memset(host_buffer_, 0, host_chunk_ * frame);
+        for (uint32_t left = (uint32_t)offset_frames; left > 0;) {
+            const uint32_t n = std::min(left, host_chunk_);
+            bsp_audio_write(host_buffer_, n * frame);
+            left -= n;
+        }
+        return;
+    }
+    uint32_t drop = std::min<uint32_t>((uint32_t)-offset_frames, audf_fifo_level(host_pcm_));
+    while (drop > 0) {
+        const uint32_t n = std::min(drop, host_chunk_);
+        audf_fifo_read(host_pcm_, host_buffer_, n);
+        drop -= n;
+    }
+}
+
+// The latency is counted from the arrival of the newest PCM, which stays the
+// same between arrivals: what has waited since then has played from the FIFO.
 void Tab5Audio::output_host() {
-    const uint32_t samples = host_chunk_ * host_format_.channels;
+    const uint32_t samples = host_chunk_ * kHostChannels;
+    if (!audf_fifo_primed(host_pcm_)) {
+        host_started_ = false;
+    } else {
+        const uint32_t rate = host_format_.sample_rate;
+        size_t queued = 0;
+        bsp_audio_get_queued(&queued);
+        const int64_t waited = esp_timer_get_time() - host_input_us_;
+        host_latency_ = (double)waited * rate / 1e6 + audf_fifo_level(host_pcm_) + queued;
+        const double target = (double)rate * kHostLatencyMs / 1000;
+        if (!host_started_) {
+            host_started_ = true;
+            start_host(target - host_latency_);
+            audf_drift_reset(&host_drift_);
+            audf_resampler_set_adjust(host_resampler_, 0);
+        } else {
+            const size_t latency = (size_t)std::max(host_latency_, 0.0);
+            audf_resampler_set_adjust(host_resampler_,
+                                      audf_drift_update(&host_drift_, latency, host_chunk_));
+        }
+    }
     esp_err_t err = audf_graph_read(host_graph_, host_out_, host_buffer_, host_chunk_);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "host read: %s", esp_err_to_name(err));
@@ -455,8 +521,8 @@ void Tab5Audio::output_host() {
     bsp_audio_write(host_buffer_, samples * sizeof(int32_t));
 }
 
-// Plays silence while the FIFO fills to its target, and the drift steers the
-// resampler to keep it there; sustained silence closes the output.
+// Plays silence while the FIFO fills to its target; sustained silence closes
+// the output.
 void Tab5Audio::play_host() {
     const int64_t now = esp_timer_get_time();
     if (!audf_fifo_primed(host_pcm_) && now - host_input_us_ >= kIdleCloseMs * 1000) {
@@ -467,8 +533,9 @@ void Tab5Audio::play_host() {
     report(false);
     if (now - host_stats_us_ >= kHostStatsPeriodUs) {
         host_stats_us_ = now;
-        ESP_LOGI(TAG, "host: %u frames buffered, adjust %.1f ppm",
-                 (unsigned)audf_fifo_level(host_pcm_), host_drift_.ppm);
+        ESP_LOGI(TAG, "host: %u frames buffered, latency %.2f ms, adjust %.1f ppm",
+                 (unsigned)audf_fifo_level(host_pcm_),
+                 host_latency_ * 1000 / host_format_.sample_rate, host_drift_.ppm);
     }
 }
 
