@@ -54,6 +54,12 @@ interface Card {
   outputs: HTMLButtonElement[];
 }
 
+interface AudioSettings {
+  output?: AudioOutput;
+  volume?: number;
+  mute?: boolean;
+}
+
 interface AllCard {
   root: HTMLDivElement;
   row: HTMLButtonElement;
@@ -413,14 +419,32 @@ function nameOf(device: Device): string {
   return `Tab5 #${device.number}`;
 }
 
+function loadAudio(serial: string | null): AudioSettings {
+  if (serial === null) return {};
+  try {
+    return JSON.parse(localStorage.getItem(`audio:${serial}`) ?? "{}") as AudioSettings;
+  } catch {
+    return {};
+  }
+}
+
+function saveAudio(serial: string | null, settings: AudioSettings) {
+  if (serial === null) return;
+  localStorage.setItem(`audio:${serial}`, JSON.stringify({ ...loadAudio(serial), ...settings }));
+}
+
 function addDevice(usb: USBDevice) {
   const id = nextDevice++;
   const number = devices.reduce((n, d) => Math.max(n, d.number), 0) + 1;
-  const device = { id, number, serial: usb.serialNumber ?? null, info: null, reason: "", output: "lr" } as Device;
+  const serial = usb.serialNumber ?? null;
+  const saved = loadAudio(serial).output;
+  const output = OUTPUTS.some((o) => o.value === saved) ? saved! : "lr";
+  const device = { id, number, serial, info: null, reason: "", output } as Device;
   device.card = newCard(device);
   devices.push(device);
   expanded = id;
-  toDevice({ type: "add", device: id, serial: device.serial });
+  toDevice({ type: "add", device: id, serial });
+  toDevice({ type: "output", device: id, output });
   renderDevices();
 }
 
@@ -513,6 +537,7 @@ function newCard(device: Device): Card {
     button.onclick = () => {
       device.output = option.value;
       toDevice({ type: "output", device: device.id, output: option.value });
+      saveAudio(device.serial, { output: option.value });
       renderDevices();
     };
     outputs.append(button);
@@ -712,14 +737,21 @@ function deviceStatus(status: DeviceStatus) {
       device.info = null;
       device.reason = status.reason;
       break;
-    case "connected":
+    case "connected": {
       device.info = status.info;
+      const { volume, mute = false } = loadAudio(device.serial);
+      const current = status.info.volume;
+      if (volume !== undefined && (volume !== current.volume || mute !== current.mute)) {
+        toDevice({ type: "volume", device: device.id, value: volume, mute });
+      }
       break;
+    }
     case "brightness":
       if (device.info) device.info.brightness = status.value;
       break;
     case "volume":
       if (device.info) device.info.volume = { ...device.info.volume, volume: status.value, mute: status.mute };
+      saveAudio(device.serial, { volume: status.value, mute: status.mute });
       break;
     case "warning":
       say(devices.length > 1 ? `${nameOf(device)}: ${status.message}` : status.message);
