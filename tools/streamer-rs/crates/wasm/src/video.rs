@@ -377,11 +377,19 @@ impl Video {
 
 impl Video {
     fn take(&mut self, frame: Frame) -> Result<(), JsError> {
-        if let Some(old) = self.frame.replace(frame) {
-            self.input = old.data;
-        }
+        let starting = match self.frame.replace(frame) {
+            Some(old) => {
+                self.input = old.data;
+                false
+            }
+            None => true,
+        };
         self.picture = None;
-        self.relayout()
+        self.relayout()?;
+        if let (true, Some(presenter)) = (starting, &mut self.presenter) {
+            presenter.assume_off();
+        }
+        Ok(())
     }
 
     fn session_info(&self) -> Option<&Info> {

@@ -233,6 +233,12 @@ impl Presenter {
         protocol::message(protocol::DISPLAY_POWER, seq, self.info.epoch, &[0; 4])
     }
 
+    /// The device may have turned the display off by itself, as its waiting
+    /// screen does when idle; the next frame turns it on.
+    pub fn assume_off(&mut self) {
+        self.off = true;
+    }
+
     /// How long until a frame stays within max_fps; zero when it does now.
     pub fn until_due(&self, now: u64) -> u64 {
         let interval = (900_000 / self.info.max_fps.max(1) as u64) as i64;
