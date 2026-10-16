@@ -339,7 +339,7 @@ overlay is visible.
 
 | Type | Name | Payload |
 |---|---|---|
-| 0x20 | `AUDIO_FORMAT` | `u32 sample_rate`, `u8 channels`, `u8 bits`, `u16 reserved` |
+| 0x20 | `AUDIO_FORMAT` | `u32 sample_rate`, `u8 channels`, `u8 bits`, `u8 clock`, `u8 reserved` |
 | 0x21 | `AUDIO_DATA` | PCM, interleaved, signed, `bits / 8` bytes per sample |
 
 - The PC sends `AUDIO_FORMAT` after connecting and before every format change.
@@ -351,9 +351,18 @@ overlay is visible.
 - Any sample rate up to `audio_max_rate` is taken, with 1 or 2 channels of 16,
   24 or 32 bits. Anything else is answered with `EV_ERROR`, and the data
   following it is dropped until the next `AUDIO_FORMAT`.
-- Bulk has no clock. While bulk audio plays, the device sends `EV_AUDIO`
-  periodically and the PC paces its writes from that buffer level, the usual
-  feedback for a sink that owns the clock.
+- While bulk audio plays, the device sends `EV_AUDIO` periodically.
+- `clock` is whose clock the PCM plays in:
+
+| Clock | Value | Pacing |
+|---|---|---|
+| Device | 0 | The PC paces its writes from the `EV_AUDIO` buffer level, the usual feedback for a sink that owns the clock. |
+| Host | 1 | The PC writes at the nominal rate in its own clock. The device buffers the PCM and resamples it to keep that buffer at a fixed level, 60 ms, so it plays at the rate the PCM arrives. |
+
+- In the host clock, the device plays silence while its buffer fills to that
+  level, and again once the buffer runs dry, until it has refilled. Devices
+  given the same PCM at the same time therefore play it together, also after
+  the PC pauses longer than the buffer.
 - The PC keeps the buffer level well below `capacity_frames`. A full audio
   endpoint refuses data, and some hosts then stall the device's other
   endpoints along with it.

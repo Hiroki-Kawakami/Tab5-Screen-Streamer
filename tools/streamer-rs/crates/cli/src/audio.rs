@@ -41,7 +41,12 @@ impl Sink {
             protocol::AUDIO_FORMAT,
             1,
             0,
-            &protocol::audio_format(format.rate, format.channels, format.bits),
+            &protocol::audio_format(
+                format.rate,
+                format.channels,
+                format.bits,
+                protocol::AudioClock::Device,
+            ),
         );
         let reports = out.level.reports.load(Ordering::Acquire);
         Sink {

@@ -48,6 +48,12 @@ pub enum Encoding {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AudioClock {
+    Device = 0,
+    Host = 1,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PixelFormat {
     Rgb565,
     Rgb888,
@@ -237,9 +243,9 @@ pub fn draw_blit(blit: &Blit, data: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn audio_format(rate: u32, channels: u8, bits: u8) -> Vec<u8> {
+pub fn audio_format(rate: u32, channels: u8, bits: u8, clock: AudioClock) -> Vec<u8> {
     let mut out = rate.to_le_bytes().to_vec();
-    out.extend_from_slice(&[channels, bits, 0, 0]);
+    out.extend_from_slice(&[channels, bits, clock as u8, 0]);
     out
 }
 

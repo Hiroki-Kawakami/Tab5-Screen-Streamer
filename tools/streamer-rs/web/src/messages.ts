@@ -21,34 +21,40 @@ export interface DeviceInfo {
   overlay: boolean;
 }
 
+/** Which channels of the sound a device plays. */
+export type AudioOutput = "off" | "l" | "r" | "lr";
+
+/** `device` is an id the page gives each Tab5 it adds. */
 export type DeviceCommand =
   | { type: "init"; video: MessagePort; audio: MessagePort }
-  | { type: "start" }
-  | { type: "stop" }
-  /** Ends the session and opens a new one, so the device shows its own screen. */
+  /** Keeps a session with the USB device with `serial` until removed. */
+  | { type: "add"; device: number; serial: string | null }
+  | { type: "remove"; device: number }
+  /** Ends every session and opens a new one, so the devices show their own screen. */
   | { type: "release" }
-  | { type: "brightness"; value: number }
-  | { type: "volume"; value: number; mute: boolean };
+  | { type: "brightness"; device: number; value: number }
+  | { type: "volume"; device: number; value: number; mute: boolean }
+  | { type: "output"; device: number; output: AudioOutput };
 
 export type DeviceStatus =
   | { type: "ready"; usb: boolean }
-  | { type: "waiting"; reason: string }
-  | { type: "connected"; info: DeviceInfo }
-  | { type: "stopped" }
-  | { type: "brightness"; value: number }
-  | { type: "volume"; value: number; mute: boolean }
-  | { type: "audio"; buffered: number; capacity: number }
-  | { type: "warning"; message: string };
+  | { type: "waiting"; device: number; reason: string }
+  | { type: "connected"; device: number; info: DeviceInfo }
+  | { type: "stopped"; device: number }
+  | { type: "brightness"; device: number; value: number }
+  | { type: "volume"; device: number; value: number; mute: boolean }
+  | { type: "audio"; device: number; buffered: number; capacity: number }
+  | { type: "warning"; device: number; message: string };
 
 /** Device worker to video worker. */
 export type ToVideo =
-  | { type: "session"; data: ArrayBuffer; seq: number }
-  | { type: "events"; data: ArrayBuffer }
-  | { type: "lost" }
-  | { type: "sent" };
+  | { type: "session"; device: number; data: ArrayBuffer; seq: number }
+  | { type: "events"; device: number; data: ArrayBuffer }
+  | { type: "lost"; device: number }
+  | { type: "sent"; device: number };
 
-/** Video worker to device worker: one frame's transfers. */
-export type FromVideo = { type: "frame"; transfers: ArrayBuffer[] };
+/** Video worker to device worker: one frame's transfers to a device. */
+export type FromVideo = { type: "frame"; device: number; transfers: ArrayBuffer[] };
 
 /** Device worker to player worker. */
 export type ToPlayer = { type: "clock"; pts: number; at: number };

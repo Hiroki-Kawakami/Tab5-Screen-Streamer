@@ -13,12 +13,14 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "audf_fifo.h"
+#include "audf_graph.h"
 #include "protocol.hpp"
 
 class Tab5Events;
 
-/* Plays audio endpoint transfers on its own task, paced by the output. While
- * the UAC stream runs, it plays that instead and bulk audio is refused. */
+/* Plays audio endpoint transfers on its own task, paced by the output, or in
+ * the host clock by resampling to the rate they arrive at. While the UAC
+ * stream runs, it plays that instead and bulk audio is refused. */
 class Tab5Audio {
 public:
     using Done = void (*)(void *context);
@@ -72,6 +74,13 @@ private:
     void run(const Item &item);
     void execute(const tab5::MsgHeader &header, const uint8_t *payload);
     void play(const tab5::MsgHeader &header, const uint8_t *pcm);
+    bool open_output(uint32_t rate, uint8_t bits, uint8_t channels);
+    esp_err_t open_host();
+    void close_host();
+    void drain_host();
+    void write_host(const uint8_t *pcm, uint32_t bytes);
+    void output_host();
+    void play_host();
     void dequeue(uint32_t bytes);
     void close();
     void report(bool force);
@@ -100,6 +109,18 @@ private:
     bool uac_ = false;
     int64_t uac_stats_us_ = 0;
     std::atomic<bool> uac_playing_ = false;
+
+    tab5::AudioFormat host_format_ = {};
+    bool host_ = false;
+    audf_fifo_t *host_pcm_ = nullptr;
+    audf_resampler_t *host_resampler_ = nullptr;
+    audf_drift_t host_drift_ = {};
+    audf_graph_t *host_graph_ = nullptr;
+    audf_node_t *host_out_ = nullptr;
+    uint8_t *host_buffer_ = nullptr;
+    uint32_t host_chunk_ = 0;
+    int64_t host_input_us_ = 0;
+    int64_t host_stats_us_ = 0;
 
     std::mutex volume_lock_;
     bool mute_ = false;

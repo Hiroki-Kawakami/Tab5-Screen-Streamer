@@ -1,4 +1,4 @@
-//! Frames to the device's video endpoint, for the video worker. Times are
+//! Frames to the devices' video endpoints, for the video worker. Times are
 //! milliseconds from `performance.now()`.
 
 use js_sys::{Array, Uint8Array, Uint32Array};
@@ -33,30 +33,54 @@ struct Frame {
     turn: u32,
 }
 
+/// What a device's layout is built from.
+type Built = (LayoutKey, (u32, u32));
+
+/// The session with one device.
+struct Session {
+    device: u32,
+    info: Info,
+    presenter: Option<Presenter>,
+    seq: u32,
+    built: Option<Built>,
+}
+
+impl Session {
+    fn info(&self) -> &Info {
+        self.presenter.as_ref().map_or(&self.info, |p| &p.info)
+    }
+}
+
+/// The devices sharing a layout, and the bands of a frame in it.
+struct Group {
+    devices: Vec<u32>,
+    bands: Vec<(u32, u32)>,
+}
+
 /// A frame whose bands are being encoded.
 struct Pending {
     generation: u32,
     now: u64,
-    bands: Vec<(u32, u32)>,
+    groups: Vec<Group>,
 }
 
+/// Shows the same frames on every device. A frame goes to all of them at
+/// once, so none runs ahead of the slowest; devices with the same layout
+/// share its JPEGs.
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct Video {
-    info: Option<Info>,
-    presenter: Option<Presenter>,
-    seq: u32,
+    sessions: Vec<Session>,
     frame: Option<Frame>,
     /// Where the next frame's pixels are copied; the data of the frame before.
     input: Vec<u8>,
-    /// Changes whenever bands being encoded no longer fit the presenter.
+    /// Changes whenever bands being encoded no longer fit the presenters.
     generation: u32,
     pending: Option<Pending>,
-    /// `frame` at the layout's frame size: I420 or BGRX.
-    picture: Option<Vec<u8>>,
-    built: Option<(LayoutKey, (u32, u32))>,
-    converter: Option<((u32, u32), Converter)>,
-    resampler: Option<Resampler>,
+    /// `frame` at each layout's frame size: I420 or BGRX.
+    pictures: Vec<((u32, u32), Vec<u8>)>,
+    converters: Vec<((u32, u32), Converter)>,
+    resamplers: Vec<Resampler>,
     quality: u8,
 }
 
@@ -138,9 +162,9 @@ impl Video {
         Video::default()
     }
 
-    /// A session opened with the INFO carrying `seq` in `data`, a control IN
-    /// transfer.
-    pub fn connected(&mut self, data: &[u8], seq: u32) -> Result<(), JsError> {
+    /// A session with `device` opened with the INFO carrying `seq` in
+    /// `data`, a control IN transfer.
+    pub fn connected(&mut self, device: u32, data: &[u8], seq: u32) -> Result<(), JsError> {
         let info = protocol::parse_events(data)
             .into_iter()
             .find_map(|event| match event {
@@ -148,25 +172,39 @@ impl Video {
                 _ => None,
             })
             .ok_or_else(|| JsError::new("no INFO in the transfer"))?;
-        self.seq = 0;
         self.generation += 1;
-        if let Some(presenter) = &mut self.presenter {
-            presenter.connected(info.clone());
+        match self.sessions.iter_mut().find(|s| s.device == device) {
+            Some(session) => {
+                session.seq = 0;
+                if let Some(presenter) = &mut session.presenter {
+                    presenter.connected(info.clone());
+                }
+                session.info = info;
+            }
+            None => self.sessions.push(Session {
+                device,
+                info,
+                presenter: None,
+                seq: 0,
+                built: None,
+            }),
         }
-        self.info = Some(info);
         self.relayout()
     }
 
-    pub fn lost(&mut self) {
-        self.info = None;
-        self.presenter = None;
-        self.built = None;
+    pub fn lost(&mut self, device: u32) {
+        self.sessions.retain(|s| s.device != device);
         self.generation += 1;
     }
 
-    /// Applies the events of a control IN transfer.
-    pub fn events(&mut self, data: &[u8]) -> Result<(), JsError> {
-        let Some(presenter) = &mut self.presenter else {
+    /// Applies the events of a control IN transfer from `device`.
+    pub fn events(&mut self, device: u32, data: &[u8]) -> Result<(), JsError> {
+        let Some(presenter) = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.device == device)
+            .and_then(|s| s.presenter.as_mut())
+        else {
             return Ok(());
         };
         let mut relayout = false;
@@ -180,19 +218,24 @@ impl Video {
     }
 
     /// The size a frame shown at `display` after `turn` is scaled to, or none
-    /// before a session opens.
+    /// before a session opens or when the devices differ in it.
     pub fn size(
         &self,
         display_width: u32,
         display_height: u32,
         turn: u32,
     ) -> Result<Option<Vec<u32>>, JsError> {
-        let Some(info) = self.session_info() else {
-            return Ok(None);
-        };
-        let rotation = (info.orientation as u32 + turn) % 4;
-        let (w, h) = direct(info, (display_width, display_height), rotation)?.frame();
-        Ok(Some(vec![w, h]))
+        let mut size = None;
+        for session in &self.sessions {
+            let info = session.info();
+            let rotation = (info.orientation as u32 + turn) % 4;
+            let frame = direct(info, (display_width, display_height), rotation)?.frame();
+            if size.is_some_and(|s| s != frame) {
+                return Ok(None);
+            }
+            size = Some(frame);
+        }
+        Ok(size.map(|(w, h)| vec![w, h]))
     }
 
     /// `size` bytes of wasm memory to copy the next frame's pixels into. The
@@ -265,38 +308,53 @@ impl Video {
         })
     }
 
-    /// Whether a frame can be sent now: the session is open, within
-    /// max_fps, and not waiting for SWAP_DONE.
-    pub fn ready(&self, now: f64) -> bool {
-        self.info.is_some()
-            && self
-                .presenter
-                .as_ref()
-                .is_none_or(|p| !p.swaps_full() && p.due(us(now)))
+    /// Whether a frame can be sent now to the devices it goes to: a new frame
+    /// goes to every device, otherwise only to those that need a redraw.
+    /// Each is within max_fps and not waiting for SWAP_DONE.
+    pub fn ready(&self, now: f64, fresh: bool) -> bool {
+        let mut any = false;
+        for presenter in self.targets(fresh) {
+            if presenter.swaps_full() || !presenter.due(us(now)) {
+                return false;
+            }
+            any = true;
+        }
+        any
     }
 
     /// Forgets the latest frame, for a new source.
     pub fn reset(&mut self) {
         self.frame = None;
-        self.picture = None;
+        self.pictures.clear();
         self.generation += 1;
     }
 
-    /// Milliseconds until a frame stays within max_fps.
+    /// Milliseconds until a frame stays within max_fps on every device.
     #[wasm_bindgen(js_name = untilDue)]
     pub fn until_due(&self, now: f64) -> f64 {
-        self.presenter
-            .as_ref()
-            .map_or(0.0, |p| p.until_due(us(now)) as f64 / 1000.0)
+        self.presenters()
+            .map(|p| p.until_due(us(now)) as f64 / 1000.0)
+            .fold(0.0, f64::max)
     }
 
-    /// The device needs the whole content drawn again.
+    /// Some device needs the whole content drawn again.
     pub fn redraw(&self) -> bool {
-        self.frame.is_some() && self.presenter.as_ref().is_some_and(|p| p.redraw)
+        self.frame.is_some() && self.presenters().any(|p| p.redraw)
     }
 
     pub fn describe(&self) -> Option<String> {
-        self.presenter.as_ref().map(Presenter::describe)
+        let lines: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|s| {
+                Some(format!(
+                    "device {}: {}",
+                    s.device,
+                    s.presenter.as_ref()?.describe()
+                ))
+            })
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 
     /// The quality of the last frame encoded.
@@ -305,77 +363,148 @@ impl Video {
         self.quality
     }
 
-    /// Starts sending the latest frame: the picture and placement to encode
-    /// with `encodeBand` for each pair of `bands`, or null.
-    pub fn prepare(&mut self, now: f64) -> Result<JsValue, JsError> {
+    /// Starts sending the latest frame to the devices `ready` checked: for
+    /// each layout among them, the picture and placement to encode with
+    /// `encodeBand` for each pair of `bands`; null when there is none.
+    pub fn prepare(&mut self, now: f64, fresh: bool) -> Result<JsValue, JsError> {
         let now = us(now);
         self.convert()?;
-        let (Some(presenter), Some(frame), Some(picture)) =
-            (&mut self.presenter, &self.frame, &self.picture)
-        else {
+        let Some(frame) = &self.frame else {
             return Ok(JsValue::NULL);
         };
-        let (w, h) = presenter.layout.frame();
-        presenter.start_frame(now);
-        self.quality = presenter.quality(now);
-        let placement = presenter.layout.placement(presenter.info.panel_width as u32);
-        let bands = present::jpeg_bands(&presenter.layout, &presenter.info);
-        let rows: Vec<u32> = bands.iter().flat_map(|&(row, rows)| [row, rows]).collect();
+        let mut groups: Vec<(Option<Built>, Vec<&mut Session>)> = Vec::new();
+        for session in &mut self.sessions {
+            let Some(presenter) = &session.presenter else {
+                continue;
+            };
+            if !fresh && !presenter.redraw {
+                continue;
+            }
+            match groups.iter_mut().find(|(key, _)| *key == session.built) {
+                Some((_, members)) => members.push(session),
+                None => groups.push((session.built, vec![session])),
+            }
+        }
+        if groups.is_empty() {
+            return Ok(JsValue::NULL);
+        }
+        let jobs = Array::new();
+        let mut pending = Vec::new();
+        let mut lowest = u8::MAX;
+        for (_, mut members) in groups {
+            let mut quality = u8::MAX;
+            let mut devices = Vec::new();
+            for session in members.iter_mut() {
+                let presenter = session.presenter.as_mut().unwrap();
+                presenter.start_frame(now);
+                quality = quality.min(presenter.quality(now));
+                devices.push(session.device);
+            }
+            lowest = lowest.min(quality);
+            let presenter = members[0].presenter.as_ref().unwrap();
+            let (w, h) = presenter.layout.frame();
+            let Some((_, picture)) = self.pictures.iter().find(|(size, _)| *size == (w, h)) else {
+                return Ok(JsValue::NULL);
+            };
+            let placement = presenter
+                .layout
+                .placement(presenter.info.panel_width as u32);
+            let bands = present::jpeg_bands(&presenter.layout, &presenter.info);
+            let rows: Vec<u32> = bands.iter().flat_map(|&(row, rows)| [row, rows]).collect();
+            pending.push(Group { devices, bands });
+            jobs.push(&crate::object(&[
+                ("picture", Uint8Array::from(&picture[..]).into()),
+                ("width", w.into()),
+                ("height", h.into()),
+                ("yuv", matches!(frame.kind, Kind::Yuv { .. }).into()),
+                ("rotation", placement.rotation.into()),
+                ("canvasWidth", (placement.canvas.0 as u32).into()),
+                ("canvasHeight", (placement.canvas.1 as u32).into()),
+                ("originX", (placement.origin.0 as u32).into()),
+                ("originY", (placement.origin.1 as u32).into()),
+                ("quality", quality.into()),
+                ("bands", Uint32Array::from(&rows[..]).into()),
+            ]));
+        }
+        self.quality = lowest;
         self.pending = Some(Pending {
             generation: self.generation,
             now,
-            bands,
+            groups: pending,
         });
-        Ok(crate::object(&[
-            ("picture", Uint8Array::from(&picture[..]).into()),
-            ("width", w.into()),
-            ("height", h.into()),
-            ("yuv", matches!(frame.kind, Kind::Yuv { .. }).into()),
-            ("rotation", placement.rotation.into()),
-            ("canvasWidth", (placement.canvas.0 as u32).into()),
-            ("canvasHeight", (placement.canvas.1 as u32).into()),
-            ("originX", (placement.origin.0 as u32).into()),
-            ("originY", (placement.origin.1 as u32).into()),
-            ("quality", self.quality.into()),
-            ("bands", Uint32Array::from(&rows[..]).into()),
-        ]))
+        Ok(jobs.into())
     }
 
-    /// The transfers drawing the prepared frame from its bands' JPEGs, as
-    /// `Uint8Array`s; none if the session or layout changed meanwhile.
+    /// The transfers drawing the prepared frame from the JPEGs of each job's
+    /// bands, as `{ device, transfers }` with `Uint8Array`s; none if a
+    /// session or layout changed meanwhile.
     pub fn finish(&mut self, jpegs: Array) -> Result<Array, JsError> {
-        let (Some(presenter), Some(pending)) = (&mut self.presenter, self.pending.take()) else {
-            return Ok(Array::new());
+        let out = Array::new();
+        let Some(pending) = self.pending.take() else {
+            return Ok(out);
         };
         if pending.generation != self.generation {
-            return Ok(Array::new());
+            return Ok(out);
         }
-        let bands = pending
-            .bands
-            .into_iter()
-            .zip(jpegs.iter())
-            .map(|((row, rows), jpeg)| Band {
-                row,
-                rows,
-                jpeg: Uint8Array::new(&jpeg).to_vec(),
-            })
-            .collect();
-        let seq = &mut self.seq;
-        let mut next = || {
-            *seq += 1;
-            *seq
-        };
-        let transfers = presenter
-            .frame(Encoded::Jpeg(bands), pending.now, &mut next)
-            .map_err(|e| JsError::new(&e))?;
-        Ok(transfers
-            .iter()
-            .map(|t| JsValue::from(Uint8Array::from(&t[..])))
-            .collect())
+        for (group, group_jpegs) in pending.groups.into_iter().zip(jpegs.iter()) {
+            let group_jpegs = Array::from(&group_jpegs);
+            let bands: Vec<Band> = group
+                .bands
+                .into_iter()
+                .zip(group_jpegs.iter())
+                .map(|((row, rows), jpeg)| Band {
+                    row,
+                    rows,
+                    jpeg: Uint8Array::new(&jpeg).to_vec(),
+                })
+                .collect();
+            for device in group.devices {
+                let Some(Session {
+                    presenter: Some(presenter),
+                    seq,
+                    ..
+                }) = self.sessions.iter_mut().find(|s| s.device == device)
+                else {
+                    continue;
+                };
+                let mut next = || {
+                    *seq += 1;
+                    *seq
+                };
+                let copy = bands
+                    .iter()
+                    .map(|b| Band {
+                        row: b.row,
+                        rows: b.rows,
+                        jpeg: b.jpeg.clone(),
+                    })
+                    .collect();
+                let transfers = presenter
+                    .frame(Encoded::Jpeg(copy), pending.now, &mut next)
+                    .map_err(|e| JsError::new(&e))?;
+                let transfers: Array = transfers
+                    .iter()
+                    .map(|t| JsValue::from(Uint8Array::from(&t[..])))
+                    .collect();
+                out.push(&crate::object(&[
+                    ("device", device.into()),
+                    ("transfers", transfers.into()),
+                ]));
+            }
+        }
+        Ok(out)
     }
 }
 
 impl Video {
+    fn presenters(&self) -> impl Iterator<Item = &Presenter> {
+        self.sessions.iter().filter_map(|s| s.presenter.as_ref())
+    }
+
+    fn targets(&self, fresh: bool) -> impl Iterator<Item = &Presenter> {
+        self.presenters().filter(move |p| fresh || p.redraw)
+    }
+
     fn take(&mut self, frame: Frame) -> Result<(), JsError> {
         let starting = match self.frame.replace(frame) {
             Some(old) => {
@@ -384,110 +513,135 @@ impl Video {
             }
             None => true,
         };
-        self.picture = None;
+        self.pictures.clear();
         self.relayout()?;
-        if let (true, Some(presenter)) = (starting, &mut self.presenter) {
-            presenter.assume_off();
+        if starting {
+            for session in &mut self.sessions {
+                if let Some(presenter) = &mut session.presenter {
+                    presenter.assume_off();
+                }
+            }
         }
         Ok(())
     }
 
-    fn session_info(&self) -> Option<&Info> {
-        let info = self.info.as_ref()?;
-        Some(self.presenter.as_ref().map_or(info, |presenter| &presenter.info))
-    }
-
-    /// Lays the latest frame out for the device, once both are known.
+    /// Lays the latest frame out for each device, once both are known.
     fn relayout(&mut self) -> Result<(), JsError> {
-        let (Some(info), Some(frame)) = (self.session_info(), &self.frame) else {
+        let Some(frame) = &self.frame else {
             return Ok(());
         };
-        let info = info.clone();
         let turn = frame.turn;
         let display = frame.display;
-        let rotation = (info.orientation as u32 + turn) % 4;
-        let key = (present::layout_key(&info, rotation), display);
-        if self.built == Some(key) {
-            return Ok(());
-        }
-        let layout = direct(&info, display, rotation)?;
-        match &mut self.presenter {
-            Some(presenter) => {
-                presenter.layout = layout;
-                presenter.clear();
+        for session in &mut self.sessions {
+            let info = session.info().clone();
+            let rotation = (info.orientation as u32 + turn) % 4;
+            let key = (present::layout_key(&info, rotation), display);
+            if session.built == Some(key) {
+                continue;
             }
-            None => {
-                self.presenter = Some(Presenter::new(
-                    info,
-                    layout,
-                    Encoding::Jpeg,
-                    false,
-                    None,
-                    Quality::DEFAULT,
-                ));
+            let layout = direct(&info, display, rotation)?;
+            match &mut session.presenter {
+                Some(presenter) => {
+                    presenter.layout = layout;
+                    presenter.clear();
+                }
+                None => {
+                    session.presenter = Some(Presenter::new(
+                        info,
+                        layout,
+                        Encoding::Jpeg,
+                        false,
+                        None,
+                        Quality::DEFAULT,
+                    ));
+                }
             }
+            session.built = Some(key);
+            self.generation += 1;
         }
-        self.built = Some(key);
-        self.generation += 1;
-        self.picture = None;
         Ok(())
     }
 
-    /// Scales the latest frame to the layout's frame size.
+    /// Scales the latest frame to each layout's frame size.
     fn convert(&mut self) -> Result<(), JsError> {
-        let (Some(presenter), Some(frame), None) = (&self.presenter, &self.frame, &self.picture)
-        else {
+        let Some(frame) = &self.frame else {
             return Ok(());
         };
-        let (w, h) = presenter.layout.frame();
-        let picture = match &frame.kind {
-            Kind::Yuv {
-                layout,
-                planes,
-                color,
-            } => {
-                if self.converter.as_ref().is_none_or(|(size, _)| *size != (w, h)) {
-                    let size = (w as usize, h as usize);
-                    let geometry = Geometry {
-                        scaled: size,
-                        crop: size,
-                        source_rotation: 0,
-                        output_rotation: 0,
-                        stored: size,
-                        output: Output::Bt601Full,
-                    };
-                    self.converter = Some(((w, h), Converter::new(geometry)));
-                }
-                let source = yuv::Source {
-                    layout: *layout,
-                    width: frame.width,
-                    height: frame.height,
-                    data: &frame.data,
+        let mut sizes: Vec<(u32, u32)> = Vec::new();
+        for presenter in self.sessions.iter().filter_map(|s| s.presenter.as_ref()) {
+            let size = presenter.layout.frame();
+            if !sizes.contains(&size) {
+                sizes.push(size);
+            }
+        }
+        for &(w, h) in &sizes {
+            if self.pictures.iter().any(|(size, _)| *size == (w, h)) {
+                continue;
+            }
+            let picture = match &frame.kind {
+                Kind::Yuv {
+                    layout,
                     planes,
-                };
-                let (_, converter) = self.converter.as_mut().unwrap();
-                converter
-                    .convert(&source, *color)
-                    .map_err(|e| JsError::new(&e.to_string()))?
-            }
-            Kind::Bgrx => {
-                let (sw, sh) = (frame.width, frame.height);
-                let (dw, dh) = (w as usize, h as usize);
-                if (sw, sh) == (dw, dh) {
-                    frame.data.clone()
-                } else {
-                    let fresh = |r: &Resampler| r.src != (sw, sh) || r.dst != (dw, dh);
-                    if self.resampler.as_ref().is_none_or(fresh) {
-                        self.resampler = Some(Resampler::new(sw, sh, dw, dh));
-                    }
-                    let mut out = vec![0; dw * dh * 4];
-                    let resampler = self.resampler.as_mut().unwrap();
-                    resampler.rgba(&frame.data[..sw * sh * 4], &mut out);
-                    out
+                    color,
+                } => {
+                    let at = match self.converters.iter().position(|(size, _)| *size == (w, h)) {
+                        Some(at) => at,
+                        None => {
+                            let size = (w as usize, h as usize);
+                            let geometry = Geometry {
+                                scaled: size,
+                                crop: size,
+                                source_rotation: 0,
+                                output_rotation: 0,
+                                stored: size,
+                                output: Output::Bt601Full,
+                            };
+                            self.converters.push(((w, h), Converter::new(geometry)));
+                            self.converters.len() - 1
+                        }
+                    };
+                    let source = yuv::Source {
+                        layout: *layout,
+                        width: frame.width,
+                        height: frame.height,
+                        data: &frame.data,
+                        planes,
+                    };
+                    self.converters[at]
+                        .1
+                        .convert(&source, *color)
+                        .map_err(|e| JsError::new(&e.to_string()))?
                 }
-            }
-        };
-        self.picture = Some(picture);
+                Kind::Bgrx => {
+                    let (sw, sh) = (frame.width, frame.height);
+                    let (dw, dh) = (w as usize, h as usize);
+                    if (sw, sh) == (dw, dh) {
+                        frame.data.clone()
+                    } else {
+                        let at = match self
+                            .resamplers
+                            .iter()
+                            .position(|r| r.src == (sw, sh) && r.dst == (dw, dh))
+                        {
+                            Some(at) => at,
+                            None => {
+                                self.resamplers.push(Resampler::new(sw, sh, dw, dh));
+                                self.resamplers.len() - 1
+                            }
+                        };
+                        let mut out = vec![0; dw * dh * 4];
+                        self.resamplers[at].rgba(&frame.data[..sw * sh * 4], &mut out);
+                        out
+                    }
+                }
+            };
+            self.pictures.push(((w, h), picture));
+        }
+        self.converters.retain(|(size, _)| sizes.contains(size));
+        self.resamplers.retain(|r| {
+            sizes.contains(&(r.dst.0 as u32, r.dst.1 as u32))
+                && r.src == (frame.width, frame.height)
+        });
         Ok(())
     }
 }

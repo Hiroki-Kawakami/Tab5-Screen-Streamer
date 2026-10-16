@@ -58,6 +58,7 @@ enum class ErrorCode : uint8_t {
 enum class Stream : uint8_t { Uac = 0, Bulk = 1 };
 enum class Target : uint8_t { Front = 0, Back = 1 };
 enum class Encoding : uint8_t { Jpeg = 0, Raw = 1, Lz4 = 2 };
+enum class AudioClock : uint8_t { Device = 0, Host = 1 };
 enum class PixelFormat : uint8_t { Rgb565 = 1, Rgb888 = 2 };
 enum class InputTarget : uint8_t { Touch = 0, Keyboard = 1 };
 enum class InputMode : uint8_t { None = 0, Event = 1, Hid = 2 };
@@ -138,7 +139,8 @@ struct __attribute__((packed)) AudioFormat {
     uint32_t sample_rate;
     uint8_t channels;
     uint8_t bits;
-    uint16_t reserved;
+    uint8_t clock;
+    uint8_t reserved;
 };
 
 struct __attribute__((packed)) AudioEvent {

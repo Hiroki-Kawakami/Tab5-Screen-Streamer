@@ -1,5 +1,5 @@
 // Frames from the screen capture or the player, scaled, encoded and laid out
-// for the device. Only the latest frame waits to be sent; older ones are
+// for every device. Only the latest frame waits to be sent; older ones are
 // dropped. The next frame is scaled while the last one is encoded.
 
 import { drawFrame } from "./draw";
@@ -8,7 +8,7 @@ import init, { Video } from "./wasm/streamer.js";
 import type { BandJob, FrameMessage, FromVideo, ToVideo, VideoCommand, VideoStatus } from "./messages";
 
 const YUV_FORMATS = new Set(["I420", "I420A", "NV12", "I422", "I422A", "I444", "I444A"]);
-/** Frames handed to the device worker and not yet sent. */
+/** Frames handed to the device worker and not yet sent, per device. */
 const INFLIGHT = 2;
 const STATS_PERIOD = 1000;
 
@@ -17,7 +17,7 @@ let video: Video | null = null;
 let preview: OffscreenCanvasRenderingContext2D | null = null;
 let device: MessagePort | null = null;
 let pending: FrameMessage | null = null;
-let inflight = 0;
+const inflight = new Map<number, number>();
 let ingesting = false;
 let encoding = false;
 /** A frame was taken since the last one was sent. */
@@ -106,17 +106,20 @@ function encode({ bands, picture, ...rest }: Prepared): Promise<Uint8Array[]> {
   );
 }
 
-async function send(now: number) {
-  const prepared = video!.prepare(now) as Prepared | null;
-  if (!prepared) return;
-  const jpegs = await encode(prepared);
-  const transfers = video!.finish(jpegs) as Uint8Array<ArrayBuffer>[];
-  if (transfers.length === 0) return;
-  const buffers = transfers.map((t) => t.buffer);
-  inflight += 1;
-  device!.postMessage({ type: "frame", transfers: buffers } satisfies FromVideo, buffers);
+async function send(now: number, fresh: boolean) {
+  const jobs = video!.prepare(now, fresh) as Prepared[] | null;
+  if (!jobs) return;
+  const jpegs = [];
+  for (const job of jobs) jpegs.push(await encode(job));
+  const frames = video!.finish(jpegs) as { device: number; transfers: Uint8Array<ArrayBuffer>[] }[];
+  if (frames.length === 0) return;
+  for (const frame of frames) {
+    const buffers = frame.transfers.map((t) => t.buffer);
+    inflight.set(frame.device, (inflight.get(frame.device) ?? 0) + 1);
+    device!.postMessage({ type: "frame", device: frame.device, transfers: buffers } satisfies FromVideo, buffers);
+    stats.bytes += buffers.reduce((n, b) => n + b.byteLength, 0);
+  }
   stats.frames += 1;
-  stats.bytes += buffers.reduce((n, b) => n + b.byteLength, 0);
   stats.quality = video!.quality;
 }
 
@@ -137,8 +140,8 @@ function pump() {
   clearTimeout(timer);
   const now = performance.now();
   report(now);
-  if (inflight >= INFLIGHT || !(fresh || video.redraw())) return;
-  if (!video.ready(now)) {
+  if ([...inflight.values()].some((n) => n >= INFLIGHT) || !(fresh || video.redraw())) return;
+  if (!video.ready(now, fresh)) {
     const wait = video.untilDue(now);
     if (wait > 0) timer = setTimeout(pump, wait);
     return;
@@ -165,9 +168,10 @@ async function ingest() {
 
 async function deliver() {
   encoding = true;
+  const all = fresh;
   fresh = false;
   try {
-    await send(performance.now());
+    await send(performance.now(), all);
   } catch (err) {
     status({ type: "error", message: err instanceof Error ? err.message : String(err) });
   } finally {
@@ -188,18 +192,18 @@ function fromDevice(message: ToVideo) {
 function apply(message: ToVideo) {
   switch (message.type) {
     case "session":
-      video!.connected(new Uint8Array(message.data), message.seq);
-      inflight = 0;
+      video!.connected(message.device, new Uint8Array(message.data), message.seq);
+      inflight.set(message.device, 0);
       break;
     case "events":
-      video!.events(new Uint8Array(message.data));
+      video!.events(message.device, new Uint8Array(message.data));
       break;
     case "lost":
-      video!.lost();
-      inflight = 0;
+      video!.lost(message.device);
+      inflight.delete(message.device);
       break;
     case "sent":
-      inflight = Math.max(0, inflight - 1);
+      if (inflight.has(message.device)) inflight.set(message.device, Math.max(0, inflight.get(message.device)! - 1));
       break;
   }
 }

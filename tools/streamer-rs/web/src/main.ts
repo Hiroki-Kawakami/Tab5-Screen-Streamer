@@ -1,8 +1,9 @@
 import "./style.css";
 
-import { DeviceHost, PRODUCT_ID, VENDOR_ID } from "./device";
+import { DeviceManager, PRODUCT_ID, VENDOR_ID } from "./device";
 import { type IconName, icon } from "./icons";
 import type {
+  AudioOutput,
   DeviceCommand,
   DeviceInfo,
   DeviceStatus,
@@ -26,12 +27,45 @@ interface Item {
   error: string | null;
 }
 
+interface Device {
+  /** The device worker's id, never reused. */
+  id: number;
+  /** Shown as "Tab5 #number". */
+  number: number;
+  serial: string | null;
+  info: DeviceInfo | null;
+  reason: string;
+  output: AudioOutput;
+  card: Card;
+}
+
+interface Card {
+  root: HTMLDivElement;
+  row: HTMLButtonElement;
+  dot: HTMLSpanElement;
+  summary: HTMLSpanElement;
+  body: HTMLDivElement;
+  brightness: HTMLInputElement;
+  brightnessValue: HTMLSpanElement;
+  audio: HTMLDivElement;
+  audioIcon: HTMLSpanElement;
+  volume: HTMLInputElement;
+  volumeValue: HTMLSpanElement;
+  outputs: HTMLButtonElement[];
+}
+
 /** Back to the start of the file rather than the previous one past this. */
 const RESTART_US = 3_000_000;
 const SLIDER_MS = 100;
 const TOAST_MS = 6000;
 const THUMBS = ["#2B3550", "#4A3426", "#23413D", "#3D2A47", "#3A3F2A", "#2E3A44", "#3F3524", "#352B3D"];
 const SURFACES: Record<string, string> = { monitor: "Entire Screen", window: "Window", browser: "Browser Tab" };
+const OUTPUTS: { value: AudioOutput; label: string; aria: string }[] = [
+  { value: "off", label: "Off", aria: "No audio output" },
+  { value: "l", label: "L", aria: "Left channel only" },
+  { value: "r", label: "R", aria: "Right channel only" },
+  { value: "lr", label: "L+R", aria: "Left and right channels" },
+];
 
 document.getElementById("app")!.innerHTML = `
   <div id="landing" class="view landing">
@@ -68,35 +102,19 @@ document.getElementById("app")!.innerHTML = `
         <button id="pill" class="pill" type="button" aria-haspopup="menu" aria-expanded="false">
           <span id="pill-dot" class="dot"></span>
           <span id="pill-label" class="pill-label"></span>
+          <span id="pill-count" class="pill-count" aria-hidden="true"></span>
           ${icon("chevronDown", 16)}
         </button>
-        <div id="menu" class="menu" role="menu" aria-label="Tab5 connection menu" hidden>
-          <div class="menu-device">
-            <span class="menu-name">M5Stack Tab5</span>
-            <span class="menu-state"><span id="menu-dot" class="dot"></span><span id="menu-state"></span></span>
+        <div id="menu" class="menu" role="menu" aria-label="Tab5 devices" hidden>
+          <div class="menu-head">
+            <span class="menu-title">Devices</span>
+            <span id="menu-count" class="menu-count"></span>
           </div>
-          <div class="menu-rule"></div>
-          <div class="menu-controls">
-            <div class="control-head">
-              <label for="brightness" class="control-label">${icon("sun", 18)}Brightness</label>
-              <span id="brightness-value" class="control-value"></span>
-            </div>
-            <input id="brightness" type="range" min="0" max="100" step="1" />
-            <div id="menu-volume" class="menu-volume">
-              <div class="control-head">
-                <div class="control-label">
-                  <button id="mute" class="mute" type="button"></button>
-                  <label for="volume">Volume</label>
-                </div>
-                <span id="volume-value" class="control-value"></span>
-              </div>
-              <input id="volume" type="range" min="0" max="100" step="1" />
-            </div>
-          </div>
+          <div id="devices" class="menu-devices"></div>
           <div class="menu-rule"></div>
           <div class="menu-actions">
+            <button id="add-device" class="menu-item add" role="menuitem" type="button">${icon("plus", 18)}Add Tab5</button>
             <button id="back" class="menu-item" role="menuitem" type="button">${icon("layoutGrid", 18)}Back to Mode Select</button>
-            <button id="disconnect" class="menu-item danger" role="menuitem" type="button">${icon("plugConnectedX", 18)}Disconnect</button>
           </div>
         </div>
       </div>
@@ -205,17 +223,12 @@ const ui = {
   pill: element<HTMLButtonElement>("pill"),
   pillDot: element<HTMLSpanElement>("pill-dot"),
   pillLabel: element<HTMLSpanElement>("pill-label"),
+  pillCount: element<HTMLSpanElement>("pill-count"),
   menu: element<HTMLDivElement>("menu"),
-  menuDot: element<HTMLSpanElement>("menu-dot"),
-  menuState: element<HTMLSpanElement>("menu-state"),
-  brightness: element<HTMLInputElement>("brightness"),
-  brightnessValue: element<HTMLSpanElement>("brightness-value"),
-  menuVolume: element<HTMLDivElement>("menu-volume"),
-  mute: element<HTMLButtonElement>("mute"),
-  volume: element<HTMLInputElement>("volume"),
-  volumeValue: element<HTMLSpanElement>("volume-value"),
+  menuCount: element<HTMLSpanElement>("menu-count"),
+  devices: element<HTMLDivElement>("devices"),
+  addDevice: element<HTMLButtonElement>("add-device"),
   back: element<HTMLButtonElement>("back"),
-  disconnect: element<HTMLButtonElement>("disconnect"),
   modes: element<HTMLElement>("modes"),
   modeScreen: element<HTMLButtonElement>("mode-screen"),
   modePlayer: element<HTMLButtonElement>("mode-player"),
@@ -291,7 +304,8 @@ const playerVideo = new MessageChannel();
 
 const toVideo = (command: VideoCommand, transfer: Transferable[] = []) => videoWorker.postMessage(command, transfer);
 const toPlayer = (command: PlayerCommand) => playerWorker.postMessage(command);
-let toDevice: (command: DeviceCommand) => void = () => {};
+const early: DeviceCommand[] = [];
+let toDevice: (command: DeviceCommand) => void = (command) => early.push(command);
 
 const preview = ui.canvas.transferControlToOffscreen();
 toVideo({ type: "init", device: deviceVideo.port2, player: playerVideo.port2, preview }, [
@@ -315,14 +329,13 @@ deviceWorker.onmessage = async (event: MessageEvent<DeviceStatus>) => {
     toDevice = (command) => deviceWorker.postMessage(command);
   } else if (navigator.usb) {
     deviceWorker.terminate();
-    const host = await DeviceHost.create(navigator.usb, deviceStatus, deviceVideo.port1, devicePlayer.port1);
-    toDevice = (command) => host.command(command);
+    const manager = await DeviceManager.create(navigator.usb, deviceStatus, deviceVideo.port1, devicePlayer.port1);
+    toDevice = (command) => manager.command(command);
   }
-  if (wantConnected) toDevice({ type: "start" });
+  for (const command of early.splice(0)) toDevice(command);
 };
 
 let view: View = "landing";
-let wantConnected = false;
 
 function show(next: View) {
   if (view === "screen" && next !== "screen") leaveScreen();
@@ -337,8 +350,8 @@ function show(next: View) {
   ui.shell.classList.toggle("screen", view === "screen");
   ui.shell.classList.toggle("player", view === "player");
   ui.back.hidden = view === "modes";
-  ui.menuVolume.hidden = view !== "player";
   closeMenu();
+  renderDevices();
   if (view === "screen") renderScreen();
   if (view === "player") render();
 }
@@ -348,83 +361,240 @@ if (!navigator.usb) {
   ui.unsupported.hidden = false;
 }
 
-ui.connectButton.onclick = async () => {
-  const devices = await navigator.usb!.getDevices();
-  if (!devices.some((d) => d.vendorId === VENDOR_ID && d.productId === PRODUCT_ID)) {
-    try {
-      await navigator.usb!.requestDevice({ filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }] });
-    } catch {
-      return;
-    }
+function isTab5(device: USBDevice): boolean {
+  return device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID;
+}
+
+async function choose(): Promise<USBDevice | null> {
+  try {
+    return await navigator.usb!.requestDevice({ filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }] });
+  } catch {
+    return null;
   }
-  info = null;
-  deviceStatus({ type: "waiting", reason: "" });
-  wantConnected = true;
-  toDevice({ type: "start" });
+}
+
+ui.connectButton.onclick = async () => {
+  const device = (await navigator.usb!.getDevices()).find(isTab5) ?? (await choose());
+  if (!device) return;
+  addDevice(device);
   show("modes");
 };
 
-let info: DeviceInfo | null = null;
+ui.addDevice.onclick = async () => {
+  closeMenu();
+  const device = await choose();
+  if (!device) return;
+  const known = devices.find((d) => d.serial === (device.serialNumber ?? null));
+  if (known) {
+    say(`${nameOf(known)} is already connected`);
+    return;
+  }
+  addDevice(device);
+};
+
+let devices: Device[] = [];
+let nextDevice = 1;
+let expanded: number | null = null;
 let draggingSlider = false;
 
-function percent(volume: number): number {
-  const { min, max } = info!.volume;
+function nameOf(device: Device): string {
+  return `Tab5 #${device.number}`;
+}
+
+function addDevice(usb: USBDevice) {
+  const id = nextDevice++;
+  const number = devices.reduce((n, d) => Math.max(n, d.number), 0) + 1;
+  const device = { id, number, serial: usb.serialNumber ?? null, info: null, reason: "", output: "lr" } as Device;
+  device.card = newCard(device);
+  devices.push(device);
+  expanded = id;
+  toDevice({ type: "add", device: id, serial: device.serial });
+  renderDevices();
+}
+
+function removeDevice(device: Device) {
+  if (devices.length === 1) show("landing");
+  toDevice({ type: "remove", device: device.id });
+  devices = devices.filter((d) => d !== device);
+  if (expanded === device.id) expanded = devices[0]?.id ?? null;
+  renderDevices();
+}
+
+function percent(device: Device, volume: number): number {
+  const { min, max } = device.info!.volume;
   return max > min ? Math.round(((volume - min) * 100) / (max - min)) : 0;
 }
 
-function showBrightness(value: number) {
-  if (!draggingSlider) ui.brightness.value = String(value);
-  ui.brightnessValue.textContent = `${value}%`;
+function newCard(device: Device): Card {
+  const root = document.createElement("div");
+  root.className = "cm-card";
+  const name = nameOf(device);
+  root.innerHTML = `
+    <div class="cm-head">
+      <button class="cm-row" type="button">
+        <span class="dot"></span>
+        <span class="cm-text"><span class="cm-name"></span><span class="cm-summary"></span></span>
+        ${icon("chevronDown", 16)}
+      </button>
+      <button class="cm-disconnect" type="button" title="Disconnect">${icon("plugConnectedX", 18)}</button>
+    </div>
+    <div class="cm-body">
+      <div class="cm-control">
+        <div class="control-head">
+          <label for="brightness-${device.id}" class="control-label">${icon("sun", 18)}Brightness</label>
+          <span class="control-value cm-brightness"></span>
+        </div>
+        <input id="brightness-${device.id}" type="range" min="0" max="100" step="1" />
+      </div>
+      <div class="cm-control cm-audio">
+        <div class="control-head">
+          <label for="volume-${device.id}" class="control-label"><span class="cm-audio-icon"></span>Audio</label>
+          <span class="control-value cm-volume"></span>
+        </div>
+        <div class="cm-outputs" role="group" aria-label="Audio output"></div>
+        <input id="volume-${device.id}" type="range" min="0" max="100" step="1" />
+      </div>
+    </div>`;
+  const find = <T extends Element>(selector: string) => root.querySelector(selector) as T;
+  const card: Card = {
+    root,
+    row: find(".cm-row"),
+    dot: find(".dot"),
+    summary: find(".cm-summary"),
+    body: find(".cm-body"),
+    brightness: find(`#brightness-${device.id}`),
+    brightnessValue: find(".cm-brightness"),
+    audio: find(".cm-audio"),
+    audioIcon: find(".cm-audio-icon"),
+    volume: find(`#volume-${device.id}`),
+    volumeValue: find(".cm-volume"),
+    outputs: [],
+  };
+  find<HTMLSpanElement>(".cm-name").textContent = name;
+  const disconnect = find<HTMLButtonElement>(".cm-disconnect");
+  disconnect.setAttribute("aria-label", `Disconnect ${name}`);
+  disconnect.onclick = () => removeDevice(device);
+  card.row.onclick = () => {
+    expanded = expanded === device.id ? null : device.id;
+    renderDevices();
+  };
+  const outputs = find<HTMLDivElement>(".cm-outputs");
+  for (const option of OUTPUTS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = option.label;
+    button.setAttribute("aria-label", option.aria);
+    button.onclick = () => {
+      device.output = option.value;
+      toDevice({ type: "output", device: device.id, output: option.value });
+      renderDevices();
+    };
+    outputs.append(button);
+    card.outputs.push(button);
+  }
+  for (const slider of [card.brightness, card.volume]) {
+    slider.addEventListener("pointerdown", () => (draggingSlider = true));
+    slider.addEventListener("pointerup", () => (draggingSlider = false));
+  }
+  const sendBrightness = throttled(() =>
+    toDevice({ type: "brightness", device: device.id, value: Number(card.brightness.value) }),
+  );
+  card.brightness.oninput = () => {
+    card.brightnessValue.textContent = `${card.brightness.value}%`;
+    sendBrightness();
+  };
+  const sendVolume = throttled(() => {
+    if (!device.info) return;
+    const { min, max } = device.info.volume;
+    const value = min + Math.round((Number(card.volume.value) * (max - min)) / 100);
+    toDevice({ type: "volume", device: device.id, value, mute: false });
+  });
+  card.volume.oninput = () => {
+    card.volumeValue.textContent = `${card.volume.value}%`;
+    sendVolume();
+  };
+  return card;
 }
 
-function showVolume() {
-  if (!info) return;
+function renderDevice(device: Device) {
+  const { card, info } = device;
+  const open = expanded === device.id;
+  const audio = view === "player";
+  const off = device.output === "off";
+  card.root.classList.toggle("expanded", open);
+  card.row.setAttribute("aria-expanded", String(open));
+  card.body.hidden = !open;
+  card.dot.classList.toggle("on", info !== null);
+  card.audio.hidden = !audio;
+  for (const control of [card.brightness, card.volume]) control.disabled = info === null;
+  card.volume.disabled ||= off;
+  card.outputs.forEach((button, i) => {
+    const selected = OUTPUTS[i].value === device.output;
+    button.classList.toggle("on", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  card.audioIcon.innerHTML = icon(off ? "volume3" : "volume", 18);
+  if (!info) {
+    card.summary.textContent = device.reason ? `Waiting for Tab5: ${device.reason}` : "Connecting…";
+    card.brightnessValue.textContent = "";
+    card.volumeValue.textContent = off ? "Off" : "";
+    card.volumeValue.classList.toggle("off", off);
+    return;
+  }
+  if (!draggingSlider) card.brightness.value = String(info.brightness);
+  card.brightnessValue.textContent = `${info.brightness}%`;
   const { volume, mute } = info.volume;
-  const shown = mute ? 0 : percent(volume);
-  if (!draggingSlider) ui.volume.value = String(shown);
-  ui.volumeValue.textContent = mute ? "Muted" : `${shown}%`;
-  ui.volumeValue.classList.toggle("off", mute);
-  ui.volume.classList.toggle("off", mute);
-  ui.mute.innerHTML = icon(shown >= 50 ? "volume" : shown > 0 ? "volume2" : "volume3", 18);
-  ui.mute.classList.toggle("off", shown === 0);
-  ui.mute.setAttribute("aria-label", mute ? "Unmute" : "Mute");
-  ui.mute.setAttribute("aria-pressed", String(mute));
+  const shown = mute ? 0 : percent(device, volume);
+  if (!draggingSlider) card.volume.value = String(shown);
+  const level = off ? "Off" : mute ? "Muted" : `${shown}%`;
+  card.volumeValue.textContent = level;
+  card.volumeValue.classList.toggle("off", off || mute);
+  const output = OUTPUTS.find((o) => o.value === device.output)!.label;
+  const sound = off ? "Audio Off" : `Audio ${output} ${level}`;
+  card.summary.textContent = audio ? `Brightness ${info.brightness}% · ${sound}` : `Brightness ${info.brightness}%`;
+}
+
+function renderDevices() {
+  const cards = devices.map((d) => d.card.root);
+  const shown = ui.devices.children;
+  if (cards.length !== shown.length || cards.some((card, i) => card !== shown[i])) {
+    ui.devices.replaceChildren(...cards);
+  }
+  for (const device of devices) renderDevice(device);
+  const count = devices.length;
+  const connected = devices.some((d) => d.info !== null);
+  ui.pillDot.classList.toggle("on", connected);
+  ui.pillLabel.textContent = connected ? "Connected" : "Connecting…";
+  ui.pillCount.textContent = String(count);
+  ui.pill.setAttribute("aria-label", count === 1 ? "1 Tab5 connected" : `${count} Tab5 devices connected`);
+  ui.menuCount.textContent = `${count} connected`;
 }
 
 function deviceStatus(status: DeviceStatus) {
+  if (status.type === "ready") return;
+  const device = devices.find((d) => d.id === status.device);
+  if (!device) return;
   switch (status.type) {
     case "waiting":
-      info = null;
-      ui.menuState.textContent = status.reason ? `Waiting for Tab5: ${status.reason}` : "Connecting…";
+      device.info = null;
+      device.reason = status.reason;
       break;
     case "connected":
-      info = status.info;
-      showBrightness(info.brightness);
-      showVolume();
-      break;
-    case "stopped":
-      info = null;
+      device.info = status.info;
       break;
     case "brightness":
-      showBrightness(status.value);
+      if (device.info) device.info.brightness = status.value;
       break;
     case "volume":
-      if (info) {
-        info.volume = { ...info.volume, volume: status.value, mute: status.mute };
-        showVolume();
-      }
+      if (device.info) device.info.volume = { ...device.info.volume, volume: status.value, mute: status.mute };
       break;
     case "warning":
-      say(status.message);
-      break;
+      say(devices.length > 1 ? `${nameOf(device)}: ${status.message}` : status.message);
+      return;
+    default:
+      return;
   }
-  const connected = info !== null;
-  ui.pillDot.classList.toggle("on", connected);
-  ui.menuDot.classList.toggle("on", connected);
-  ui.pillLabel.textContent = connected ? "Tab5 Connected" : "Connecting…";
-  ui.pill.setAttribute("aria-label", ui.pillLabel.textContent);
-  if (connected) ui.menuState.textContent = "Connected via USB";
-  for (const control of [ui.brightness, ui.volume, ui.mute]) control.disabled = !connected;
+  renderDevices();
 }
 
 function closeMenu() {
@@ -441,37 +611,8 @@ ui.pill.onclick = (e) => {
 ui.menu.onclick = (e) => e.stopPropagation();
 document.addEventListener("click", closeMenu);
 
-for (const slider of [ui.brightness, ui.volume]) {
-  slider.addEventListener("pointerdown", () => (draggingSlider = true));
-  slider.addEventListener("pointerup", () => (draggingSlider = false));
-}
-const sendBrightness = throttled(() => toDevice({ type: "brightness", value: Number(ui.brightness.value) }));
-ui.brightness.oninput = () => {
-  ui.brightnessValue.textContent = `${ui.brightness.value}%`;
-  sendBrightness();
-};
-const sendVolume = throttled(() => {
-  if (!info) return;
-  const { min, max } = info.volume;
-  const value = min + Math.round((Number(ui.volume.value) * (max - min)) / 100);
-  toDevice({ type: "volume", value, mute: false });
-});
-ui.volume.oninput = () => {
-  ui.volumeValue.textContent = `${ui.volume.value}%`;
-  sendVolume();
-};
-ui.mute.onclick = () => {
-  if (info) toDevice({ type: "volume", value: info.volume.volume, mute: !info.volume.mute });
-};
-
 ui.home.onclick = () => show("modes");
 ui.back.onclick = () => show("modes");
-ui.disconnect.onclick = () => {
-  show("landing");
-  wantConnected = false;
-  toDevice({ type: "stop" });
-  info = null;
-};
 ui.modeScreen.onclick = () => show("screen");
 ui.modePlayer.onclick = () => show("player");
 
@@ -638,7 +779,9 @@ function playItem(id: number, play = true, start = 0) {
   position = start;
   duration = item.duration ?? null;
   playerActive = true;
-  toPlayer({ type: "load", file: item.file, play, start, audioMaxRate: info?.audioMaxRate ?? 0 });
+  const rates = devices.flatMap((d) => (d.info ? [d.info.audioMaxRate] : []));
+  const audioMaxRate = rates.length > 0 ? Math.min(...rates) : 0;
+  toPlayer({ type: "load", file: item.file, play, start, audioMaxRate });
   render();
 }
 

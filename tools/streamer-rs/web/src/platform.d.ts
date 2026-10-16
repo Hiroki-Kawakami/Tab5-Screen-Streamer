@@ -33,6 +33,7 @@ interface USBOutTransferResult {
 interface USBDevice {
   readonly vendorId: number;
   readonly productId: number;
+  readonly serialNumber?: string | null;
   readonly opened: boolean;
   readonly configuration: USBConfiguration | null;
   open(): Promise<void>;

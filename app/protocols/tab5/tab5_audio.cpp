@@ -6,7 +6,9 @@
 #include "tab5_audio.hpp"
 #include <algorithm>
 #include <cmath>
+#include "audf_convert.h"
 #include "bsp.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
@@ -18,7 +20,8 @@ static constexpr int kTaskPriority = 7;
 static constexpr int kTaskCore = 1;
 static constexpr uint32_t kTaskStackBytes = 4096;
 static constexpr int kQueueLength = 8;
-static constexpr TickType_t kIdleClose = pdMS_TO_TICKS(200);
+static constexpr uint32_t kIdleCloseMs = 200;
+static constexpr TickType_t kIdleClose = pdMS_TO_TICKS(kIdleCloseMs);
 static constexpr int64_t kReportPeriodUs = 20 * 1000;
 static constexpr uint32_t kChunksPerSecond = 100;
 
@@ -36,6 +39,11 @@ static constexpr uint32_t kUacChunkFrames = Tab5Audio::kUacRate / 250;
 // Feedback leans this far off the nominal rate at an empty or full buffer.
 static constexpr double kUacFeedbackGain = 0.002;
 static constexpr int64_t kUacStatsPeriodUs = 5 * 1000 * 1000;
+
+static constexpr uint32_t kHostTargetMs = 60;
+static constexpr uint32_t kHostCapacityMs = 250;
+static constexpr uint32_t kHostChunksPerSecond = 250;
+static constexpr int64_t kHostStatsPeriodUs = 5 * 1000 * 1000;
 
 using tab5::Channel;
 using tab5::ErrorCode;
@@ -55,6 +63,7 @@ Tab5Audio::~Tab5Audio() {
     vSemaphoreDelete(synced_);
     vQueueDelete(queue_);
     if (uac_pcm_) audf_fifo_destroy(uac_pcm_);
+    close_host();
 }
 
 void Tab5Audio::send(Op op) {
@@ -176,6 +185,15 @@ void Tab5Audio::task(void *arg) {
             self->play_uac();
             continue;
         }
+        if (self->host_) {
+            if (xQueueReceive(self->queue_, &item, 0)) {
+                self->run(item);
+                if (item.op == Op::Quit) break;
+                continue;
+            }
+            self->play_host();
+            continue;
+        }
         if (!xQueueReceive(self->queue_, &item, self->open_ ? kIdleClose : portMAX_DELAY)) {
             self->close();
             continue;
@@ -242,7 +260,8 @@ void Tab5Audio::execute(const tab5::MsgHeader &header, const uint8_t *payload) {
             memcpy(&format, payload, sizeof(format));
             have_format_ = format.sample_rate && format.sample_rate <= kMaxRate &&
                            (format.channels == 1 || format.channels == 2) &&
-                           (format.bits == 16 || format.bits == 24 || format.bits == 32);
+                           (format.bits == 16 || format.bits == 24 || format.bits == 32) &&
+                           format.clock <= static_cast<uint8_t>(tab5::AudioClock::Host);
             if (!have_format_) {
                 events_.error(Channel::Audio, ErrorCode::Unsupported, header.seq);
                 return;
@@ -274,17 +293,30 @@ void Tab5Audio::play(const tab5::MsgHeader &header, const uint8_t *pcm) {
         events_.error(Channel::Audio, ErrorCode::Malformed, header.seq);
         return;
     }
-    if (!open_ || memcmp(&opened_, &format_, sizeof(format_)) != 0) {
-        esp_err_t err = bsp_audio_open(format_.sample_rate, format_.bits, format_.channels);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "open %u Hz %u ch %u bit: %s", (unsigned)format_.sample_rate,
-                     format_.channels, format_.bits, esp_err_to_name(err));
-            events_.error(Channel::Audio, ErrorCode::Unsupported, header.seq);
-            have_format_ = false;
-            return;
+    if (format_.clock == static_cast<uint8_t>(tab5::AudioClock::Host)) {
+        if (!host_ || memcmp(&host_format_, &format_, sizeof(format_)) != 0) {
+            esp_err_t err = open_host();
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "open host %u Hz %u ch %u bit: %s", (unsigned)format_.sample_rate,
+                         format_.channels, format_.bits, esp_err_to_name(err));
+                events_.error(Channel::Audio, ErrorCode::Unsupported, header.seq);
+                have_format_ = false;
+                return;
+            }
         }
-        open_ = true;
-        opened_ = format_;
+        write_host(pcm, header.length);
+        played_ += header.length;
+        dequeue(header.length);
+        return;
+    }
+    if (host_) {
+        drain_host();
+        close_host();
+    }
+    if (!open_output(format_.sample_rate, format_.bits, format_.channels)) {
+        events_.error(Channel::Audio, ErrorCode::Unsupported, header.seq);
+        have_format_ = false;
+        return;
     }
 
     const uint32_t chunk = std::max<uint32_t>(format_.sample_rate / kChunksPerSecond, 1) * frame;
@@ -299,18 +331,153 @@ void Tab5Audio::play(const tab5::MsgHeader &header, const uint8_t *pcm) {
     }
 }
 
+bool Tab5Audio::open_output(uint32_t rate, uint8_t bits, uint8_t channels) {
+    const tab5::AudioFormat output = {rate, channels, bits, 0, 0};
+    if (open_ && memcmp(&opened_, &output, sizeof(output)) == 0) return true;
+    esp_err_t err = bsp_audio_open(rate, bits, channels);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "open %u Hz %u ch %u bit: %s", (unsigned)rate, channels, bits,
+                 esp_err_to_name(err));
+        return false;
+    }
+    open_ = true;
+    opened_ = output;
+    return true;
+}
+
+esp_err_t Tab5Audio::open_host() {
+    drain_host();
+    close_host();
+    const uint32_t rate = format_.sample_rate;
+    const uint8_t channels = format_.channels;
+    const audf_fmt_t fmt = format_.bits == 16 ? AUDF_FMT_S16 : AUDF_FMT_S32;
+    const size_t target = (size_t)rate * kHostTargetMs / 1000;
+    host_chunk_ = std::max<uint32_t>(rate / kHostChunksPerSecond, 1);
+
+    audf_fifo_config_t fifo = {};
+    fifo.fmt = fmt;
+    fifo.channels = channels;
+    fifo.capacity = (size_t)rate * kHostCapacityMs / 1000;
+    fifo.prefill = target;
+    fifo.underrun = AUDF_FIFO_UNDERRUN_SILENCE;
+    fifo.overrun = AUDF_FIFO_OVERRUN_DROP_OLDEST;
+    fifo.alloc_caps = MALLOC_CAP_SPIRAM;
+    esp_err_t err = audf_fifo_create(&fifo, &host_pcm_);
+    if (err == ESP_OK) {
+        audf_resampler_config_t resampler = {};
+        resampler.kind = AUDF_RESAMPLER_CUBIC;
+        resampler.fmt = fmt;
+        resampler.channels = channels;
+        resampler.in_rate = rate;
+        resampler.out_rate = rate;
+        err = audf_resampler_create(&resampler, &host_resampler_);
+    }
+    if (err == ESP_OK) {
+        audf_graph_config_t graph = {};
+        graph.max_frames = host_chunk_;
+        err = audf_graph_create(&graph, &host_graph_);
+    }
+    if (err == ESP_OK) {
+        audf_drift_config_t drift = {};
+        drift.sample_rate = rate;
+        drift.target_frames = target;
+        audf_drift_init(&host_drift_, &drift);
+        audf_node_t *queued = audf_graph_add_fifo(host_graph_, nullptr, host_pcm_);
+        host_out_ = audf_graph_add_resampler(host_graph_, queued, host_resampler_, &host_drift_);
+        err = audf_graph_build(host_graph_);
+    }
+    if (err == ESP_OK) {
+        host_buffer_ = static_cast<uint8_t *>(heap_caps_malloc(
+            host_chunk_ * channels * sizeof(int32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        if (!host_buffer_) err = ESP_ERR_NO_MEM;
+    }
+    if (err == ESP_OK && !open_output(rate, fmt == AUDF_FMT_S16 ? 16 : 32, channels)) {
+        err = ESP_ERR_NOT_SUPPORTED;
+    }
+    if (err != ESP_OK) {
+        close_host();
+        return err;
+    }
+    host_ = true;
+    host_format_ = format_;
+    host_input_us_ = esp_timer_get_time();
+    return ESP_OK;
+}
+
+void Tab5Audio::close_host() {
+    host_ = false;
+    if (host_graph_) audf_graph_destroy(host_graph_);
+    if (host_resampler_) audf_resampler_destroy(host_resampler_);
+    if (host_pcm_) audf_fifo_destroy(host_pcm_);
+    heap_caps_free(host_buffer_);
+    host_graph_ = nullptr;
+    host_out_ = nullptr;
+    host_resampler_ = nullptr;
+    host_pcm_ = nullptr;
+    host_buffer_ = nullptr;
+}
+
+void Tab5Audio::drain_host() {
+    if (!host_) return;
+    while (audf_fifo_primed(host_pcm_) && audf_fifo_level(host_pcm_) > 0) output_host();
+}
+
+void Tab5Audio::write_host(const uint8_t *pcm, uint32_t bytes) {
+    host_input_us_ = esp_timer_get_time();
+    const uint8_t channels = host_format_.channels;
+    uint32_t frames = bytes / frame_bytes();
+    if (host_format_.bits == 16) {
+        audf_fifo_write(host_pcm_, pcm, frames);
+        return;
+    }
+    const audf_pcm_t layout = host_format_.bits == 24 ? AUDF_PCM_S24 : AUDF_PCM_S32;
+    while (frames) {
+        const uint32_t n = std::min(frames, host_chunk_);
+        audf_convert_from_pcm(pcm, layout, host_buffer_, AUDF_FMT_S32, n * channels);
+        audf_fifo_write(host_pcm_, host_buffer_, n);
+        pcm += n * frame_bytes();
+        frames -= n;
+    }
+}
+
+void Tab5Audio::output_host() {
+    const uint32_t samples = host_chunk_ * host_format_.channels;
+    esp_err_t err = audf_graph_read(host_graph_, host_out_, host_buffer_, host_chunk_);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "host read: %s", esp_err_to_name(err));
+        memset(host_buffer_, 0, samples * sizeof(int32_t));
+    }
+    if (host_format_.bits == 16) {
+        bsp_audio_write(host_buffer_, samples * sizeof(int16_t));
+        return;
+    }
+    audf_convert_to_pcm(host_buffer_, AUDF_FMT_S32, host_buffer_, AUDF_PCM_S32, samples);
+    bsp_audio_write(host_buffer_, samples * sizeof(int32_t));
+}
+
+// Plays silence while the FIFO fills to its target, and the drift steers the
+// resampler to keep it there; sustained silence closes the output.
+void Tab5Audio::play_host() {
+    const int64_t now = esp_timer_get_time();
+    if (!audf_fifo_primed(host_pcm_) && now - host_input_us_ >= kIdleCloseMs * 1000) {
+        close();
+        return;
+    }
+    output_host();
+    report(false);
+    if (now - host_stats_us_ >= kHostStatsPeriodUs) {
+        host_stats_us_ = now;
+        ESP_LOGI(TAG, "host: %u frames buffered, adjust %.1f ppm",
+                 (unsigned)audf_fifo_level(host_pcm_), host_drift_.ppm);
+    }
+}
+
 // The FIFO plays silence until half full and whenever it runs dry; the
 // feedback rate steers the host to keep it at half.
 void Tab5Audio::play_uac() {
-    if (!open_) {
-        esp_err_t err = bsp_audio_open(kUacRate, kUacBits, kUacChannels);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "open uac: %s", esp_err_to_name(err));
-            vTaskDelay(kIdleClose);
-            return;
-        }
-        open_ = true;
-        opened_ = {kUacRate, kUacChannels, kUacBits, 0};
+    if (!open_output(kUacRate, kUacBits, kUacChannels)) {
+        vTaskDelay(kIdleClose);
+        return;
     }
     alignas(4) uint8_t chunk[kUacChunkFrames * kUacFrameBytes];
     audf_fifo_read(uac_pcm_, chunk, kUacChunkFrames);
@@ -332,6 +499,7 @@ void Tab5Audio::dequeue(uint32_t bytes) {
 }
 
 void Tab5Audio::close() {
+    close_host();
     if (!open_) return;
     bsp_audio_close();
     open_ = false;
@@ -344,7 +512,12 @@ void Tab5Audio::report(bool force) {
     if (!force && now - last_report_us_ < kReportPeriodUs) return;
     last_report_us_ = now;
     const uint32_t frame = frame_bytes();
-    const tab5::AudioEvent event = {static_cast<uint32_t>(now), queued_bytes_ / frame,
-                                    capacity_bytes_ / frame};
+    uint32_t buffered = queued_bytes_ / frame;
+    uint32_t capacity = capacity_bytes_ / frame;
+    if (host_) {
+        buffered += audf_fifo_level(host_pcm_);
+        capacity = host_format_.sample_rate * kHostCapacityMs / 1000;
+    }
+    const tab5::AudioEvent event = {static_cast<uint32_t>(now), buffered, capacity};
     events_.send(tab5::Type::Audio, 0, &event, sizeof(event));
 }

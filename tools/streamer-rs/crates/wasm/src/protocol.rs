@@ -1,7 +1,7 @@
 //! Messages to the device and its events, for the device worker.
 
 use js_sys::Array;
-use streamer_core::protocol::{self, Event, Info, Volume};
+use streamer_core::protocol::{self, AudioClock, Event, Info, Volume};
 use wasm_bindgen::prelude::*;
 
 use crate::object;
@@ -21,9 +21,14 @@ pub fn set_volume(stream: u8, mute: bool, volume: i16) -> Vec<u8> {
     protocol::set_volume(stream, mute, volume)
 }
 
+/// `host` plays it in the host's clock rather than the device's.
 #[wasm_bindgen(js_name = audioFormat)]
-pub fn audio_format(rate: u32, channels: u8, bits: u8) -> Vec<u8> {
-    protocol::audio_format(rate, channels, bits)
+pub fn audio_format(rate: u32, channels: u8, bits: u8, host: bool) -> Vec<u8> {
+    let clock = match host {
+        true => AudioClock::Host,
+        false => AudioClock::Device,
+    };
+    protocol::audio_format(rate, channels, bits, clock)
 }
 
 #[wasm_bindgen(js_name = errorName)]
@@ -61,7 +66,9 @@ fn info(info: &Info) -> JsValue {
 fn event(event: &Event) -> JsValue {
     let kind = |name: &str| ("type", JsValue::from_str(name));
     match event {
-        Event::Info { seq, info: i } => object(&[kind("info"), ("seq", (*seq).into()), ("info", info(i))]),
+        Event::Info { seq, info: i } => {
+            object(&[kind("info"), ("seq", (*seq).into()), ("info", info(i))])
+        }
         Event::Closed => object(&[kind("closed")]),
         Event::SwapDone { seq } => object(&[kind("swapDone"), ("seq", (*seq).into())]),
         Event::Error { seq, channel, code } => object(&[
@@ -74,7 +81,9 @@ fn event(event: &Event) -> JsValue {
             object(&[kind("orientation"), ("orientation", (*orientation).into())])
         }
         Event::Format { epoch, .. } => object(&[kind("format"), ("epoch", (*epoch).into())]),
-        Event::Overlay { visible, .. } => object(&[kind("overlay"), ("visible", (*visible).into())]),
+        Event::Overlay { visible, .. } => {
+            object(&[kind("overlay"), ("visible", (*visible).into())])
+        }
         Event::Damage(_) => object(&[kind("damage")]),
         Event::Volume {
             stream,
@@ -103,4 +112,3 @@ fn event(event: &Event) -> JsValue {
 pub fn parse_events(data: &[u8]) -> Array {
     protocol::parse_events(data).iter().map(event).collect()
 }
-
