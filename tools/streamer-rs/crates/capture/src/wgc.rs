@@ -2,53 +2,63 @@
 //! processor.
 
 use std::mem::ManuallyDrop;
-use std::sync::Once;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::SyncSender;
-use std::thread;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, Mutex, Once};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Foundation::TypedEventHandler;
+use windows::Graphics::Capture::{
+    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+};
+use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
+use windows::Graphics::DirectX::DirectXPixelFormat;
+use windows::Graphics::SizeInt32;
+use windows::Win32::Foundation::{HANDLE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEX2D_VPIV,
+    D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
     D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Gdi::{
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
+    HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::{POWERBROADCAST_SETTING, RegisterPowerSettingNotification};
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
 };
 use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+use windows::Win32::System::WinRT::Direct3D11::{
+    CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
+};
+use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DispatchMessageW, GetMessageW,
-    HWND_MESSAGE, MSG, PBT_POWERSETTINGCHANGE, RegisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_UNLOCK,
+    CURSOR_SHOWING, CURSOR_SUPPRESSED, CURSORINFO, CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE,
+    DefWindowProcW, DispatchMessageW, GetCursorInfo, GetMessageW, HWND_MESSAGE, MSG,
+    PBT_POWERSETTINGCHANGE, RegisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_POWERBROADCAST,
+    WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_UNLOCK,
 };
-use windows::core::{Interface, w};
-use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
-use windows_capture::frame::Frame as CapturedFrame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
-use windows_capture::monitor::Monitor;
-use windows_capture::settings::{
-    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
-    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
-};
+use windows::core::{BOOL, Interface, PCWSTR, Ref, factory, w};
 
 use crate::{Display, Format, Frame};
 
-type Error = Box<dyn std::error::Error + Send + Sync>;
+const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 
 /// D3D11_VIDEO_PROCESSOR_COLOR_SPACE bits: YCbCr_Matrix 0 is BT.601, and
 /// Nominal_Range 2 (bits 4-5) is 0-255.
@@ -61,21 +71,55 @@ pub fn authorize() -> bool {
     true
 }
 
-fn describe(monitor: Monitor) -> Option<Display> {
-    let size = (monitor.width().ok()?, monitor.height().ok()?);
-    Some(Display {
-        id: monitor.as_raw_hmonitor() as u64,
-        size,
-    })
+fn monitor(id: u64) -> HMONITOR {
+    HMONITOR(id as *mut std::ffi::c_void)
+}
+
+fn describe(id: u64) -> Option<Display> {
+    let mut info = MONITORINFOEXW {
+        monitorInfo: MONITORINFO {
+            cbSize: size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor(id), &mut info.monitorInfo) }.as_bool() {
+        return None;
+    }
+    let mut mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    let name = PCWSTR(info.szDevice.as_ptr());
+    unsafe { EnumDisplaySettingsW(name, ENUM_CURRENT_SETTINGS, &mut mode) }
+        .as_bool()
+        .then_some(Display {
+            id,
+            size: (mode.dmPelsWidth, mode.dmPelsHeight),
+        })
+}
+
+unsafe extern "system" fn collect_monitor(
+    monitor: HMONITOR,
+    _dc: HDC,
+    _rect: *mut RECT,
+    ids: LPARAM,
+) -> BOOL {
+    unsafe { (*(ids.0 as *mut Vec<u64>)).push(monitor.0 as u64) };
+    true.into()
 }
 
 pub fn displays() -> Result<Vec<Display>, String> {
-    let monitors = Monitor::enumerate().map_err(|e| format!("monitors: {e}"))?;
-    Ok(monitors.into_iter().filter_map(describe).collect())
+    let mut ids: Vec<u64> = Vec::new();
+    let ids_param = LPARAM(&mut ids as *mut Vec<u64> as isize);
+    unsafe { EnumDisplayMonitors(None, None, Some(collect_monitor), ids_param) }
+        .ok()
+        .map_err(|e| format!("monitors: {e}"))?;
+    Ok(ids.into_iter().filter_map(describe).collect())
 }
 
 pub fn display(id: u64) -> Option<Display> {
-    describe(Monitor::from_raw_hmonitor(id as *mut std::ffi::c_void))
+    describe(id)
 }
 
 pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
@@ -83,7 +127,7 @@ pub fn bounds(id: u64) -> Option<(f64, f64, f64, f64)> {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    unsafe { GetMonitorInfoW(HMONITOR(id as *mut std::ffi::c_void), &mut info) }
+    unsafe { GetMonitorInfoW(monitor(id), &mut info) }
         .as_bool()
         .then(|| {
             let r = info.rcMonitor;
@@ -183,8 +227,11 @@ pub fn mirror_primary(_id: u64) -> Option<u64> {
 }
 
 pub fn main_display() -> Result<Display, String> {
-    let monitor = Monitor::primary().map_err(|e| format!("primary monitor: {e}"))?;
-    describe(monitor).ok_or_else(|| "primary monitor has no size".into())
+    let primary = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTONULL) };
+    if primary.is_invalid() {
+        return Err("no primary monitor".into());
+    }
+    describe(primary.0 as u64).ok_or_else(|| "primary monitor has no size".into())
 }
 
 fn texture(
@@ -365,9 +412,64 @@ impl Scaler {
     }
 }
 
-struct Handler {
+fn d3d_device() -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let mut device = None;
+    let mut context = None;
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    }?;
+    Ok((device.unwrap(), context.unwrap()))
+}
+
+fn winrt_device(device: &ID3D11Device) -> windows::core::Result<IDirect3DDevice> {
+    let dxgi: IDXGIDevice = device.cast()?;
+    unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }?.cast()
+}
+
+/// Windows hides the cursor while touch or pen input drives it, but the
+/// capture draws it regardless of that.
+fn cursor_shown() -> bool {
+    let mut info = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetCursorInfo(&mut info) }.is_err() {
+        return true;
+    }
+    info.flags.0 & (CURSOR_SHOWING.0 | CURSOR_SUPPRESSED.0) == CURSOR_SHOWING.0
+}
+
+/// Polled rather than checked per frame: while the cursor is left out of the
+/// capture, moving it brings no frame.
+fn follow_cursor(session: GraphicsCaptureSession, interval: Duration, stop: Receiver<()>) {
+    let mut shown = cursor_shown();
+    while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(interval) {
+        let now = cursor_shown();
+        if now == shown {
+            continue;
+        }
+        if let Err(e) = session.SetIsCursorCaptureEnabled(now) {
+            eprintln!("cursor capture: {e}");
+            return;
+        }
+        shown = now;
+    }
+}
+
+struct Sink {
     frames: SyncSender<Frame>,
     size: (u32, u32),
+    pool_size: SizeInt32,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     video: ID3D11VideoDevice,
@@ -375,36 +477,30 @@ struct Handler {
     scaler: Option<Scaler>,
 }
 
-impl GraphicsCaptureApiHandler for Handler {
-    type Flags = (SyncSender<Frame>, (u32, u32));
-    type Error = Error;
-
-    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let video = ctx
-            .device
-            .cast::<ID3D11VideoDevice>()
-            .map_err(|e| format!("D3D11 video device: {e}"))?;
-        let video_context = ctx
-            .device_context
-            .cast::<ID3D11VideoContext>()
-            .map_err(|e| format!("D3D11 video context: {e}"))?;
-        Ok(Handler {
-            frames: ctx.flags.0,
-            size: ctx.flags.1,
-            device: ctx.device,
-            context: ctx.device_context,
-            video,
-            video_context,
-            scaler: None,
-        })
-    }
-
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut CapturedFrame,
-        _control: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
-        let input_size = (frame.width(), frame.height());
+impl Sink {
+    fn receive(&mut self, pool: &Direct3D11CaptureFramePool) -> Result<(), String> {
+        let Ok(frame) = pool.TryGetNextFrame() else {
+            return Ok(());
+        };
+        let content = frame
+            .ContentSize()
+            .map_err(|e| format!("frame size: {e}"))?;
+        if content != self.pool_size {
+            drop(frame);
+            winrt_device(&self.device)
+                .and_then(|device| pool.Recreate(&device, PIXEL_FORMAT, 1, content))
+                .map_err(|e| format!("recreate frame pool: {e}"))?;
+            self.pool_size = content;
+            return Ok(());
+        }
+        let texture: ID3D11Texture2D = frame
+            .Surface()
+            .and_then(|surface| surface.cast::<IDirect3DDxgiInterfaceAccess>())
+            .and_then(|access| unsafe { access.GetInterface() })
+            .map_err(|e| format!("frame texture: {e}"))?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        let input_size = (desc.Width, desc.Height);
         if self
             .scaler
             .as_ref()
@@ -422,7 +518,7 @@ impl GraphicsCaptureApiHandler for Handler {
         }
         let scaler = self.scaler.as_ref().unwrap();
         let scaled = scaler
-            .scale(frame.as_raw_texture(), &self.context, &self.video_context)
+            .scale(&texture, &self.context, &self.video_context)
             .map_err(|e| format!("scale: {e}"))?;
         let _ = self.frames.try_send(scaled);
         Ok(())
@@ -430,7 +526,13 @@ impl GraphicsCaptureApiHandler for Handler {
 }
 
 pub struct Capture {
-    control: Option<CaptureControl<Handler, Error>>,
+    item: GraphicsCaptureItem,
+    pool: Direct3D11CaptureFramePool,
+    session: GraphicsCaptureSession,
+    closed_token: i64,
+    arrived_token: i64,
+    cursor: Option<(Sender<()>, JoinHandle<()>)>,
+    ended: Arc<Mutex<Option<String>>>,
     /// A capture started on the lock screen yields only black frames once the
     /// session is unlocked, so every unlock after the start restarts it.
     unlocks: u32,
@@ -445,31 +547,96 @@ impl Capture {
     ) -> Result<Self, String> {
         watch_session();
         let unlocks = UNLOCKS.load(Ordering::Relaxed);
-        let monitor = Monitor::from_raw_hmonitor(id as *mut std::ffi::c_void);
         let interval = Duration::from_secs_f64(1.0 / max_fps.max(1) as f64);
-        let settings = Settings::new(
-            monitor,
-            CursorCaptureSettings::WithCursor,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Custom(interval),
-            DirtyRegionSettings::Default,
-            ColorFormat::Bgra8,
-            (frames, size),
-        );
-        let control =
-            Handler::start_free_threaded(settings).map_err(|e| format!("start capture: {e}"))?;
-        Ok(Capture {
-            control: Some(control),
+        let (device, context) = d3d_device().map_err(|e| format!("D3D11 device: {e}"))?;
+        let video = device
+            .cast::<ID3D11VideoDevice>()
+            .map_err(|e| format!("D3D11 video device: {e}"))?;
+        let video_context = context
+            .cast::<ID3D11VideoContext>()
+            .map_err(|e| format!("D3D11 video context: {e}"))?;
+        let item: GraphicsCaptureItem =
+            factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+                .and_then(|interop| unsafe { interop.CreateForMonitor(monitor(id)) })
+                .map_err(|e| format!("capture item: {e}"))?;
+        let pool_size = item.Size().map_err(|e| format!("capture size: {e}"))?;
+        let pool = winrt_device(&device)
+            .and_then(|winrt| {
+                Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, PIXEL_FORMAT, 1, pool_size)
+            })
+            .map_err(|e| format!("frame pool: {e}"))?;
+        let session = pool
+            .CreateCaptureSession(&item)
+            .map_err(|e| format!("capture session: {e}"))?;
+        session
+            .SetIsCursorCaptureEnabled(cursor_shown())
+            .and_then(|()| session.SetIsBorderRequired(false))
+            .and_then(|()| session.SetMinUpdateInterval(interval.into()))
+            .map_err(|e| format!("capture settings: {e}"))?;
+
+        let ended = Arc::new(Mutex::new(None));
+        let closed_token = item
+            .Closed(&TypedEventHandler::new({
+                let ended = ended.clone();
+                move |_, _| {
+                    ended.lock().unwrap().get_or_insert("capture ended".into());
+                    Ok(())
+                }
+            }))
+            .map_err(|e| format!("capture closed handler: {e}"))?;
+        let sink = Mutex::new(Sink {
+            frames,
+            size,
+            pool_size,
+            device,
+            context,
+            video,
+            video_context,
+            scaler: None,
+        });
+        let arrived_token = pool
+            .FrameArrived(&TypedEventHandler::new({
+                let ended = ended.clone();
+                move |pool: Ref<Direct3D11CaptureFramePool>, _| {
+                    let Some(pool) = pool.as_ref() else {
+                        return Ok(());
+                    };
+                    if ended.lock().unwrap().is_some() {
+                        return Ok(());
+                    }
+                    if let Err(e) = sink.lock().unwrap().receive(pool) {
+                        ended.lock().unwrap().get_or_insert(e);
+                    }
+                    Ok(())
+                }
+            }))
+            .map_err(|e| format!("frame handler: {e}"))?;
+        let mut capture = Capture {
+            item,
+            pool,
+            session,
+            closed_token,
+            arrived_token,
+            cursor: None,
+            ended,
             unlocks,
-        })
+        };
+        capture
+            .session
+            .StartCapture()
+            .map_err(|e| format!("start capture: {e}"))?;
+        let (stop, stopped) = mpsc::channel();
+        let session = capture.session.clone();
+        let thread = thread::spawn(move || follow_cursor(session, interval, stopped));
+        capture.cursor = Some((stop, thread));
+        Ok(capture)
     }
 }
 
 impl Capture {
     pub fn stopped(&self) -> Option<String> {
-        if self.control.as_ref().is_none_or(|c| c.is_finished()) {
-            return Some("capture ended".into());
+        if let Some(reason) = self.ended.lock().unwrap().clone() {
+            return Some(reason);
         }
         (UNLOCKS.load(Ordering::Relaxed) != self.unlocks).then(|| "session unlocked".into())
     }
@@ -477,9 +644,13 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        if let Some(control) = self.control.take()
-            && let Err(e) = control.stop()
-        {
+        if let Some((stop, thread)) = self.cursor.take() {
+            drop(stop);
+            let _ = thread.join();
+        }
+        let _ = self.pool.RemoveFrameArrived(self.arrived_token);
+        let _ = self.item.RemoveClosed(self.closed_token);
+        if let Err(e) = self.session.Close().and_then(|()| self.pool.Close()) {
             eprintln!("stop capture: {e}");
         }
     }
