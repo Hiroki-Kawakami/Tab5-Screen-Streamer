@@ -2,6 +2,7 @@
 // for the device. Only the latest frame waits to be sent; older ones are
 // dropped.
 
+import { drawFrame } from "./draw";
 import init, { Video } from "./wasm/streamer.js";
 import type { FrameMessage, FromVideo, ToVideo, VideoCommand, VideoStatus } from "./messages";
 
@@ -129,16 +130,8 @@ function apply(message: ToVideo) {
 
 function draw(message: FrameMessage) {
   if (!preview || !message.preview) return;
-  const { canvas } = preview;
-  const [w, h] = message.display;
-  const [rw, rh] = message.turn % 2 === 1 ? [h, w] : [w, h];
-  const scale = Math.min(canvas.width / rw, canvas.height / rh);
-  preview.clearRect(0, 0, canvas.width, canvas.height);
-  preview.save();
-  preview.translate(canvas.width / 2, canvas.height / 2);
-  preview.rotate((-message.turn * Math.PI) / 2);
-  preview.drawImage(message.frame, (-w * scale) / 2, (-h * scale) / 2, w * scale, h * scale);
-  preview.restore();
+  preview.clearRect(0, 0, preview.canvas.width, preview.canvas.height);
+  drawFrame(preview, message.frame, message.display, message.turn);
 }
 
 function frame(message: FrameMessage) {

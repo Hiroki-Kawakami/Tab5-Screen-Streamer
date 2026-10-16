@@ -100,7 +100,7 @@ export type PlayerCommand =
 
 export type PlayerStatus =
   | { type: "loaded"; duration: number | null }
-  | { type: "probed"; id: number; duration: number | null }
+  | { type: "probed"; id: number; duration: number | null; thumbnail: Blob | null }
   | { type: "position"; us: number }
   | { type: "ended" }
   | { type: "warning"; message: string }

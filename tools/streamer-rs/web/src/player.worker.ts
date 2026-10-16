@@ -2,6 +2,7 @@
 // the frames to the video worker when they are due and the PCM to the device
 // worker. The clock follows what the device plays when there is audio.
 
+import { drawFrame } from "./draw";
 import init, { AudioConverter, Media } from "./wasm/streamer.js";
 import {
   type FrameColor,
@@ -42,6 +43,12 @@ const LATE_US = 50_000;
 const STEP_US = 15_000;
 const POSITION_MS = 250;
 const DEFAULT_RATE = 48000;
+/** Seconds into the video the thumbnail is taken at, or the middle of a
+ * video shorter than twice this. */
+const THUMBNAIL_AT = 10;
+const THUMBNAIL_SIZE: [number, number] = [192, 108];
+/** Packets read looking for the thumbnail frame before giving up. */
+const THUMBNAIL_PACKETS = 2000;
 
 const ready = init();
 const reader = new FileReaderSync();
@@ -113,6 +120,11 @@ class Clock {
   }
 }
 
+/** Counter-clockwise quarter turns that show `video` upright. */
+function turnOf(video: Track): number {
+  return ((360 - (video.rotation % 360)) % 360) / 90;
+}
+
 function openMedia(file: File): Media {
   return new Media(file.size, (offset: number, length: number) =>
     new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + length))),
@@ -181,7 +193,7 @@ class Playback {
     this.paused = !play;
     this.showOne = !play;
     this.display = [video.displayWidth, video.displayHeight];
-    this.turn = ((360 - (video.rotation % 360)) % 360) / 90;
+    this.turn = turnOf(video);
     this.color = video.matrix === undefined ? null : { matrix: video.matrix, fullRange: video.fullRange ?? false };
     this.decoder = new VideoDecoder({
       output: (frame) => this.decoded(frame),
@@ -445,15 +457,80 @@ class Playback {
   }
 }
 
-function probe(id: number, file: File) {
-  let duration: number | null = null;
+/** The frame at `us`, or the last one before the packets run out. */
+async function frameAt(media: Media, video: Track, config: VideoDecoderConfig, us: number): Promise<VideoFrame | null> {
+  let found: VideoFrame | null = null;
+  let done = false;
+  const decoder = new VideoDecoder({
+    output: (frame) => {
+      if (done) {
+        frame.close();
+        return;
+      }
+      found?.close();
+      found = frame;
+      done = frame.timestamp >= us;
+    },
+    error: () => (done = true),
+  });
   try {
-    const media = openMedia(file);
-    duration = media.duration() ?? null;
-    media.free();
-  } catch {}
-  status({ type: "probed", id, duration });
+    decoder.configure(config);
+    media.select(new Uint32Array([video.index]));
+    media.seek(us);
+    let key = false;
+    for (let read = 0; !done && read < THUMBNAIL_PACKETS; read++) {
+      const packet = media.nextPacket();
+      if (!packet) break;
+      key ||= packet.key;
+      if (key) {
+        const { pts: timestamp, duration, data } = packet;
+        const type = packet.key ? "key" : "delta";
+        decoder.decode(new EncodedVideoChunk({ type, timestamp, duration, data }));
+      }
+      packet.free();
+      if (decoder.decodeQueueSize > FRAME_QUEUE) {
+        await new Promise((resolve) => decoder.addEventListener("dequeue", resolve, { once: true }));
+      }
+    }
+    if (!done) await decoder.flush().catch(() => {});
+  } finally {
+    done = true;
+    if (decoder.state !== "closed") decoder.close();
+  }
+  return found;
 }
+
+async function thumbnail(media: Media, duration: number | null): Promise<Blob | null> {
+  const video = (media.tracks() as Track[]).find((t) => t.kind === "video");
+  const config = video ? videoConfig(media, video) : null;
+  if (!video || !(await supported(config, (c) => VideoDecoder.isConfigSupported(c)))) return null;
+  const at = duration !== null && duration <= 2 * THUMBNAIL_AT ? duration / 2 : THUMBNAIL_AT;
+  const frame = await frameAt(media, video, config!, at * 1e6);
+  if (!frame) return null;
+  const canvas = new OffscreenCanvas(...THUMBNAIL_SIZE);
+  const context = canvas.getContext("2d")!;
+  drawFrame(context, frame, [video.displayWidth, video.displayHeight], turnOf(video));
+  frame.close();
+  return canvas.convertToBlob({ type: "image/jpeg", quality: 0.8 });
+}
+
+async function probe(id: number, file: File) {
+  let duration: number | null = null;
+  let picture: Blob | null = null;
+  let media: Media | null = null;
+  try {
+    media = openMedia(file);
+    duration = media.duration() ?? null;
+  } catch {}
+  status({ type: "probed", id, duration, thumbnail: null });
+  try {
+    if (media) picture = await thumbnail(media, duration);
+  } catch {}
+  media?.free();
+  if (picture) status({ type: "probed", id, duration, thumbnail: picture });
+}
+
+let probing: Promise<void> = Promise.resolve();
 
 async function load(file: File, play: boolean, start: number, audioMaxRate: number) {
   playback?.close();
@@ -484,7 +561,7 @@ self.onmessage = async (event: MessageEvent<PlayerCommand>) => {
       loading = loading.then(() => load(command.file, command.play, command.start, command.audioMaxRate));
       return;
     case "probe":
-      probe(command.id, command.file);
+      probing = probing.then(() => probe(command.id, command.file));
       return;
   }
   await loading;

@@ -14,7 +14,6 @@ import screenShare from "@tabler/icons/outline/screen-share.svg?raw";
 import sun from "@tabler/icons/outline/sun.svg?raw";
 import upload from "@tabler/icons/outline/upload.svg?raw";
 import usb from "@tabler/icons/outline/usb.svg?raw";
-import video from "@tabler/icons/outline/video.svg?raw";
 import volume from "@tabler/icons/outline/volume.svg?raw";
 import volume2 from "@tabler/icons/outline/volume-2.svg?raw";
 import volume3 from "@tabler/icons/outline/volume-3.svg?raw";
@@ -43,7 +42,6 @@ export const icons = {
   sun,
   upload,
   usb,
-  video,
   volume,
   volume2,
   volume3,

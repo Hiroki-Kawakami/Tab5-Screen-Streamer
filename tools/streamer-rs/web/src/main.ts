@@ -21,6 +21,8 @@ interface Item {
   file: File;
   /** Seconds; undefined until probed. */
   duration: number | null | undefined;
+  /** An object URL. */
+  thumbnail: string | null;
   error: string | null;
 }
 
@@ -659,7 +661,13 @@ function advance() {
 }
 
 function add(files: Iterable<File>) {
-  const added: Item[] = [...files].map((file) => ({ id: nextId++, file, duration: undefined, error: null }));
+  const added: Item[] = [...files].map((file) => ({
+    id: nextId++,
+    file,
+    duration: undefined,
+    thumbnail: null,
+    error: null,
+  }));
   if (added.length === 0) return;
   items.push(...added);
   for (const { id, file } of added) toPlayer({ type: "probe", id, file });
@@ -674,6 +682,8 @@ function add(files: Iterable<File>) {
 }
 
 function remove(id: number) {
+  const thumbnail = items.find((item) => item.id === id)?.thumbnail;
+  if (thumbnail) URL.revokeObjectURL(thumbnail);
   if (id === current) {
     const next = neighbour(1);
     items = items.filter((item) => item.id !== id);
@@ -697,7 +707,9 @@ function row(item: Item): HTMLLIElement {
   select.className = "pl-select";
   select.setAttribute("aria-label", `Play ${item.file.name}`);
   select.innerHTML = `
-    <span class="pl-thumb" style="background: ${THUMBS[item.id % THUMBS.length]}">${icon("video", 20)}</span>
+    <span class="pl-thumb" style="background: ${THUMBS[item.id % THUMBS.length]}">${
+      item.thumbnail ? `<img src="${item.thumbnail}" alt="" />` : icon("movie", 20)
+    }</span>
     <span class="pl-text"><span class="pl-name"></span><span class="pl-meta"></span></span>`;
   select.querySelector(".pl-name")!.textContent = item.file.name;
   const meta = select.querySelector<HTMLSpanElement>(".pl-meta")!;
@@ -758,7 +770,9 @@ playerWorker.onmessage = (event: MessageEvent<PlayerStatus>) => {
       break;
     case "probed": {
       const item = items.find((i) => i.id === status.id);
-      if (item) item.duration = status.duration;
+      if (!item) break;
+      item.duration = status.duration;
+      if (status.thumbnail) item.thumbnail = URL.createObjectURL(status.thumbnail);
       break;
     }
     case "position":
