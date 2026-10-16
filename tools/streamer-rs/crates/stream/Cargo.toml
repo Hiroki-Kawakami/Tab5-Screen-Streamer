@@ -1,0 +1,12 @@
+[package]
+name = "streamer-stream"
+description = "Streaming to the Tab5 for native clients: presenting frames and streaming a display"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+streamer-capture.workspace = true
+streamer-core.workspace = true
+streamer-device.workspace = true
+streamer-input.workspace = true

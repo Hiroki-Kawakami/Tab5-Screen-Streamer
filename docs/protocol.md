@@ -70,8 +70,8 @@ timeout, or the end of the USB configuration.
 - The panel is taken at the first video transfer of a session. When the
   session ends the panel is given back, bulk audio stops and its buffered PCM
   is dropped.
-- Video, audio and `SET_INPUT_MODE` outside a session are dropped without an
-  error.
+- Video, audio, `SET_INPUT_MODE` and `SET_BRIGHTNESS` outside a session are
+  dropped without an error.
 - The PC sends `CLOSE` when it stops, once its video transfers have
   completed. A transfer cut short is recovered by the next `OPEN`, but the
   last frame may be lost.
@@ -120,6 +120,7 @@ format, so it is not sent.
 | 0x03 | `KEEPALIVE` | none |
 | 0x04 | `SET_INPUT_MODE` | `u8 target`, `u8 mode`, `u16 reserved` |
 | 0x05 | `SET_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
+| 0x06 | `SET_BRIGHTNESS` | `u8 brightness`, `u8 reserved[3]` |
 
 ### Replies and events (IN)
 
@@ -139,6 +140,7 @@ format, so it is not sent.
 | 0x8c | `EV_INPUT_MODE` | `u8 target`, `u8 mode`, `u16 reserved` |
 | 0x8d | `EV_VOLUME` | `u8 stream`, `u8 mute`, `i16 volume` |
 | 0x8e | `EV_AUDIO` | `u32 time_us`, `u32 buffered_frames`, `u32 capacity_frames` |
+| 0x8f | `EV_BRIGHTNESS` | `u8 brightness`, `u8 reserved[3]` |
 
 `time_us` is the low 32 bits of the device clock in microseconds.
 
@@ -176,6 +178,8 @@ INFO
   u8  input_mode[2]            EV_INPUT_MODE; Touch, Keyboard
   Volume volume[2]             EV_VOLUME; UAC, BULK
   Overlay overlay              EV_OVERLAY
+  u8  brightness               EV_BRIGHTNESS
+  u8  reserved
 
 Volume
   u8  mute
@@ -295,6 +299,17 @@ redraws the whole content.
 - Drawing while off is executed as usual; the backlight stays off.
 - The display turns on when a session opens.
 - Input is sent while off as usual, so a touch can wake the host.
+
+### Brightness
+
+The backlight brightness in percent, 0 to 100. It is the device's own
+brightness setting, so it is kept after the session.
+
+- Values below the device's lowest brightness are raised to it.
+- Every change, from `SET_BRIGHTNESS` or on the device, is sent as
+  `EV_BRIGHTNESS` with the value applied.
+- While the display is off the backlight stays off; the brightness applies
+  when it turns on.
 
 ### Overlay
 

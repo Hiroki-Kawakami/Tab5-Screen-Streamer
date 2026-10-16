@@ -175,6 +175,16 @@ void PcAppStreamScreen::onEnter() {
         applyBrightness();
         if (on) restartIdle();
     });
+    service_->set_brightness_listener([weak](int percent) {
+        lv_lock();
+        lv_async_call([weak, percent] {
+            if (auto self = weak.lock()) {
+                static_cast<PcAppStreamScreen &>(*self).setBrightness(percent);
+            }
+        });
+        lv_unlock();
+    });
+    service_->brightness_changed(settings_display_brightness());
     service_->set_input_enabled(tab5::InputTarget::Touch, touch_);
     display_manager.set_outside_touch_callback(outsideTouch, this);
     bsp_keyboard_set_event_cb(keyboardEvent, this);
@@ -189,6 +199,7 @@ void PcAppStreamScreen::onExit() {
     if (service_) {
         service_->set_input_listener(nullptr);
         service_->set_display_power_listener(nullptr);
+        service_->set_brightness_listener(nullptr);
     }
     if (trackpad_) trackpad_->set_active(false);
     idle_enabled_ = false;
@@ -433,6 +444,8 @@ void PcAppStreamScreen::closeOverlay() {
     overlay_open_ = false;
     status_dot_ = nullptr;
     status_label_ = nullptr;
+    brightness_slider_ = nullptr;
+    brightness_value_ = nullptr;
     panel_set_clip(nullptr);
     lv_obj_invalidate(lv_obj_get_screen(waiting_));
     applyBrightness();
@@ -442,6 +455,17 @@ void PcAppStreamScreen::closeOverlay() {
 void PcAppStreamScreen::applyBrightness() {
     std::lock_guard<std::mutex> guard(brightness_lock_);
     bsp_display_set_brightness(display_on_ || overlay_open_ ? settings_display_brightness() : 0);
+}
+
+void PcAppStreamScreen::setBrightness(int percent) {
+    settings_set_display_brightness(percent);
+    settings_commit();
+    applyBrightness();
+    percent = settings_display_brightness();
+    service_->brightness_changed(percent);
+    if (!brightness_slider_) return;
+    lv_slider_set_value(brightness_slider_, percent, LV_ANIM_OFF);
+    lv_label_set_text_fmt(brightness_value_, "%d%%", percent);
 }
 
 void PcAppStreamScreen::restartIdle() {
@@ -484,10 +508,13 @@ void PcAppStreamScreen::buildOverlay(lv_obj_t *screen) {
     lv_label_set_text_fmt(value, "%d%%", settings_display_brightness());
     auto brightness = lv_setting_slider_create(section, kMinDisplayBrightness, 100,
                                                settings_display_brightness(), &kPanelColors);
-    lv_obj_add_event_fn(brightness, LV_EVENT_VALUE_CHANGED, [brightness, value](lv_event_t *) {
+    brightness_slider_ = brightness;
+    brightness_value_ = value;
+    lv_obj_add_event_fn(brightness, LV_EVENT_VALUE_CHANGED, [this, brightness, value](lv_event_t *) {
         const int percent = lv_slider_get_value(brightness);
         settings_set_display_brightness(percent);
         lv_label_set_text_fmt(value, "%d%%", percent);
+        service_->brightness_changed(settings_display_brightness());
     });
     lv_obj_add_event_fn(brightness, LV_EVENT_RELEASED, [](lv_event_t *) { settings_commit(); });
 

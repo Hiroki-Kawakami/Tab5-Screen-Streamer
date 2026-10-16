@@ -13,6 +13,10 @@ pub fn stopping() -> bool {
     STOPPING.load(Ordering::Relaxed)
 }
 
+pub fn flag() -> &'static AtomicBool {
+    &STOPPING
+}
+
 /// Lets a console that is being closed end the process.
 pub fn finished() {
     os::finished();

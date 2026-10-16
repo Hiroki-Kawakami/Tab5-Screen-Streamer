@@ -12,7 +12,7 @@ use streamer_device::connection::{Connection, Device};
 use streamer_input::{self as input, Injector};
 
 use crate::present::{self, LayoutKey, Presenter, Quality};
-use crate::signal;
+use crate::{Control, Notice, Notify, Request};
 
 /// How long to wait for a frame before handling device events.
 const POLL: Duration = Duration::from_millis(50);
@@ -36,23 +36,9 @@ pub struct CaptureOptions {
     pub virtual_display: bool,
     pub rotation: Option<u32>,
     pub quality: Quality,
+    /// Inject the device's touches into the OS.
+    pub touch: bool,
     pub verbose: bool,
-}
-
-pub fn list() -> Result<()> {
-    if !capture::authorize() {
-        return Err("screen capture is not permitted".into());
-    }
-    let main = capture::main_display()?.id;
-    for (index, display) in capture::displays()?.iter().enumerate() {
-        println!(
-            "{index}: {}x{}{}",
-            display.size.0,
-            display.size.1,
-            if display.id == main { " (main)" } else { "" }
-        );
-    }
-    Ok(())
 }
 
 fn image(frame: &Frame) -> Image<'_> {
@@ -81,7 +67,7 @@ fn image(frame: &Frame) -> Image<'_> {
 
 /// Streams the display until it cannot be captured; the device may come and
 /// go meanwhile.
-pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
+pub fn capture(device: &Device, options: CaptureOptions, control: &Control) -> Result<()> {
     if !capture::authorize() {
         return Err("screen capture is not permitted".into());
     }
@@ -95,11 +81,17 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
         (false, None) => Some(capture::main_display()?),
     };
     let mut injector = Injector::new()
-        .inspect_err(|e| println!("touch input off: {e}"))
+        .inspect_err(|e| (control.notify)(Notice::Warning(format!("touch input off: {e}"))))
         .ok();
-    while let Some(mut connection) = crate::connect(device) {
-        if let Err(e) = take_touch(&mut connection, injector.is_some()) {
-            device.lost(connection, &e);
+    let mut touch = options.touch;
+    while let Some(mut connection) = crate::connect(device, control.stop) {
+        (control.notify)(Notice::Connected(connection.info.clone()));
+        let (_, brightness) = requests(control, &mut touch);
+        let mode = connection.info.input_mode[InputTarget::Touch as usize];
+        let started = set_touch(&mut connection, mode, injector.is_some() && touch)
+            .and_then(|()| set_brightness(&mut connection, brightness));
+        if let Err(e) = started {
+            lost(device, connection, control, e);
             continue;
         }
         let created = match display {
@@ -109,7 +101,12 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
                     .rotation
                     .unwrap_or(connection.info.orientation as u32);
                 let serial = virtual_serial(connection.serial.as_deref());
-                Some(create_virtual(&connection.info, serial, rotation)?)
+                Some(create_virtual(
+                    &connection.info,
+                    serial,
+                    rotation,
+                    &control.notify,
+                )?)
             }
         };
         let stop = loop {
@@ -118,7 +115,8 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
                 (None, Some(display)) => Source::Display(display.id),
                 (None, None) => unreachable!(),
             };
-            match Session::run(&mut connection, source, &options, injector.as_mut()) {
+            let injector = injector.as_mut();
+            match Session::run(&mut connection, source, &options, injector, control, &mut touch) {
                 Err(Changed) => continue,
                 stop => break stop,
             }
@@ -128,7 +126,7 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
         }
         match stop {
             Ok(()) => return connection.close(),
-            Err(Lost(e)) => device.lost(connection, &e),
+            Err(Lost(e)) => lost(device, connection, control, e),
             Err(Fatal(e)) => {
                 let _ = connection.close();
                 return Err(e);
@@ -139,13 +137,47 @@ pub fn capture(device: &Device, options: CaptureOptions) -> Result<()> {
     Ok(())
 }
 
-/// Asks the device for its touches, which it sends while touch input is
-/// enabled on it.
-fn take_touch(connection: &mut Connection, injecting: bool) -> Result<()> {
-    if !injecting || connection.info.input_mode[InputTarget::Touch as usize] == InputMode::None {
+fn lost(device: &Device, connection: Connection, control: &Control, reason: String) {
+    device.lost(connection, &reason);
+    (control.notify)(Notice::Disconnected(reason));
+}
+
+/// Takes the pending requests: true when touch injection has changed, and
+/// the last brightness asked for.
+fn requests(control: &Control, touch: &mut bool) -> (bool, Option<u8>) {
+    let Some(requests) = control.requests else {
+        return (false, None);
+    };
+    let before = *touch;
+    let mut brightness = None;
+    for request in requests.try_iter() {
+        match request {
+            Request::Touch(on) => *touch = on,
+            Request::Brightness(percent) => brightness = Some(percent),
+        }
+    }
+    (*touch != before, brightness)
+}
+
+fn set_brightness(connection: &mut Connection, brightness: Option<u8>) -> Result<()> {
+    if let Some(brightness) = brightness {
+        let payload = protocol::set_brightness(brightness);
+        connection.control(protocol::SET_BRIGHTNESS, &payload)?;
+    }
+    Ok(())
+}
+
+/// Takes the device's touches while they are injected, and leaves them to
+/// its trackpad otherwise.
+fn set_touch(connection: &mut Connection, current: InputMode, inject: bool) -> Result<()> {
+    let mode = match inject {
+        true => InputMode::Event,
+        false => InputMode::Hid,
+    };
+    if current == InputMode::None || current == mode {
         return Ok(());
     }
-    let payload = protocol::set_input_mode(InputTarget::Touch, InputMode::Event);
+    let payload = protocol::set_input_mode(InputTarget::Touch, mode);
     connection.control(protocol::SET_INPUT_MODE, &payload)?;
     Ok(())
 }
@@ -224,7 +256,12 @@ fn virtual_serial(usb_serial: Option<&str>) -> u32 {
         .map_or(VIRTUAL_SERIAL, |mac| mac as u32)
 }
 
-fn create_virtual(info: &Info, serial: u32, rotation: u32) -> Result<VirtualDisplay> {
+fn create_virtual(
+    info: &Info,
+    serial: u32,
+    rotation: u32,
+    notify: &Notify,
+) -> Result<VirtualDisplay> {
     let size = virtual_size(info, rotation);
     let millimeters = match rotation % 2 {
         1 => (PANEL_MILLIMETERS.1, PANEL_MILLIMETERS.0),
@@ -249,7 +286,7 @@ fn create_virtual(info: &Info, serial: u32, rotation: u32) -> Result<VirtualDisp
         }
         thread::sleep(Duration::from_millis(100));
     }
-    println!("virtual display {}x{}", size.0, size.1);
+    notify(Notice::VirtualDisplay(size));
     Ok(display)
 }
 
@@ -266,6 +303,8 @@ use Stop::{Changed, Fatal, Lost};
 struct Session<'a> {
     options: &'a CaptureOptions,
     injector: Option<&'a mut Injector>,
+    control: &'a Control<'a>,
+    touch: &'a mut bool,
     source: Source<'a>,
     display: u64,
     /// Sized by the session to the rotation, rather than watched.
@@ -311,6 +350,8 @@ impl<'a> Session<'a> {
         source: Source<'a>,
         options: &'a CaptureOptions,
         injector: Option<&'a mut Injector>,
+        control: &'a Control<'a>,
+        touch: &'a mut bool,
     ) -> std::result::Result<(), Stop> {
         let display = source.display();
         let virtual_display = match source {
@@ -335,6 +376,8 @@ impl<'a> Session<'a> {
         let mut session = Session {
             options,
             injector,
+            control,
+            touch,
             source,
             display,
             virtual_display,
@@ -347,6 +390,7 @@ impl<'a> Session<'a> {
                 false,
                 options.rotation,
                 options.quality,
+                control.notify.clone(),
             ),
             capture: None,
             asleep: false,
@@ -357,7 +401,7 @@ impl<'a> Session<'a> {
         };
         session.start().map_err(Fatal)?;
         let mut checked = Instant::now();
-        while !signal::stopping() {
+        while !control.stopping() {
             let wait = match session.pending {
                 true => session.presenter.until_due().min(POLL),
                 false => POLL,
@@ -373,7 +417,7 @@ impl<'a> Session<'a> {
                 }
             }
             if let Some(reason) = session.capture.as_ref().and_then(Capture::stopped) {
-                println!("capture stopped ({reason}), restarting");
+                (control.notify)(Notice::CaptureRestarting(reason));
                 thread::sleep(RESTART_DELAY);
                 let restarted = match capture::asleep(display) {
                     true => Err("display asleep".into()),
@@ -386,6 +430,13 @@ impl<'a> Session<'a> {
             if session.presenter.events(connection).map_err(Lost)? {
                 session.relayout().map_err(Fatal)?;
             }
+            let (touch_changed, brightness) = requests(control, session.touch);
+            if touch_changed {
+                let mode = session.presenter.info.input_mode[InputTarget::Touch as usize];
+                let inject = session.injector.is_some() && *session.touch;
+                set_touch(connection, mode, inject).map_err(Lost)?;
+            }
+            set_brightness(connection, brightness).map_err(Lost)?;
             session.inject();
             if checked.elapsed() >= DISPLAY_CHECK {
                 checked = Instant::now();
@@ -397,16 +448,16 @@ impl<'a> Session<'a> {
                     session.sleep(connection, "display asleep")?;
                 }
                 if session.source.changed() {
-                    println!("display mirroring changed");
+                    (control.notify)(Notice::MirroringChanged);
                     return Err(Changed);
                 }
                 if session.virtual_display.is_none() {
                     let Some(now) = capture::display(display) else {
-                        println!("display gone");
+                        (control.notify)(Notice::DisplayGone);
                         return Ok(());
                     };
                     if now.size != session.size {
-                        println!("display now {}x{}", now.size.0, now.size.1);
+                        (control.notify)(Notice::DisplaySize(now.size));
                         session.size = now.size;
                         session.relayout().map_err(Fatal)?;
                     }
@@ -418,7 +469,7 @@ impl<'a> Session<'a> {
             }
             if session.options.verbose {
                 let audio_level = session.presenter.audio_level;
-                session.presenter.stats.report(audio_level);
+                session.presenter.stats.report(audio_level, &control.notify);
             }
         }
         Ok(())
@@ -440,7 +491,7 @@ impl<'a> Session<'a> {
             None => Ok(()),
         };
         if let Err(e) = result.and_then(|()| injector.refresh()) {
-            eprintln!("touch: {e}");
+            (self.control.notify)(Notice::Warning(format!("touch: {e}")));
         }
     }
 
@@ -466,7 +517,7 @@ impl<'a> Session<'a> {
             if size != self.size {
                 display.resize(size)?;
                 wait_for_size(display.id(), size)?;
-                println!("virtual display {}x{}", size.0, size.1);
+                (self.control.notify)(Notice::VirtualDisplay(size));
                 self.size = size;
             }
         }
@@ -500,7 +551,7 @@ impl<'a> Session<'a> {
         connection: &mut Connection,
         reason: &str,
     ) -> std::result::Result<(), Stop> {
-        println!("display off ({reason})");
+        (self.control.notify)(Notice::DisplayOff(reason.into()));
         self.asleep = true;
         self.restart().map_err(Fatal)?;
         self.presenter.power_off(connection).map_err(Lost)
@@ -510,10 +561,10 @@ impl<'a> Session<'a> {
     fn wake(&mut self) {
         match self.start() {
             Ok(()) => {
-                println!("display on");
+                (self.control.notify)(Notice::DisplayOn);
                 self.asleep = false;
             }
-            Err(e) => println!("capture: {e}"),
+            Err(e) => (self.control.notify)(Notice::Warning(format!("capture: {e}"))),
         }
     }
 

@@ -1,3 +1,6 @@
+[alias]
+xtask = "run --package xtask --"
+
 # SSE4.2 and POPCNT, which Windows 11 24H2 requires anyway.
 [target.'cfg(all(windows, target_arch = "x86_64"))']
 rustflags = ["-C", "target-cpu=x86-64-v2"]

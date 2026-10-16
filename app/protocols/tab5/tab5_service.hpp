@@ -35,6 +35,9 @@ public:
     /* Called with every display power the host sets, and with on when a
      * session opens. Off is blackened once the listener returns. */
     using DisplayPowerListener = std::function<void(bool on)>;
+    /* Called with the brightness the host sets, 0-100. The listener applies
+     * it and announces what it applied with brightness_changed(). */
+    using BrightnessListener = std::function<void(int percent)>;
 
     explicit Tab5Service(UsbStatusListener status);
     ~Tab5Service();
@@ -68,6 +71,9 @@ public:
 
     /* Returns once the previous listener is no longer running. */
     void set_display_power_listener(DisplayPowerListener listener);
+    /* Returns once the previous listener is no longer running. */
+    void set_brightness_listener(BrightnessListener listener);
+    void brightness_changed(int percent);
 
 private:
     void handle_control(const tab5::MsgHeader &header, const uint8_t *payload);
@@ -113,4 +119,7 @@ private:
     tab5::KeyEvent key_ = {};
     std::mutex display_lock_;
     DisplayPowerListener display_listener_;
+    std::mutex brightness_lock_;
+    BrightnessListener brightness_listener_;
+    std::atomic<uint8_t> brightness_ = 0;
 };

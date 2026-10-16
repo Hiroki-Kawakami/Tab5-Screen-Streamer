@@ -225,6 +225,15 @@ void Tab5Service::handle_control(const tab5::MsgHeader &header, const uint8_t *p
             audio_->set_volume(message.mute, message.volume);
             return;
         }
+        case tab5::Type::SetBrightness: {
+            tab5::ByteEvent message;
+            if (header.length != sizeof(message)) break;
+            memcpy(&message, payload, sizeof(message));
+            if (!session_) return;
+            std::lock_guard<std::mutex> guard(brightness_lock_);
+            if (brightness_listener_) brightness_listener_(std::min<int>(message.value, 100));
+            return;
+        }
         default:
             break;
     }
@@ -311,6 +320,7 @@ void Tab5Service::send_info(uint32_t seq) {
     info.overlay.visible = overlay_visible_;
     info.overlay.stream = wire_rect(stream_);
     portEXIT_CRITICAL(&lock_);
+    info.brightness = brightness_;
     events_.send(tab5::Type::Info, seq, &info, sizeof(info), info.epoch);
 }
 
@@ -401,6 +411,17 @@ bool Tab5Service::key(const tab5::KeyEvent &event) {
 void Tab5Service::set_display_power_listener(DisplayPowerListener listener) {
     std::lock_guard<std::mutex> guard(display_lock_);
     display_listener_ = std::move(listener);
+}
+
+void Tab5Service::set_brightness_listener(BrightnessListener listener) {
+    std::lock_guard<std::mutex> guard(brightness_lock_);
+    brightness_listener_ = std::move(listener);
+}
+
+void Tab5Service::brightness_changed(int percent) {
+    brightness_ = percent;
+    const tab5::ByteEvent event = {static_cast<uint8_t>(percent), {}};
+    events_.send(tab5::Type::Brightness, 0, &event, sizeof(event));
 }
 
 void Tab5Service::set_display_power(bool on) {

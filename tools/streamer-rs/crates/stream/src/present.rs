@@ -13,6 +13,8 @@ use streamer_core::protocol::{
 };
 use streamer_device::connection::{Connection, TIMEOUT, report};
 
+use crate::{Notice, Notify};
+
 const STATS_PERIOD: Duration = Duration::from_secs(1);
 const JPEG_BANDS: u32 = 4;
 const RATE_WINDOW: Duration = Duration::from_secs(1);
@@ -87,6 +89,13 @@ pub struct Quality {
     pub max_rate: Option<f64>,
 }
 
+impl Quality {
+    pub const DEFAULT: Quality = Quality {
+        ceiling: 80,
+        max_rate: Some(10e6),
+    };
+}
+
 struct RateControl {
     options: Quality,
     quality: u8,
@@ -158,7 +167,7 @@ impl Stats {
         *high = (*high).max(quality);
     }
 
-    pub fn report(&mut self, audio: Option<(u32, u32)>) {
+    pub fn report(&mut self, audio: Option<(u32, u32)>, notify: &Notify) {
         let elapsed = self.start.elapsed();
         if elapsed < STATS_PERIOD {
             return;
@@ -173,12 +182,12 @@ impl Stats {
             Some((low, high)) => format!(", quality {low}-{high}"),
             None => String::new(),
         };
-        println!(
+        notify(Notice::Stats(format!(
             "{:.1} frames/s, {} dropped, {:.1} MB/s{quality}{audio}",
             self.frames as f64 / seconds,
             self.dropped,
             self.bytes as f64 / seconds / 1e6
-        );
+        )));
         *self = Stats::new();
     }
 }
@@ -204,6 +213,7 @@ pub struct Presenter {
     pub stats: Stats,
     rate: RateControl,
     last_sent: Option<Instant>,
+    pub notify: Notify,
 }
 
 impl Presenter {
@@ -214,6 +224,7 @@ impl Presenter {
         front: bool,
         rotation: Option<u32>,
         quality: Quality,
+        notify: Notify,
     ) -> Self {
         Presenter {
             info,
@@ -230,6 +241,7 @@ impl Presenter {
             stats: Stats::new(),
             rate: RateControl::new(quality),
             last_sent: None,
+            notify,
         }
     }
 
@@ -262,7 +274,7 @@ impl Presenter {
         let panel_width = self.info.panel_width as u32;
         let (fw, fh) = self.layout.frame();
         let (x, y, w, h) = self.layout.content(panel_width);
-        println!(
+        (self.notify)(Notice::Layout(format!(
             "{fw}x{fh} -> {w}x{h} at {x},{y}, rotation {}, {} {:?} {:?} into {}",
             self.rotation(),
             match self.layout {
@@ -272,7 +284,7 @@ impl Presenter {
             self.encoding,
             self.info.pixel_format,
             if self.front { "FRONT" } else { "BACK + SWAP" }
-        );
+        )));
     }
 
     /// Turns the display off, which blackens it; the next frame turns it on.
@@ -323,64 +335,51 @@ impl Presenter {
     }
 
     fn apply(&mut self, event: Event) -> bool {
-        match event {
+        let mut relayout = false;
+        match &event {
             Event::SwapDone { seq } => {
-                while self.swaps.front().is_some_and(|&s| s <= seq) {
+                while self.swaps.front().is_some_and(|s| s <= seq) {
                     self.swaps.pop_front();
                 }
+                return false;
             }
             Event::Orientation(orientation) => {
-                println!("orientation {orientation}");
-                self.info.orientation = orientation as u8;
-                return self.rotation.is_none();
+                self.info.orientation = *orientation as u8;
+                relayout = self.rotation.is_none();
             }
-            Event::Volume {
-                stream,
-                mute,
-                volume,
-            } => println!(
-                "volume {stream}: {:.1} dB{}",
-                volume as f64 / 256.0,
-                if mute { ", muted" } else { "" }
-            ),
-            Event::Audio { buffered, capacity } => self.audio_level = Some((buffered, capacity)),
-            Event::Overlay { visible, stream } => {
-                println!(
-                    "overlay {}, stream {}x{} at {},{}",
-                    if visible { "shown" } else { "hidden" },
-                    stream.2,
-                    stream.3,
-                    stream.0,
-                    stream.1
-                );
-                self.info.overlay_visible = visible;
+            Event::Volume { .. } => {}
+            Event::Brightness(brightness) => self.info.brightness = *brightness,
+            Event::Audio { buffered, capacity } => {
+                self.audio_level = Some((*buffered, *capacity));
+                return false;
             }
+            Event::Overlay { visible, .. } => self.info.overlay_visible = *visible,
             Event::Touch(points) => {
                 if self.info.input_mode[InputTarget::Touch as usize] == InputMode::Event {
-                    self.touches.push(points);
+                    self.touches.push(points.clone());
                 }
+                return false;
             }
             Event::InputMode(target, mode) => {
-                println!("{target:?} input {mode:?}");
-                let current = &mut self.info.input_mode[target as usize];
-                if target == InputTarget::Touch && *current == InputMode::Event {
+                let current = &mut self.info.input_mode[*target as usize];
+                if *target == InputTarget::Touch && *current == InputMode::Event {
                     self.touches.push(Vec::new());
                 }
-                *current = mode;
+                *current = *mode;
             }
-            Event::Damage((x, y, w, h)) => {
-                println!("damage {w}x{h} at {x},{y}");
-                self.redraw = true;
-            }
+            Event::Damage(_) => self.redraw = true,
             Event::Format { format, epoch } => {
-                println!("pixel format {format:?}, epoch {epoch}");
-                self.info.pixel_format = format;
-                self.info.epoch = epoch;
+                self.info.pixel_format = *format;
+                self.info.epoch = *epoch;
                 self.clear();
             }
-            event => report(&event),
+            event => {
+                report(event);
+                return false;
+            }
         }
-        false
+        (self.notify)(Notice::Event(event));
+        relayout
     }
 
     /// Draws `frame`, laid out by the current layout.

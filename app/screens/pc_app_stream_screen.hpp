@@ -45,6 +45,8 @@ private:
     lv_display_t *overlay_ = nullptr;
     lv_obj_t *status_dot_ = nullptr;
     lv_obj_t *status_label_ = nullptr;
+    lv_obj_t *brightness_slider_ = nullptr;
+    lv_obj_t *brightness_value_ = nullptr;
 
     enum class Gesture : uint8_t { None, Corner, Swiped, Input, Menu, Wake };
 
@@ -68,6 +70,7 @@ private:
     void updateWaiting();
     void updateStatusRow();
     void applyBrightness();
+    void setBrightness(int percent);
     void restartIdle();
     static void idleTimeout(TimerHandle_t timer);
     void toggleOverlay();

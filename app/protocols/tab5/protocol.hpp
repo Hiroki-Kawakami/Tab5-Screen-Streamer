@@ -20,6 +20,7 @@ enum class Type : uint8_t {
     KeepAlive = 0x03,
     SetInputMode = 0x04,
     SetVolume = 0x05,
+    SetBrightness = 0x06,
     Info = 0x81,
     Closed = 0x82,
     Error = 0x83,
@@ -33,6 +34,7 @@ enum class Type : uint8_t {
     InputMode = 0x8c,
     Volume = 0x8d,
     Audio = 0x8e,
+    Brightness = 0x8f,
     DrawDirect = 0x10,
     DrawBlit = 0x11,
     Fill = 0x12,
@@ -186,8 +188,10 @@ struct __attribute__((packed)) Info {
     uint8_t input_mode[kInputTargets];
     Volume volume[2];
     OverlayEvent overlay;
+    uint8_t brightness;
+    uint8_t reserved;
 };
-static_assert(sizeof(Info) == 74);
+static_assert(sizeof(Info) == 76);
 
 /* Calls `fn(header, payload)` for each message. Returns false at the first
  * malformed one, with its seq (0 when its header is cut short) in `bad_seq`;

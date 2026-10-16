@@ -1,34 +1,46 @@
 mod audio;
-mod capture;
 mod clock;
 mod media;
 mod play;
-mod present;
 mod signal;
 
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
-use capture::CaptureOptions;
 use media::{AudioFormat, Input};
 use play::PlayOptions;
-use present::Quality;
+use streamer_capture as capture;
 use streamer_core::protocol::{self, Encoding, Event, Target};
 use streamer_device::connection::{Address, Connection, Device, TIMEOUT, report};
-
-/// How often a wait looks whether to stop.
-const STOP_POLL: Duration = Duration::from_millis(100);
+use streamer_stream::capture::CaptureOptions;
+use streamer_stream::present::Quality;
+use streamer_stream::{Control, Notice, Notify};
 
 type Result<T> = std::result::Result<T, String>;
 
-/// The next connection; None once stopping.
-fn connect(device: &Device) -> Option<Connection> {
-    while !signal::stopping() {
-        if let Some(connection) = device.wait(STOP_POLL) {
-            return Some(connection);
-        }
+fn print() -> Notify {
+    Arc::new(|notice| match notice {
+        Notice::Connected(_) | Notice::Disconnected(_) => {}
+        Notice::Warning(warning) => eprintln!("{warning}"),
+        notice => println!("{notice}"),
+    })
+}
+
+fn list() -> Result<()> {
+    if !capture::authorize() {
+        return Err("screen capture is not permitted".into());
     }
-    None
+    let main = capture::main_display()?.id;
+    for (index, display) in capture::displays()?.iter().enumerate() {
+        println!(
+            "{index}: {}x{}{}",
+            display.size.0,
+            display.size.1,
+            if display.id == main { " (main)" } else { "" }
+        );
+    }
+    Ok(())
 }
 
 fn volume(connection: &mut Connection, db: f64, mute: bool) -> Result<()> {
@@ -130,10 +142,10 @@ fn parse_rate(value: &str) -> Option<f64> {
 
 fn quality(quality: Option<u8>, max_rate: Option<f64>) -> Quality {
     Quality {
-        ceiling: quality.unwrap_or(80),
+        ceiling: quality.unwrap_or(Quality::DEFAULT.ceiling),
         max_rate: match (quality, max_rate) {
             (Some(_), None) => None,
-            (_, rate) => Some(rate.unwrap_or(10.0) * 1e6),
+            (_, rate) => rate.map(|rate| rate * 1e6).or(Quality::DEFAULT.max_rate),
         },
     }
 }
@@ -144,6 +156,7 @@ fn parse_capture(args: &[String]) -> Option<CaptureOptions> {
         virtual_display: false,
         rotation: None,
         quality: quality(None, None),
+        touch: true,
         verbose: false,
     };
     let (mut fixed, mut max_rate) = (None, None);
@@ -272,8 +285,15 @@ fn main() -> ExitCode {
     }
     let result = match command {
         Command::Play(options) => play::play(&Device::spawn(address), options),
-        Command::Displays => capture::list(),
-        Command::Capture(options) => capture::capture(&Device::spawn(address), options),
+        Command::Displays => list(),
+        Command::Capture(options) => {
+            let control = Control {
+                stop: signal::flag(),
+                requests: None,
+                notify: print(),
+            };
+            streamer_stream::capture::capture(&Device::spawn(address), options, &control)
+        }
         command => Connection::open(&address).and_then(|mut connection| {
             match command {
                 Command::Info => println!("{:#?}", connection.info),

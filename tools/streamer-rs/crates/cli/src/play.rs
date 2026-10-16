@@ -12,10 +12,12 @@ use streamer_core::layout::Layout;
 use streamer_core::protocol::{Encoding, Info};
 use streamer_device::connection::{AudioOut, Connection, Device};
 
+use streamer_stream::STOP_POLL;
+use streamer_stream::present::{self, LayoutKey, Presenter, Quality};
+
 use crate::audio;
 use crate::clock::Clock;
 use crate::media::{AudioFormat, Frame, Input, Media};
-use crate::present::{self, LayoutKey, Presenter, Quality};
 use crate::signal;
 
 const AUDIO_QUEUE: usize = 64;
@@ -189,7 +191,7 @@ impl Player {
 /// Streams until the input ends or on stopping. While the device is away
 /// frames are paced and dropped, so the input keeps its time.
 pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
-    let mut connection = crate::connect(device);
+    let mut connection = streamer_stream::connect(device, signal::flag());
     let info = match &connection {
         Some(connection) => connection.info.clone(),
         None => return Ok(()),
@@ -236,6 +238,7 @@ pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
         options.front,
         options.rotation,
         options.quality,
+        crate::print(),
     );
     let mut player = Player {
         key: present::layout_key(&info, rotation),
@@ -254,7 +257,7 @@ pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
     }
 
     while !signal::stopping() {
-        let frame = match player.media.frames.recv_timeout(crate::STOP_POLL) {
+        let frame = match player.media.frames.recv_timeout(STOP_POLL) {
             Ok(frame) => frame,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -280,7 +283,8 @@ pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
         }
         if player.options.verbose {
             let audio_level = player.presenter.audio_level;
-            player.presenter.stats.report(audio_level);
+            let notify = player.presenter.notify.clone();
+            player.presenter.stats.report(audio_level, &notify);
         }
     }
     match connection {

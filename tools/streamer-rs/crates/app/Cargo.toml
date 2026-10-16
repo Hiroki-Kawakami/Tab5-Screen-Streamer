@@ -1,0 +1,48 @@
+[package]
+name = "streamer-app"
+description = "Stream to the Tab5 from the menu bar or the notification area"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui = { version = "0.37.0", features = ["default_fonts"] }
+egui_glow = { version = "0.37.0", features = ["winit"] }
+glutin = { version = "0.32.3", default-features = false }
+glutin-winit = { version = "0.5.0", default-features = false }
+streamer-capture.workspace = true
+streamer-core.workspace = true
+streamer-device.workspace = true
+streamer-stream.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSGraphics",
+    "NSImage",
+    "NSResponder",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = "0.3.2"
+
+[target."cfg(windows)".dependencies]
+glutin = { version = "0.32.3", default-features = false, features = ["wgl"] }
+glutin-winit = { version = "0.5.0", default-features = false, features = ["wgl"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

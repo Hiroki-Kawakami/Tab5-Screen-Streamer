@@ -8,6 +8,7 @@ pub const CLOSE: u8 = 0x02;
 pub const KEEPALIVE: u8 = 0x03;
 pub const SET_INPUT_MODE: u8 = 0x04;
 pub const SET_VOLUME: u8 = 0x05;
+pub const SET_BRIGHTNESS: u8 = 0x06;
 pub const INFO: u8 = 0x81;
 pub const CLOSED: u8 = 0x82;
 pub const ERROR: u8 = 0x83;
@@ -20,6 +21,7 @@ pub const TOUCH: u8 = 0x8a;
 pub const INPUT_MODE: u8 = 0x8c;
 pub const VOLUME: u8 = 0x8d;
 pub const AUDIO: u8 = 0x8e;
+pub const BRIGHTNESS: u8 = 0x8f;
 pub const AUDIO_FORMAT: u8 = 0x20;
 pub const AUDIO_DATA: u8 = 0x21;
 pub const BULK: u8 = 1;
@@ -119,6 +121,7 @@ pub struct Info {
     pub input_mode: [InputMode; 2],
     pub volume: [Volume; 2],
     pub audio_max_rate: u32,
+    pub brightness: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +177,7 @@ pub enum Event {
     InputMode(InputTarget, InputMode),
     Volume { stream: u8, mute: bool, volume: i16 },
     Audio { buffered: u32, capacity: u32 },
+    Brightness(u8),
     Other,
 }
 
@@ -249,6 +253,10 @@ pub fn set_volume(stream: u8, mute: bool, volume: i16) -> Vec<u8> {
     out
 }
 
+pub fn set_brightness(brightness: u8) -> Vec<u8> {
+    vec![brightness, 0, 0, 0]
+}
+
 pub fn fill(target: Target, x: u16, y: u16, w: u16, h: u16, rgb: u32) -> Vec<u8> {
     let mut out = vec![target as u8, 0];
     for value in [x, y, w, h] {
@@ -275,7 +283,7 @@ fn pixel_format(value: u8) -> Option<PixelFormat> {
 }
 
 fn parse_info(p: &[u8]) -> Option<Info> {
-    if p.len() < 74 {
+    if p.len() < 76 {
         return None;
     }
     Some(Info {
@@ -297,6 +305,7 @@ fn parse_info(p: &[u8]) -> Option<Info> {
         input_mode: [input_mode(p[42])?, input_mode(p[43])?],
         volume: [volume_at(p, 44), volume_at(p, 54)],
         overlay_visible: p[64] != 0,
+        brightness: p[74],
     })
 }
 
@@ -370,6 +379,7 @@ pub fn parse_events(data: &[u8]) -> Vec<Event> {
                 buffered: u32_at(payload, 4),
                 capacity: u32_at(payload, 8),
             },
+            BRIGHTNESS if !payload.is_empty() => Event::Brightness(payload[0]),
             _ => Event::Other,
         };
         events.push(event);

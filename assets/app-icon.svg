@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Tab5 Screen Streamer</title>
+  <rect id="tile" x="0" y="0" width="1024" height="1024" rx="225.28" ry="225.28" fill="#1A1F2B"/>
+  <g id="glyph">
+  <rect id="monitor" x="194.36" y="273.29" width="500.53" height="346.52" rx="48.13" ry="48.13" fill="none" stroke="#E8ECF2" stroke-width="48.13"/>
+  <path id="stand" d="M444.62 619.81V706.44M348.36 725.69H540.88" fill="none" stroke="#E8ECF2" stroke-width="48.13" stroke-linecap="round"/>
+  <rect id="tablet" x="521.63" y="513.93" width="404.28" height="298.39" rx="57.75" ry="57.75" fill="#FF8A3D" stroke="#1A1F2B" stroke-width="38.5"/>
+  <rect id="tablet-screen" x="579.38" y="571.68" width="288.77" height="182.89" rx="19.25" ry="19.25" fill="#1A1F2B"/>
+  <rect id="screen-line-1" x="617.88" y="610.18" width="134.76" height="38.5" rx="9.63" ry="9.63" fill="#FF8A3D"/>
+  <rect id="screen-line-2" x="617.88" y="677.56" width="211.76" height="38.5" rx="9.63" ry="9.63" fill="#FF8A3D" fill-opacity=".55"/>
+  </g>
+</svg>

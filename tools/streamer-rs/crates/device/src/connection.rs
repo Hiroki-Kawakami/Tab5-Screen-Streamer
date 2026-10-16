@@ -316,26 +316,32 @@ pub fn report(event: &Event) {
 }
 
 /// Keeps a connection to the device: opens one in the background whenever
-/// the previous one is given up.
+/// the previous one is given up, until dropped.
 pub struct Device {
     connections: Receiver<Connection>,
     lost: Sender<()>,
+    stop: Arc<AtomicBool>,
 }
 
 impl Device {
     pub fn spawn(address: Address) -> Self {
         let (sender, connections) = mpsc::channel();
         let (lost, lost_receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
         thread::spawn(move || {
-            loop {
-                let connection = connect(&address);
+            while let Some(connection) = connect(&address, &stopped) {
                 println!("connected");
                 if sender.send(connection).is_err() || lost_receiver.recv().is_err() {
                     return;
                 }
             }
         });
-        Device { connections, lost }
+        Device {
+            connections,
+            lost,
+            stop,
+        }
     }
 
     /// A new connection, if one has been opened.
@@ -355,13 +361,19 @@ impl Device {
     }
 }
 
+impl Drop for Device {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 // Polled rather than nusb::watch_devices: the same loop retries USB/IP, and a
 // device that has just arrived cannot always be opened yet.
-fn connect(address: &Address) -> Connection {
+fn connect(address: &Address, stop: &AtomicBool) -> Option<Connection> {
     let mut last_error = String::new();
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         match Connection::open(address) {
-            Ok(connection) => return connection,
+            Ok(connection) => return Some(connection),
             Err(e) => {
                 if e != last_error {
                     eprintln!("waiting for the device: {e}");
@@ -371,4 +383,5 @@ fn connect(address: &Address) -> Connection {
             }
         }
     }
+    None
 }
