@@ -15,7 +15,7 @@ use streamer_device::connection::{AudioOut, Connection, Device};
 use crate::audio;
 use crate::clock::Clock;
 use crate::media::{AudioFormat, Frame, Input, Media};
-use crate::present::{self, LayoutKey, Presenter};
+use crate::present::{self, LayoutKey, Presenter, Quality};
 use crate::signal;
 
 const AUDIO_QUEUE: usize = 64;
@@ -33,11 +33,12 @@ pub struct PlayOptions {
     pub blit: bool,
     pub audio: Option<AudioFormat>,
     pub rotation: Option<u32>,
-    pub quality: u8,
+    pub quality: Quality,
     pub realtime: bool,
+    pub verbose: bool,
 }
 
-fn encode(frame: &Frame, size: (u32, u32), presenter: &Presenter, quality: u8) -> Encoded {
+fn encode(frame: &Frame, size: (u32, u32), presenter: &mut Presenter) -> Encoded {
     let (w, h) = (size.0 as usize, size.1 as usize);
     let info = &presenter.info;
     let layout = &presenter.layout;
@@ -63,7 +64,8 @@ fn encode(frame: &Frame, size: (u32, u32), presenter: &Presenter, quality: u8) -
             c_stride: w / 2,
         },
     };
-    present::encode_jpeg(&image, layout, info, quality)
+    let quality = presenter.quality();
+    present::encode_jpeg(&image, &presenter.layout, &presenter.info, quality)
 }
 
 fn layout(
@@ -178,12 +180,7 @@ impl Player {
             return Ok(true);
         }
         self.presenter.start_frame();
-        let encoded = encode(
-            frame,
-            self.media.size,
-            &self.presenter,
-            self.options.quality,
-        );
+        let encoded = encode(frame, self.media.size, &mut self.presenter);
         self.presenter.send(connection, encoded)?;
         Ok(false)
     }
@@ -238,6 +235,7 @@ pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
         options.encoding,
         options.front,
         options.rotation,
+        options.quality,
     );
     let mut player = Player {
         key: present::layout_key(&info, rotation),
@@ -280,8 +278,10 @@ pub fn play(device: &Device, options: PlayOptions) -> Result<()> {
                 Err(e) => device.lost(connection.take().unwrap(), &e),
             }
         }
-        let audio_level = player.presenter.audio_level;
-        player.presenter.stats.report(audio_level);
+        if player.options.verbose {
+            let audio_level = player.presenter.audio_level;
+            player.presenter.stats.report(audio_level);
+        }
     }
     match connection {
         Some(connection) => connection.close(),

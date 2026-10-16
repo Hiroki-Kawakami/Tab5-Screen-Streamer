@@ -11,7 +11,7 @@ use streamer_core::protocol::{self, Encoding, Info, InputMode, InputTarget, Touc
 use streamer_device::connection::{Connection, Device};
 use streamer_input::{self as input, Injector};
 
-use crate::present::{self, LayoutKey, Presenter};
+use crate::present::{self, LayoutKey, Presenter, Quality};
 use crate::signal;
 
 /// How long to wait for a frame before handling device events.
@@ -35,7 +35,8 @@ pub struct CaptureOptions {
     /// Capture a virtual display made for the device instead.
     pub virtual_display: bool,
     pub rotation: Option<u32>,
-    pub quality: u8,
+    pub quality: Quality,
+    pub verbose: bool,
 }
 
 pub fn list() -> Result<()> {
@@ -339,7 +340,14 @@ impl<'a> Session<'a> {
             virtual_display,
             size: found.size,
             started: (present::layout_key(&info, rotation), found.size),
-            presenter: Presenter::new(info, layout, Encoding::Jpeg, false, options.rotation),
+            presenter: Presenter::new(
+                info,
+                layout,
+                Encoding::Jpeg,
+                false,
+                options.rotation,
+                options.quality,
+            ),
             capture: None,
             asleep: false,
             frames,
@@ -408,8 +416,10 @@ impl<'a> Session<'a> {
             if wanted && session.last.is_some() && session.presenter.due() {
                 session.send(connection).map_err(Lost)?;
             }
-            let audio_level = session.presenter.audio_level;
-            session.presenter.stats.report(audio_level);
+            if session.options.verbose {
+                let audio_level = session.presenter.audio_level;
+                session.presenter.stats.report(audio_level);
+            }
         }
         Ok(())
     }
@@ -516,11 +526,12 @@ impl<'a> Session<'a> {
         if (frame.width, frame.height) != (size.0 as usize, size.1 as usize) {
             return Ok(());
         }
+        let quality = self.presenter.quality();
         let encoded = present::encode_jpeg(
             &image(frame),
             &self.presenter.layout,
             &self.presenter.info,
-            self.options.quality,
+            quality,
         );
         self.pending = false;
         self.presenter.send(connection, encoded)

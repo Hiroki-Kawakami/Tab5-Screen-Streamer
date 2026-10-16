@@ -12,6 +12,7 @@ use std::time::Duration;
 use capture::CaptureOptions;
 use media::{AudioFormat, Input};
 use play::PlayOptions;
+use present::Quality;
 use streamer_core::protocol::{self, Encoding, Event, Target};
 use streamer_device::connection::{Address, Connection, Device, TIMEOUT, report};
 
@@ -89,17 +90,22 @@ commands:
     --no-audio               send no audio
     --rotate <0-3>|auto      counter-clockwise quarter turns, or the device's
                              orientation (default auto)
-    --quality <1-100>        JPEG quality, default 80
+    --quality <1-100>        fixed JPEG quality; with --max-rate, its ceiling
+    --max-rate <MB/s>        lower the JPEG quality from 80 to keep the video
+                             near this rate, default 10
     --format <fmt>           ffmpeg input format, e.g. lavfi
     --loop                   repeat the input
     --no-realtime            send frames as fast as they come
+    -v, --verbose            print stats every second
   displays                   list the displays capture takes
   capture [options]          stream a display
     --display <n>            index from displays, default the main display
     --virtual                a virtual display for the device instead (macOS),
                              present while it is connected
     --rotate <0-3>|auto      as for play, default auto
-    --quality <1-100>        JPEG quality, default 80"
+    --quality <1-100>        as for play
+    --max-rate <MB/s>        as for play
+    -v, --verbose            as for play"
     );
     ExitCode::from(2)
 }
@@ -115,23 +121,45 @@ fn parse_quality(value: &str) -> Option<u8> {
     value.parse().ok().filter(|q| (1..=100).contains(q))
 }
 
+fn parse_rate(value: &str) -> Option<f64> {
+    value
+        .parse()
+        .ok()
+        .filter(|r: &f64| r.is_finite() && *r > 0.0)
+}
+
+fn quality(quality: Option<u8>, max_rate: Option<f64>) -> Quality {
+    Quality {
+        ceiling: quality.unwrap_or(80),
+        max_rate: match (quality, max_rate) {
+            (Some(_), None) => None,
+            (_, rate) => Some(rate.unwrap_or(10.0) * 1e6),
+        },
+    }
+}
+
 fn parse_capture(args: &[String]) -> Option<CaptureOptions> {
     let mut options = CaptureOptions {
         display: None,
         virtual_display: false,
         rotation: None,
-        quality: 80,
+        quality: quality(None, None),
+        verbose: false,
     };
+    let (mut fixed, mut max_rate) = (None, None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--display" => options.display = Some(args.next()?.parse().ok()?),
             "--virtual" => options.virtual_display = true,
             "--rotate" => options.rotation = parse_rotation(args.next()?)?,
-            "--quality" => options.quality = parse_quality(args.next()?)?,
+            "--quality" => fixed = Some(parse_quality(args.next()?)?),
+            "--max-rate" => max_rate = Some(parse_rate(args.next()?)?),
+            "-v" | "--verbose" => options.verbose = true,
             _ => return None,
         }
     }
+    options.quality = quality(fixed, max_rate);
     Some(options)
 }
 
@@ -151,9 +179,11 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
             bits: 16,
         }),
         rotation: None,
-        quality: 80,
+        quality: quality(None, None),
         realtime: true,
+        verbose: false,
     };
+    let (mut fixed, mut max_rate) = (None, None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -177,16 +207,19 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
             }
             "--no-audio" => options.audio = None,
             "--rotate" => options.rotation = parse_rotation(args.next()?)?,
-            "--quality" => options.quality = parse_quality(args.next()?)?,
+            "--quality" => fixed = Some(parse_quality(args.next()?)?),
+            "--max-rate" => max_rate = Some(parse_rate(args.next()?)?),
             "--format" => options.input.format = Some(args.next()?.clone()),
             "--loop" => options.input.looped = true,
             "--no-realtime" => options.realtime = false,
+            "-v" | "--verbose" => options.verbose = true,
             path if (path == "-" || !path.starts_with("-")) && options.input.path.is_empty() => {
                 options.input.path = path.into()
             }
             _ => return None,
         }
     }
+    options.quality = quality(fixed, max_rate);
     (!options.input.path.is_empty()).then_some(options)
 }
 

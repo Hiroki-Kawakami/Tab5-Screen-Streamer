@@ -13,8 +13,11 @@ use streamer_core::protocol::{
 };
 use streamer_device::connection::{Connection, TIMEOUT, report};
 
-const STATS_PERIOD: Duration = Duration::from_secs(5);
+const STATS_PERIOD: Duration = Duration::from_secs(1);
 const JPEG_BANDS: u32 = 4;
+const RATE_WINDOW: Duration = Duration::from_secs(1);
+const MIN_QUALITY: u8 = 20;
+const RAISE_INTERVAL: Duration = Duration::from_millis(100);
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -76,11 +79,66 @@ pub fn layout_key(info: &Info, rotation: u32) -> LayoutKey {
     )
 }
 
+/// JPEG quality: `ceiling`, lowered to keep the video near `max_rate`
+/// bytes/s unless that is None.
+#[derive(Clone, Copy)]
+pub struct Quality {
+    pub ceiling: u8,
+    pub max_rate: Option<f64>,
+}
+
+struct RateControl {
+    options: Quality,
+    quality: u8,
+    sent: VecDeque<Instant>,
+    last_bytes: usize,
+    raised: Instant,
+}
+
+impl RateControl {
+    fn new(options: Quality) -> Self {
+        RateControl {
+            options,
+            quality: options.ceiling,
+            sent: VecDeque::new(),
+            last_bytes: 0,
+            raised: Instant::now(),
+        }
+    }
+
+    fn next(&mut self) -> u8 {
+        let Some(max_rate) = self.options.max_rate else {
+            return self.quality;
+        };
+        let now = Instant::now();
+        while self.sent.front().is_some_and(|&at| now - at >= RATE_WINDOW) {
+            self.sent.pop_front();
+        }
+        let need = (self.last_bytes * self.sent.len()) as f64 / max_rate;
+        let floor = MIN_QUALITY.min(self.options.ceiling);
+        if need > 1.0 {
+            let step = ((need - 1.0) * 20.0).ceil().max(1.0) as u8;
+            self.quality = self.quality.saturating_sub(step).max(floor);
+        } else if need < 0.8 && now - self.raised >= RAISE_INTERVAL {
+            let step = if need < 0.5 { 5 } else { 1 };
+            self.quality = self.quality.saturating_add(step).min(self.options.ceiling);
+            self.raised = now;
+        }
+        self.quality
+    }
+
+    fn record(&mut self, bytes: usize) {
+        self.sent.push_back(Instant::now());
+        self.last_bytes = bytes;
+    }
+}
+
 pub struct Stats {
     start: Instant,
     pub frames: u32,
     pub dropped: u32,
     pub bytes: usize,
+    quality: Option<(u8, u8)>,
 }
 
 impl Stats {
@@ -90,7 +148,14 @@ impl Stats {
             frames: 0,
             dropped: 0,
             bytes: 0,
+            quality: None,
         }
+    }
+
+    fn quality(&mut self, quality: u8) {
+        let (low, high) = self.quality.get_or_insert((quality, quality));
+        *low = (*low).min(quality);
+        *high = (*high).max(quality);
     }
 
     pub fn report(&mut self, audio: Option<(u32, u32)>) {
@@ -103,8 +168,13 @@ impl Stats {
             Some((buffered, capacity)) => format!(", audio {buffered}/{capacity} frames buffered"),
             None => String::new(),
         };
+        let quality = match self.quality {
+            Some((low, high)) if low == high => format!(", quality {low}"),
+            Some((low, high)) => format!(", quality {low}-{high}"),
+            None => String::new(),
+        };
         println!(
-            "{:.1} frames/s, {} dropped, {:.1} MB/s{audio}",
+            "{:.1} frames/s, {} dropped, {:.1} MB/s{quality}{audio}",
             self.frames as f64 / seconds,
             self.dropped,
             self.bytes as f64 / seconds / 1e6
@@ -132,6 +202,7 @@ pub struct Presenter {
     /// also when it leaves the mode.
     pub touches: Vec<Vec<TouchPoint>>,
     pub stats: Stats,
+    rate: RateControl,
     last_sent: Option<Instant>,
 }
 
@@ -142,6 +213,7 @@ impl Presenter {
         encoding: Encoding,
         front: bool,
         rotation: Option<u32>,
+        quality: Quality,
     ) -> Self {
         Presenter {
             info,
@@ -156,6 +228,7 @@ impl Presenter {
             audio_level: None,
             touches: Vec::new(),
             stats: Stats::new(),
+            rate: RateControl::new(quality),
             last_sent: None,
         }
     }
@@ -164,6 +237,13 @@ impl Presenter {
     pub fn clear(&mut self) {
         self.clear = true;
         self.redraw = true;
+    }
+
+    /// The JPEG quality for the frame about to be encoded.
+    pub fn quality(&mut self) -> u8 {
+        let quality = self.rate.next();
+        self.stats.quality(quality);
+        quality
     }
 
     pub fn rotation(&self) -> u32 {
@@ -344,11 +424,14 @@ impl Presenter {
             ))?;
             self.off = false;
         }
+        let mut bytes = 0;
         for transfer in batch.transfers {
-            self.stats.bytes += transfer.len();
+            bytes += transfer.len();
             connection.send_video(transfer)?;
         }
+        self.stats.bytes += bytes;
         self.stats.frames += 1;
+        self.rate.record(bytes);
         Ok(())
     }
 }
