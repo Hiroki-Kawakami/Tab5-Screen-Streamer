@@ -35,6 +35,9 @@ const MAX_CHUNKS = 240;
 /** Decoded frames held plus frames being decoded; held frames can stall the
  * decoder. */
 const FRAME_QUEUE = 4;
+/** Chunks decoded ahead while catching up to a seek target, whose frames
+ * before it are dropped as they come. */
+const PREROLL_QUEUE = 16;
 const AUDIO_QUEUE = 32;
 const AUDIO_AHEAD_US = 1_000_000;
 /** A frame later than this is dropped to catch up. */
@@ -179,6 +182,10 @@ class Playback {
   private paused: boolean;
   /** Paused after a seek: show the frame at the target. */
   private showOne = false;
+  /** Until the first frame at the target is decoded, the PCM is held and the
+   * clock stays, so sound and picture start together. */
+  private prerolling = true;
+  private held: { pts: number; data: ArrayBuffer }[] = [];
   private failed = false;
   private done = false;
   private reported = 0;
@@ -284,6 +291,8 @@ class Playback {
     this.needKey = true;
     this.done = false;
     this.showOne = this.paused;
+    this.prerolling = true;
+    this.held = [];
     this.decoder.reset();
     this.decoder.configure(this.videoDecoderConfig);
     if (this.audioDecoder && this.audio) {
@@ -295,7 +304,14 @@ class Playback {
   }
 
   clockReport(pts: number, at: number) {
-    if (!this.paused) this.clock.set(pts, at);
+    if (!this.paused && !this.prerolling) this.clock.set(pts, at);
+  }
+
+  private endPreroll() {
+    if (!this.prerolling) return;
+    this.prerolling = false;
+    for (const { pts, data } of this.held) toDevice({ type: "pcm", pts, data }, [data]);
+    this.held = [];
   }
 
   private dropFrames() {
@@ -315,6 +331,7 @@ class Playback {
       return;
     }
     this.frames.push(frame);
+    this.endPreroll();
     poke();
   }
 
@@ -340,7 +357,11 @@ class Playback {
     data.close();
     const pcm = this.converter!.process(planar);
     this.audioEnd = pts + (frames * 1e6) / rate;
-    if (pcm.byteLength > 0) toDevice({ type: "pcm", pts, data: pcm.buffer as ArrayBuffer }, [pcm.buffer]);
+    if (pcm.byteLength > 0) {
+      const data = pcm.buffer as ArrayBuffer;
+      if (this.prerolling) this.held.push({ pts, data });
+      else toDevice({ type: "pcm", pts, data }, [data]);
+    }
     poke();
   }
 
@@ -375,13 +396,18 @@ class Playback {
       }
       packet.free();
     }
-    while (this.chunks.length > 0 && this.decoder.decodeQueueSize + this.frames.length < FRAME_QUEUE) {
+    const queue = this.prerolling ? PREROLL_QUEUE : FRAME_QUEUE;
+    while (this.chunks.length > 0 && this.decoder.decodeQueueSize + this.frames.length < queue) {
       this.decoder.decode(this.chunks.shift()!);
     }
     if (this.eof && this.chunks.length === 0 && !this.flushing) {
       this.flushing = true;
       this.decoder.flush().then(
-        () => ((this.flushed = true), poke()),
+        () => {
+          this.flushed = true;
+          this.endPreroll();
+          poke();
+        },
         () => {},
       );
       const audio = this.audioDecoder?.flush() ?? Promise.resolve();
