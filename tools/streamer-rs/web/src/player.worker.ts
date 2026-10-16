@@ -52,6 +52,14 @@ const THUMBNAIL_AT = 10;
 const THUMBNAIL_SIZE: [number, number] = [192, 108];
 /** Packets read looking for the thumbnail frame before giving up. */
 const THUMBNAIL_PACKETS = 2000;
+/** The file is read in blocks of this many bytes. */
+const BLOCK = 1 << 20;
+/** Blocks fetched in the background past the last read, to ride out stalls of
+ * the file reads. */
+const READ_AHEAD = 32;
+/** Blocks kept before the last read, for reads that go back a little. */
+const READ_BEHIND = 8;
+const FETCHES = 2;
 
 const ready = init();
 const reader = new FileReaderSync();
@@ -128,10 +136,89 @@ function turnOf(video: Track): number {
   return ((360 - (video.rotation % 360)) % 360) / 90;
 }
 
-function openMedia(file: File): Media {
-  return new Media(file.size, (offset: number, length: number) =>
-    new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + length))),
-  );
+type Read = (offset: number, length: number) => Uint8Array;
+
+const readSync =
+  (file: File): Read =>
+  (offset, length) =>
+    new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + length)));
+
+function openMedia(file: File, read: Read = readSync(file)): Media {
+  return new Media(file.size, read);
+}
+
+/** Serves reads from blocks fetched ahead in the background; a block not
+ * fetched yet is read synchronously. */
+class ReadAhead {
+  private readonly blocks = new Map<number, Uint8Array>();
+  private readonly pending = new Set<number>();
+  private readonly readBlock: Read;
+  private readonly count: number;
+  private current = 0;
+  private closed = false;
+
+  constructor(private readonly file: File) {
+    this.readBlock = readSync(file);
+    this.count = Math.ceil(file.size / BLOCK);
+  }
+
+  readonly read: Read = (offset, length) => {
+    const end = Math.min(offset + length, this.file.size);
+    const out = new Uint8Array(Math.max(0, end - offset));
+    if (out.length === 0) return out;
+    const last = Math.floor((end - 1) / BLOCK);
+    for (let i = Math.floor(offset / BLOCK); i <= last; i++) {
+      const start = i * BLOCK;
+      const from = Math.max(offset, start);
+      const to = Math.min(end, start + BLOCK);
+      out.set(this.block(i).subarray(from - start, to - start), from - offset);
+    }
+    this.current = last;
+    for (const i of this.blocks.keys()) if (!this.wanted(i)) this.blocks.delete(i);
+    this.fetch();
+    return out;
+  };
+
+  close() {
+    this.closed = true;
+    this.blocks.clear();
+  }
+
+  private block(i: number): Uint8Array {
+    let block = this.blocks.get(i);
+    if (!block) {
+      block = this.readBlock(i * BLOCK, BLOCK);
+      this.blocks.set(i, block);
+    }
+    return block;
+  }
+
+  private wanted(i: number): boolean {
+    return i >= this.current - READ_BEHIND && i <= this.current + READ_AHEAD;
+  }
+
+  private fetch() {
+    const last = Math.min(this.current + READ_AHEAD, this.count - 1);
+    for (let i = this.current + 1; i <= last && this.pending.size < FETCHES; i++) {
+      if (this.blocks.has(i) || this.pending.has(i)) continue;
+      this.pending.add(i);
+      this.file
+        .slice(i * BLOCK, (i + 1) * BLOCK)
+        .arrayBuffer()
+        .then(
+          (data) => {
+            this.pending.delete(i);
+            if (this.closed) return;
+            if (this.wanted(i) && !this.blocks.has(i)) this.blocks.set(i, new Uint8Array(data));
+            this.fetch();
+          },
+          (err) => {
+            this.pending.delete(i);
+            if (!this.closed) console.warn(`reading ahead at ${i * BLOCK} failed:`, err);
+          },
+        );
+    }
+  }
 }
 
 function videoConfig(media: Media, track: Track): VideoDecoderConfig | null {
@@ -191,6 +278,7 @@ class Playback {
   private reported = 0;
 
   private constructor(
+    private readonly ahead: ReadAhead,
     private readonly media: Media,
     private readonly video: Track,
     private readonly videoDecoderConfig: VideoDecoderConfig,
@@ -223,8 +311,10 @@ class Playback {
   }
 
   static async open(file: File, play: boolean, audioMaxRate: number): Promise<Playback> {
-    const media = openMedia(file);
+    const ahead = new ReadAhead(file);
+    let media: Media | null = null;
     try {
+      media = openMedia(file, ahead.read);
       const tracks = media.tracks() as Track[];
       const video = tracks.find((t) => t.kind === "video");
       if (!video) throw new Error("no video");
@@ -245,9 +335,10 @@ class Playback {
       }
       media.select(new Uint32Array(audio ? [video.index, audio.track.index] : [video.index]));
       status({ type: "loaded", duration: media.duration() ?? null });
-      return new Playback(media, video, config!, audio, play);
+      return new Playback(ahead, media, video, config!, audio, play);
     } catch (err) {
-      media.free();
+      media?.free();
+      ahead.close();
       throw err;
     }
   }
@@ -260,6 +351,7 @@ class Playback {
     this.dropFrames();
     this.converter?.free();
     this.media.free();
+    this.ahead.close();
     if (this.audio) toDevice({ type: "reset" });
   }
 
