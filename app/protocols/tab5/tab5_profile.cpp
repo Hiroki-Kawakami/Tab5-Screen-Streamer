@@ -57,7 +57,8 @@ usb_device::DeviceInfo Tab5Profile::info() const {
     usb_device::DeviceInfo info;
     info.vendor_id = 0xf055;
     info.product_id = 0x1118;
-    info.bcd_device = 0x0300;
+    // Windows caches MS OS 2.0 descriptors per bcdDevice; distinguish each interface layout.
+    info.bcd_device = 0x0300 | (uac_ ? 0x01 : 0) | (keyboard_ ? 0x02 : 0) | (mouse_ ? 0x04 : 0);
     info.manufacturer = "M5Stack";
     info.product = "Tab5 Screen Streamer";
     uint8_t mac[6];
