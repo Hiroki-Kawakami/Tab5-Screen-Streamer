@@ -422,7 +422,7 @@ function nameOf(device: Device): string {
 function loadAudio(serial: string | null): AudioSettings {
   if (serial === null) return {};
   try {
-    return JSON.parse(localStorage.getItem(`audio:${serial}`) ?? "{}") as AudioSettings;
+    return JSON.parse(localStorage.getItem(`tab5-streamer:audio:${serial}`) ?? "{}") as AudioSettings;
   } catch {
     return {};
   }
@@ -430,7 +430,7 @@ function loadAudio(serial: string | null): AudioSettings {
 
 function saveAudio(serial: string | null, settings: AudioSettings) {
   if (serial === null) return;
-  localStorage.setItem(`audio:${serial}`, JSON.stringify({ ...loadAudio(serial), ...settings }));
+  localStorage.setItem(`tab5-streamer:audio:${serial}`, JSON.stringify({ ...loadAudio(serial), ...settings }));
 }
 
 function addDevice(usb: USBDevice) {
