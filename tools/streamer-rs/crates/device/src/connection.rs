@@ -23,14 +23,15 @@ type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone)]
 pub enum Address {
-    Usb,
+    /// The device with this serial number, or with None any free one.
+    Usb(Option<String>),
     Usbip(String),
 }
 
 impl Address {
     fn link(&self) -> Result<Link> {
         match self {
-            Address::Usb => link::open_nusb(),
+            Address::Usb(serial) => link::open_nusb(serial.as_deref()),
             Address::Usbip(address) => usbip::connect(address),
         }
     }
@@ -331,7 +332,10 @@ impl Device {
         let stopped = stop.clone();
         thread::spawn(move || {
             while let Some(connection) = connect(&address, &stopped) {
-                println!("connected");
+                match &connection.serial {
+                    Some(serial) => println!("connected {serial}"),
+                    None => println!("connected"),
+                }
                 if sender.send(connection).is_err() || lost_receiver.recv().is_err() {
                     return;
                 }

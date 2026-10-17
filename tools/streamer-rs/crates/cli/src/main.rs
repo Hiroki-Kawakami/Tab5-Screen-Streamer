@@ -13,6 +13,7 @@ use play::PlayOptions;
 use streamer_capture as capture;
 use streamer_core::protocol::{self, Encoding, Event, Target};
 use streamer_device::connection::{Address, Connection, Device, TIMEOUT, report};
+use streamer_device::link;
 use streamer_stream::capture::CaptureOptions;
 use streamer_stream::present::Quality;
 use streamer_stream::{Control, Notice, Notify};
@@ -39,6 +40,19 @@ fn list() -> Result<()> {
             display.size.1,
             if display.id == main { " (main)" } else { "" }
         );
+    }
+    Ok(())
+}
+
+fn devices() -> Result<()> {
+    for device in link::list_nusb()? {
+        let serial = device.serial.as_deref().unwrap_or("(no serial)");
+        let product = device.product.as_deref().unwrap_or("(no name)");
+        match device.in_use {
+            Ok(false) => println!("{product}  {serial}"),
+            Ok(true) => println!("{product}  {serial} (in use)"),
+            Err(e) => println!("{product}  {serial} ({e})"),
+        }
     }
     Ok(())
 }
@@ -83,8 +97,11 @@ fn fill(connection: &mut Connection, color: u32) -> Result<()> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: streamer [--usbip <host:port>] <command>
+        "usage: streamer [--usbip <host:port> | --serial <serial>] <command>
+  --serial <serial>          the device with this USB serial number, from
+                             devices; default any free one
 commands:
+  devices                    list the devices and whether they are in use
   info                       print the device's INFO
   fill <rrggbb>              fill the panel with a color
   volume <db> [mute]         set the bulk audio volume
@@ -238,15 +255,17 @@ fn parse_play(args: &[String]) -> Option<PlayOptions> {
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let mut usbip = None;
-    if args.first().map(String::as_str) == Some("--usbip") {
-        if args.len() < 2 {
-            return usage();
+    let (mut usbip, mut serial) = (None, None);
+    loop {
+        match args.first().map(String::as_str) {
+            Some("--usbip") if args.len() >= 2 => usbip = Some(args[1].clone()),
+            Some("--serial") if args.len() >= 2 => serial = Some(args[1].clone()),
+            _ => break,
         }
-        usbip = Some(args[1].clone());
         args.drain(..2);
     }
     enum Command {
+        Devices,
         Info,
         Fill(u32),
         Volume(f64, bool),
@@ -255,6 +274,7 @@ fn main() -> ExitCode {
         Capture(CaptureOptions),
     }
     let command = match (args.first().map(String::as_str), &args[1.min(args.len())..]) {
+        (Some("devices"), []) => Command::Devices,
         (Some("info"), []) => Command::Info,
         (Some("fill"), [color]) => match u32::from_str_radix(color, 16) {
             Ok(color) => Command::Fill(color),
@@ -276,15 +296,20 @@ fn main() -> ExitCode {
         _ => return usage(),
     };
 
-    let address = match usbip {
-        Some(address) => Address::Usbip(address),
-        None => Address::Usb,
+    let address = match (usbip, serial) {
+        (Some(_), Some(_)) => return usage(),
+        (Some(_), None) | (None, Some(_)) if matches!(command, Command::Devices) => {
+            return usage();
+        }
+        (Some(address), None) => Address::Usbip(address),
+        (None, serial) => Address::Usb(serial),
     };
     if matches!(command, Command::Play(_) | Command::Capture(_)) {
         signal::install();
     }
     let result = match command {
         Command::Play(options) => play::play(&Device::spawn(address), options),
+        Command::Devices => devices(),
         Command::Displays => list(),
         Command::Capture(options) => {
             let control = Control {
@@ -296,7 +321,12 @@ fn main() -> ExitCode {
         }
         command => Connection::open(&address).and_then(|mut connection| {
             match command {
-                Command::Info => println!("{:#?}", connection.info),
+                Command::Info => {
+                    if let Some(serial) = &connection.serial {
+                        println!("serial: {serial}");
+                    }
+                    println!("{:#?}", connection.info)
+                }
                 Command::Fill(color) => fill(&mut connection, color)?,
                 Command::Volume(db, mute) => volume(&mut connection, db, mute)?,
                 _ => unreachable!(),

@@ -109,7 +109,7 @@ impl Streaming {
                 requests: Some(&receiver),
                 notify,
             };
-            let device = Device::spawn(Address::Usb);
+            let device = Device::spawn(Address::Usb(None));
             let result = capture::capture(&device, options, &control);
             *status.lock().unwrap() = Status {
                 message: result.err(),

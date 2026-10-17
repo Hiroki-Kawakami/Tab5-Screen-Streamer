@@ -3,7 +3,7 @@ use std::fmt;
 use std::time::Duration;
 
 use nusb::transfer::{Buffer, Bulk, In, Out};
-use nusb::{Endpoint, MaybeFuture};
+use nusb::{DeviceInfo, Endpoint, MaybeFuture};
 
 pub const VENDOR_ID: u16 = 0xf055;
 pub const PRODUCT_ID: u16 = 0x1118;
@@ -108,12 +108,57 @@ impl InPipe for NusbIn {
     }
 }
 
-pub fn open_nusb() -> Result<Link, String> {
-    let info = nusb::list_devices()
+pub struct Listed {
+    pub serial: Option<String>,
+    pub product: Option<String>,
+    /// Err if it could not be opened to find out.
+    pub in_use: Result<bool, String>,
+}
+
+fn find_nusb() -> Result<impl Iterator<Item = DeviceInfo>, String> {
+    Ok(nusb::list_devices()
         .wait()
         .map_err(|e| e.to_string())?
-        .find(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID)
-        .ok_or("device not found")?;
+        .filter(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID))
+}
+
+/// In use means another process has claimed the control interface; it is
+/// claimed here for a moment to find out.
+pub fn list_nusb() -> Result<Vec<Listed>, String> {
+    Ok(find_nusb()?
+        .map(|info| Listed {
+            serial: info.serial_number().map(String::from),
+            product: info.product_string().map(String::from),
+            in_use: info
+                .open()
+                .wait()
+                .map(|device| device.claim_interface(CONTROL_INTERFACE).wait().is_err())
+                .map_err(|e| format!("open: {e}")),
+        })
+        .collect())
+}
+
+/// Opens the device with `serial`, or with None the first one no other
+/// process has claimed.
+pub fn open_nusb(serial: Option<&str>) -> Result<Link, String> {
+    let mut found = false;
+    let mut last_error = String::new();
+    for info in find_nusb()?.filter(|d| serial.is_none_or(|s| d.serial_number() == Some(s))) {
+        found = true;
+        match open_info(&info) {
+            Ok(link) => return Ok(link),
+            Err(e) => last_error = e,
+        }
+    }
+    Err(match (serial, found) {
+        (Some(serial), false) => format!("device {serial} not found"),
+        (None, false) => "device not found".into(),
+        (Some(_), true) => last_error,
+        (None, true) => format!("no free device ({last_error})"),
+    })
+}
+
+fn open_info(info: &DeviceInfo) -> Result<Link, String> {
     let device = info.open().wait().map_err(|e| format!("open: {e}"))?;
     let claim = |number| {
         device
