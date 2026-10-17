@@ -80,6 +80,11 @@ void HomeScreen::build() {
     });
     for (size_t i = 0; i < cards_.size(); i++) {
         cards_[i] = card_create(contents_, kModes[i], false);
+        if (i > 0) {
+            lv_obj_clean(cards_[i]);
+            lv_obj_set_state(cards_[i], LV_STATE_DISABLED, true);
+            lv_obj_set_style_bg_opa(cards_[i], LV_OPA_50, 0);
+        }
     }
     lv_obj_add_event_fn(cards_[0], LV_EVENT_CLICKED, [](lv_event_t *) {
         screen_manager.load(std::make_shared<UsbMonitorScreen>());
