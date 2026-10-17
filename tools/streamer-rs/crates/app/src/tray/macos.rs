@@ -44,7 +44,6 @@ fn png(icon: Icon) -> &'static [u8] {
     match icon {
         Icon::Disabled => include_bytes!("../../icons/tray-disabled.png"),
         Icon::Disconnected => include_bytes!("../../icons/tray-disconnected.png"),
-        Icon::Idle => include_bytes!("../../icons/tray-idle.png"),
         Icon::Streaming => include_bytes!("../../icons/tray-streaming.png"),
     }
 }

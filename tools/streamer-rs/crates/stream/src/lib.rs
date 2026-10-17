@@ -21,7 +21,7 @@ pub enum Notice {
     Layout(String),
     /// A device event that changed the state.
     Event(Event),
-    VirtualDisplay((u32, u32)),
+    VirtualDisplay { id: u64, size: (u32, u32) },
     CaptureRestarting(String),
     MirroringChanged,
     DisplayGone,
@@ -71,7 +71,9 @@ impl fmt::Display for Notice {
             Notice::Disconnected(reason) => write!(f, "disconnected: {reason}"),
             Notice::Layout(layout) => write!(f, "{layout}"),
             Notice::Event(event) => event_text(event, f),
-            Notice::VirtualDisplay(size) => write!(f, "virtual display {}x{}", size.0, size.1),
+            Notice::VirtualDisplay { size, .. } => {
+                write!(f, "virtual display {}x{}", size.0, size.1)
+            }
             Notice::CaptureRestarting(reason) => {
                 write!(f, "capture stopped ({reason}), restarting")
             }

@@ -122,6 +122,13 @@ fn find_nusb() -> Result<impl Iterator<Item = DeviceInfo>, String> {
         .filter(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID))
 }
 
+/// Without opening them, so a device in use stays undisturbed.
+pub fn serials_nusb() -> Result<Vec<String>, String> {
+    Ok(find_nusb()?
+        .filter_map(|info| info.serial_number().map(String::from))
+        .collect())
+}
+
 /// In use means another process has claimed the control interface; it is
 /// claimed here for a moment to find out.
 pub fn list_nusb() -> Result<Vec<Listed>, String> {

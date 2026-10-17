@@ -30,8 +30,8 @@ const PANEL_MILLIMETERS: (f64, f64) = (169.0, 300.0);
 type Result<T> = std::result::Result<T, String>;
 
 pub struct CaptureOptions {
-    /// An index into the displays list; the main display when None.
-    pub display: Option<usize>,
+    /// A display id; the main display when None.
+    pub display: Option<u64>,
     /// Capture a virtual display made for the device instead.
     pub virtual_display: bool,
     pub rotation: Option<u32>,
@@ -73,11 +73,7 @@ pub fn capture(device: &Device, options: CaptureOptions, control: &Control) -> R
     }
     let display = match (options.virtual_display, options.display) {
         (true, _) => None,
-        (false, Some(index)) => Some(
-            *capture::displays()?
-                .get(index)
-                .ok_or_else(|| format!("no display {index}"))?,
-        ),
+        (false, Some(id)) => Some(capture::display(id).ok_or_else(|| format!("no display {id}"))?),
         (false, None) => Some(capture::main_display()?),
     };
     let mut injector = Injector::new()
@@ -286,7 +282,10 @@ fn create_virtual(
         }
         thread::sleep(Duration::from_millis(100));
     }
-    notify(Notice::VirtualDisplay(size));
+    notify(Notice::VirtualDisplay {
+        id: display.id(),
+        size,
+    });
     Ok(display)
 }
 
@@ -517,7 +516,10 @@ impl<'a> Session<'a> {
             if size != self.size {
                 display.resize(size)?;
                 wait_for_size(display.id(), size)?;
-                (self.control.notify)(Notice::VirtualDisplay(size));
+                (self.control.notify)(Notice::VirtualDisplay {
+                    id: display.id(),
+                    size,
+                });
                 self.size = size;
             }
         }

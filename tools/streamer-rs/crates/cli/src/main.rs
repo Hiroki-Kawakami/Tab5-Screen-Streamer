@@ -28,6 +28,10 @@ fn print() -> Notify {
     })
 }
 
+fn waiting(reason: String) {
+    eprintln!("waiting for the device: {reason}");
+}
+
 fn list() -> Result<()> {
     if !capture::authorize() {
         return Err("screen capture is not permitted".into());
@@ -167,7 +171,23 @@ fn quality(quality: Option<u8>, max_rate: Option<f64>) -> Quality {
     }
 }
 
-fn parse_capture(args: &[String]) -> Option<CaptureOptions> {
+/// The id of the display at `index` in the displays list.
+fn display_id(index: Option<usize>) -> Result<Option<u64>> {
+    let Some(index) = index else {
+        return Ok(None);
+    };
+    if !capture::authorize() {
+        return Err("screen capture is not permitted".into());
+    }
+    let displays = capture::displays()?;
+    let display = displays
+        .get(index)
+        .ok_or_else(|| format!("no display {index}"))?;
+    Ok(Some(display.id))
+}
+
+/// The options, and the index of the display to capture.
+fn parse_capture(args: &[String]) -> Option<(CaptureOptions, Option<usize>)> {
     let mut options = CaptureOptions {
         display: None,
         virtual_display: false,
@@ -176,11 +196,11 @@ fn parse_capture(args: &[String]) -> Option<CaptureOptions> {
         touch: true,
         verbose: false,
     };
-    let (mut fixed, mut max_rate) = (None, None);
+    let (mut fixed, mut max_rate, mut display) = (None, None, None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--display" => options.display = Some(args.next()?.parse().ok()?),
+            "--display" => display = Some(args.next()?.parse().ok()?),
             "--virtual" => options.virtual_display = true,
             "--rotate" => options.rotation = parse_rotation(args.next()?)?,
             "--quality" => fixed = Some(parse_quality(args.next()?)?),
@@ -190,7 +210,7 @@ fn parse_capture(args: &[String]) -> Option<CaptureOptions> {
         }
     }
     options.quality = quality(fixed, max_rate);
-    Some(options)
+    Some((options, display))
 }
 
 fn parse_play(args: &[String]) -> Option<PlayOptions> {
@@ -271,7 +291,7 @@ fn main() -> ExitCode {
         Volume(f64, bool),
         Play(PlayOptions),
         Displays,
-        Capture(CaptureOptions),
+        Capture(CaptureOptions, Option<usize>),
     }
     let command = match (args.first().map(String::as_str), &args[1.min(args.len())..]) {
         (Some("devices"), []) => Command::Devices,
@@ -290,7 +310,7 @@ fn main() -> ExitCode {
         },
         (Some("displays"), []) => Command::Displays,
         (Some("capture"), rest) => match parse_capture(rest) {
-            Some(options) => Command::Capture(options),
+            Some((options, index)) => Command::Capture(options, index),
             None => return usage(),
         },
         _ => return usage(),
@@ -304,21 +324,22 @@ fn main() -> ExitCode {
         (Some(address), None) => Address::Usbip(address),
         (None, serial) => Address::Usb(serial),
     };
-    if matches!(command, Command::Play(_) | Command::Capture(_)) {
+    if matches!(command, Command::Play(_) | Command::Capture(..)) {
         signal::install();
     }
     let result = match command {
-        Command::Play(options) => play::play(&Device::spawn(address), options),
+        Command::Play(options) => play::play(&Device::spawn(address, waiting), options),
         Command::Devices => devices(),
         Command::Displays => list(),
-        Command::Capture(options) => {
+        Command::Capture(mut options, index) => display_id(index).and_then(|id| {
+            options.display = id;
             let control = Control {
                 stop: signal::flag(),
                 requests: None,
                 notify: print(),
             };
-            streamer_stream::capture::capture(&Device::spawn(address), options, &control)
-        }
+            streamer_stream::capture::capture(&Device::spawn(address, waiting), options, &control)
+        }),
         command => Connection::open(&address).and_then(|mut connection| {
             match command {
                 Command::Info => {

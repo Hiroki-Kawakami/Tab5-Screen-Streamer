@@ -11,6 +11,7 @@ publish.workspace = true
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", features = ["NSGraphics", "NSScreen"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-core-media = "0.3.2"
@@ -22,6 +23,7 @@ objc2-screen-capture-kit = "0.3.2"
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Graphics_Capture",
+    "Win32_Devices_Display",
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
     "Win32_Graphics_Direct3D",

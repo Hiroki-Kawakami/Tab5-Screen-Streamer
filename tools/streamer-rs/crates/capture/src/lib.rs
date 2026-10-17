@@ -52,6 +52,11 @@ pub fn mirror_primary(id: u64) -> Option<u64> {
     platform::mirror_primary(id)
 }
 
+/// The name the OS shows for the display. None off the main thread on macOS.
+pub fn name(id: u64) -> Option<String> {
+    platform::name(id)
+}
+
 /// The display's current size, or None when it is gone.
 pub fn display(id: u64) -> Option<Display> {
     platform::display(id)

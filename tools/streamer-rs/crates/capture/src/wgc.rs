@@ -15,7 +15,14 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{HANDLE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_MODE_INFO,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
+    QueryDisplayConfig,
+};
+use windows::Win32::Foundation::{HANDLE, HMODULE, HWND, LPARAM, LRESULT, LUID, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -97,6 +104,82 @@ fn describe(id: u64) -> Option<Display> {
             id,
             size: (mode.dmPelsWidth, mode.dmPelsHeight),
         })
+}
+
+fn header<T>(
+    kind: DISPLAYCONFIG_DEVICE_INFO_TYPE,
+    adapter: LUID,
+    id: u32,
+) -> DISPLAYCONFIG_DEVICE_INFO_HEADER {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER {
+        r#type: kind,
+        size: size_of::<T>() as u32,
+        adapterId: adapter,
+        id,
+    }
+}
+
+pub fn name(id: u64) -> Option<String> {
+    let mut info = MONITORINFOEXW {
+        monitorInfo: MONITORINFO {
+            cbSize: size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor(id), &mut info.monitorInfo) }.as_bool() {
+        return None;
+    }
+    let (mut path_count, mut mode_count) = (0, 0);
+    unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) }
+        .ok()
+        .ok()?;
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+    unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    }
+    .ok()
+    .ok()?;
+    paths.truncate(path_count as usize);
+    paths.iter().find_map(|path| {
+        let source_info = &path.sourceInfo;
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: header::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(
+                DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                source_info.adapterId,
+                source_info.id,
+            ),
+            ..Default::default()
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0
+            || source.viewGdiDeviceName != info.szDevice
+        {
+            return None;
+        }
+        let target_info = &path.targetInfo;
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: header::<DISPLAYCONFIG_TARGET_DEVICE_NAME>(
+                DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                target_info.adapterId,
+                target_info.id,
+            ),
+            ..Default::default()
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } != 0 {
+            return None;
+        }
+        let name = &target.monitorFriendlyDeviceName;
+        let length = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        (length > 0).then(|| String::from_utf16_lossy(&name[..length]))
+    })
 }
 
 unsafe extern "system" fn collect_monitor(

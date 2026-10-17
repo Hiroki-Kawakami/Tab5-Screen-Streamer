@@ -325,13 +325,14 @@ pub struct Device {
 }
 
 impl Device {
-    pub fn spawn(address: Address) -> Self {
+    /// `waiting` gets why the device cannot be opened, each time that changes.
+    pub fn spawn(address: Address, waiting: impl Fn(String) + Send + 'static) -> Self {
         let (sender, connections) = mpsc::channel();
         let (lost, lost_receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         thread::spawn(move || {
-            while let Some(connection) = connect(&address, &stopped) {
+            while let Some(connection) = connect(&address, &stopped, &waiting) {
                 match &connection.serial {
                     Some(serial) => println!("connected {serial}"),
                     None => println!("connected"),
@@ -373,14 +374,14 @@ impl Drop for Device {
 
 // Polled rather than nusb::watch_devices: the same loop retries USB/IP, and a
 // device that has just arrived cannot always be opened yet.
-fn connect(address: &Address, stop: &AtomicBool) -> Option<Connection> {
+fn connect(address: &Address, stop: &AtomicBool, waiting: &dyn Fn(String)) -> Option<Connection> {
     let mut last_error = String::new();
     while !stop.load(Ordering::Relaxed) {
         match Connection::open(address) {
             Ok(connection) => return Some(connection),
             Err(e) => {
                 if e != last_error {
-                    eprintln!("waiting for the device: {e}");
+                    waiting(e.clone());
                     last_error = e;
                 }
                 thread::sleep(RETRY);

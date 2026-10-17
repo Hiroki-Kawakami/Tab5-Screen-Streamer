@@ -44,8 +44,6 @@ fn ico(icon: Icon, light: bool) -> &'static [u8] {
         (Icon::Disabled, false) => include_bytes!("../../icons/tray-disabled-dark.ico"),
         (Icon::Disconnected, true) => include_bytes!("../../icons/tray-disconnected-light.ico"),
         (Icon::Disconnected, false) => include_bytes!("../../icons/tray-disconnected-dark.ico"),
-        (Icon::Idle, true) => include_bytes!("../../icons/tray-idle-light.ico"),
-        (Icon::Idle, false) => include_bytes!("../../icons/tray-idle-dark.ico"),
         (Icon::Streaming, true) => include_bytes!("../../icons/tray-streaming-light.ico"),
         (Icon::Streaming, false) => include_bytes!("../../icons/tray-streaming-dark.ico"),
     }

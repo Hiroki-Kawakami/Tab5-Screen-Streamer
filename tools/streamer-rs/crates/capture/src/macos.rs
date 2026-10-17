@@ -8,7 +8,8 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
-use objc2::{AllocAnyThread, DefinedClass, class, define_class, msg_send, sel};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, class, define_class, msg_send, sel};
+use objc2_app_kit::NSScreen;
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{
     CGDisplayBounds, CGDisplayIsAsleep, CGDisplayIsInMirrorSet, CGDisplayPixelsHigh,
@@ -21,7 +22,7 @@ use objc2_core_video::{
     CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
     CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 };
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{NSArray, NSError, NSNumber, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
     SCStreamOutput, SCStreamOutputType,
@@ -96,6 +97,16 @@ pub fn displays() -> Result<Vec<Display>, String> {
             size: unsafe { (d.width() as u32, d.height() as u32) },
         })
         .collect())
+}
+
+pub fn name(id: u64) -> Option<String> {
+    let mtm = MainThreadMarker::new()?;
+    let key = NSString::from_str("NSScreenNumber");
+    NSScreen::screens(mtm).iter().find_map(|screen| {
+        let number = screen.deviceDescription().objectForKey(&key)?;
+        let number = number.downcast_ref::<NSNumber>()?;
+        (number.unsignedIntValue() as u64 == id).then(|| screen.localizedName().to_string())
+    })
 }
 
 pub fn display(id: u64) -> Option<Display> {

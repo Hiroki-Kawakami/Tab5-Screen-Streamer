@@ -15,7 +15,6 @@ use egui_glow::egui_winit::winit::dpi::{LogicalSize, Position};
 pub enum Icon {
     Disabled,
     Disconnected,
-    Idle,
     Streaming,
 }
 
