@@ -34,11 +34,11 @@ void settings_set_equalizer_enabled(bool enabled);
 AppMode settings_last_mode();
 void settings_set_last_mode(AppMode mode);
 
-bool settings_usb_audio();
-void settings_set_usb_audio(bool enabled);
+enum class PcAppOption : uint8_t {
+    UsbAudio = 1 << 0,
+    TouchInput = 1 << 1,
+    KeyboardInput = 1 << 2,
+};
 
-bool settings_usb_hid();
-void settings_set_usb_hid(bool enabled);
-
-bool settings_touch_input();
-void settings_set_touch_input(bool enabled);
+bool settings_pc_app_option(PcAppOption option);
+void settings_set_pc_app_option(PcAppOption option, bool enabled);

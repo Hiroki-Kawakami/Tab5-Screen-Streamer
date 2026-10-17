@@ -125,11 +125,13 @@ Setting<"lastmode", uint8_t, +[](int mode) -> uint8_t {
     return mode >= 0 && mode <= (int)AppMode::PcApp ? mode : 0;
 }> s_last_mode{(uint8_t)AppMode::None};
 
-Setting<"usbaudio", uint8_t, sanitize_flag> s_usb_audio{1};
+constexpr uint8_t kPcAppOptionsAll = (uint8_t)PcAppOption::UsbAudio |
+                                    (uint8_t)PcAppOption::TouchInput |
+                                    (uint8_t)PcAppOption::KeyboardInput;
 
-Setting<"usbhid", uint8_t, sanitize_flag> s_usb_hid{1};
-
-Setting<"touchinput", uint8_t, sanitize_flag> s_touch_input{1};
+Setting<"pcappoptions", uint8_t, +[](int options) -> uint8_t {
+    return options & kPcAppOptionsAll;
+}> s_pc_app_options{kPcAppOptionsAll};
 
 template <typename Fn>
 void for_each_setting(Fn &&fn) {
@@ -138,9 +140,7 @@ void for_each_setting(Fn &&fn) {
     fn(s_rotation);
     fn(s_equalizer);
     fn(s_last_mode);
-    fn(s_usb_audio);
-    fn(s_usb_hid);
-    fn(s_touch_input);
+    fn(s_pc_app_options);
 }
 
 }  // namespace
@@ -218,26 +218,11 @@ void settings_set_last_mode(AppMode mode) {
     s_last_mode.set((int)mode);
 }
 
-bool settings_usb_audio() {
-    return s_usb_audio.get() != 0;
+bool settings_pc_app_option(PcAppOption option) {
+    return (s_pc_app_options.get() & (uint8_t)option) != 0;
 }
 
-void settings_set_usb_audio(bool enabled) {
-    s_usb_audio.set(enabled);
-}
-
-bool settings_usb_hid() {
-    return s_usb_hid.get() != 0;
-}
-
-void settings_set_usb_hid(bool enabled) {
-    s_usb_hid.set(enabled);
-}
-
-bool settings_touch_input() {
-    return s_touch_input.get() != 0;
-}
-
-void settings_set_touch_input(bool enabled) {
-    s_touch_input.set(enabled);
+void settings_set_pc_app_option(PcAppOption option, bool enabled) {
+    const uint8_t options = s_pc_app_options.get();
+    s_pc_app_options.set(enabled ? options | (uint8_t)option : options & ~(uint8_t)option);
 }

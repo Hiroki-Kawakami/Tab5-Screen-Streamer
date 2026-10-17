@@ -56,8 +56,9 @@ void step_create(lv_obj_t *parent, int number, const char *text) {
 }
 
 std::shared_ptr<Screen> PcAppScreen::stream_screen() {
-    return std::make_shared<PcAppStreamScreen>(settings_usb_audio(), settings_usb_hid(),
-                                               settings_touch_input());
+    return std::make_shared<PcAppStreamScreen>(settings_pc_app_option(PcAppOption::UsbAudio),
+                                               settings_pc_app_option(PcAppOption::KeyboardInput),
+                                               settings_pc_app_option(PcAppOption::TouchInput));
 }
 
 void PcAppScreen::build() {
@@ -114,20 +115,20 @@ void PcAppScreen::build() {
 
     section = lv_setting_section_create(options_pane_, "Options");
     auto row = lv_setting_row_create(section, "USB Audio");
-    lv_setting_switch_create(row, settings_usb_audio(), [](lv_obj_t *, bool enabled) {
-        settings_set_usb_audio(enabled);
+    lv_setting_switch_create(row, settings_pc_app_option(PcAppOption::UsbAudio), [](lv_obj_t *, bool enabled) {
+        settings_set_pc_app_option(PcAppOption::UsbAudio, enabled);
         settings_commit();
     });
     lv_setting_separator_create(section);
     row = lv_setting_row_create(section, "Touch Input");
-    lv_setting_switch_create(row, settings_touch_input(), [](lv_obj_t *, bool enabled) {
-        settings_set_touch_input(enabled);
+    lv_setting_switch_create(row, settings_pc_app_option(PcAppOption::TouchInput), [](lv_obj_t *, bool enabled) {
+        settings_set_pc_app_option(PcAppOption::TouchInput, enabled);
         settings_commit();
     });
     lv_setting_separator_create(section);
     row = lv_setting_row_create(section, "Keyboard Input");
-    lv_setting_switch_create(row, settings_usb_hid(), [](lv_obj_t *, bool enabled) {
-        settings_set_usb_hid(enabled);
+    lv_setting_switch_create(row, settings_pc_app_option(PcAppOption::KeyboardInput), [](lv_obj_t *, bool enabled) {
+        settings_set_pc_app_option(PcAppOption::KeyboardInput, enabled);
         settings_commit();
     });
     lv_setting_description_create(section, "Use the Tab5 Keyboard on the PC.");
