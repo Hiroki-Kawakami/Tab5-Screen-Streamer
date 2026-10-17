@@ -8,9 +8,11 @@
 #include "screen_manager.hpp"
 #include "settings.hpp"
 #include "setup/settings_widgets.hpp"
+#include "setup/setup_guide.hpp"
 #include "setup/setup_steps.hpp"
 #include "usb_monitor_stream_screen.hpp"
 
+static constexpr const char *kGuideUrl = "https://github.com/Hiroki-Kawakami/Tab5-Screen-Streamer/blob/main/docs/usb-monitor.md";
 static constexpr int32_t kStartHeight = 72;
 
 std::shared_ptr<Screen> UsbMonitorScreen::stream_screen() {
@@ -33,10 +35,17 @@ void UsbMonitorScreen::build() {
     lv_obj_set_style_pad_row(options_pane_, 12, 0);
 
     auto section = lv_setting_section_create(setup_pane_, "Setup");
+    lv_obj_set_style_pad_row(section, 24, 0);
+
     setup_steps_create(section, {
+        "Choose the adapter for your computer in Options.",
         "Connect Tab5 to your computer with a USB-A to USB-A cable.",
-        "Tap Start. Tab5 appears on your computer as a display.",
+        "Tap Start. Tab5 appears on your computer as a display. No app or driver to install.",
     });
+
+    lv_hor_separator_create(section);
+
+    setup_guide_create(section, kGuideUrl);
 
     section = lv_setting_section_create(options_pane_, "Options");
     auto row = lv_setting_row_create(section, "Adapter");
@@ -73,8 +82,8 @@ void UsbMonitorScreen::back() {
 void UsbMonitorScreen::updateAdapterDescription() {
     lv_label_set_text(adapter_description_,
                       settings_usb_monitor_adapter() == UsbMonitorAdapter::Gud
-                          ? "Works with the gud driver built into Linux."
-                          : "Works with the DisplayLink driver.");
+                          ? "Linux only. Uses the gud driver built into Linux."
+                          : "Windows and Linux. The driver installs automatically.");
 }
 
 void UsbMonitorScreen::layout() {

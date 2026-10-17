@@ -4,21 +4,17 @@
  */
 
 #include "pc_app_screen.hpp"
-#include <cstring>
-#include "esp_log.h"
 #include "home_screen.hpp"
 #include "pc_app_stream_screen.hpp"
 #include "screen_manager.hpp"
 #include "settings.hpp"
 #include "setup/settings_widgets.hpp"
+#include "setup/setup_guide.hpp"
 #include "setup/setup_steps.hpp"
-
-static const char *TAG = "pc_app_screen";
 
 namespace {
 
 constexpr const char *kGuideUrl = "https://github.com/Hiroki-Kawakami/Tab5-Screen-Streamer/blob/main/docs/stream-from-pc-app.md";
-constexpr int32_t kQrSize = 200;
 constexpr int32_t kStartHeight = 72;
 
 }
@@ -55,29 +51,7 @@ void PcAppScreen::build() {
 
     lv_hor_separator_create(section);
 
-    auto guide = lv_container_create(section, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(guide, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_column(guide, 24, 0);
-
-    auto guide_text = lv_container_create(guide, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_size(guide_text, 0, LV_SIZE_CONTENT);
-    lv_obj_set_flex_grow(guide_text, 1);
-    lv_obj_set_flex_align(guide_text, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(guide_text, 8, 0);
-    auto title = lv_label_create(guide_text);
-    lv_obj_set_font_role(title, LV_WIDGETS_FONT_HEADING);
-    lv_label_set_text(title, "Setup guide");
-    auto url = lv_label_create(guide_text);
-    lv_obj_set_width(url, LV_PCT(100));
-    lv_obj_set_font_role(url, LV_WIDGETS_FONT_CAPTION);
-    lv_obj_set_style_text_color(url, lv_color_hex(0x808080), 0);
-    lv_label_set_text(url, kGuideUrl);
-
-    auto qr = lv_qrcode_create(guide);
-    lv_qrcode_set_size(qr, kQrSize);
-    if (lv_qrcode_update(qr, kGuideUrl, strlen(kGuideUrl)) != LV_RESULT_OK) {
-        ESP_LOGE(TAG, "qrcode update failed");
-    }
+    setup_guide_create(section, kGuideUrl);
 
     section = lv_setting_section_create(options_pane_, "Options");
     auto row = lv_setting_row_create(section, "USB Audio");
