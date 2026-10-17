@@ -101,7 +101,7 @@ fn fill(connection: &mut Connection, color: u32) -> Result<()> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: streamer [--usbip <host:port> | --serial <serial>] <command>
+        "usage: tab5-streamer [--usbip <host:port> | --serial <serial>] <command>
   --serial <serial>          the device with this USB serial number, from
                              devices; default any free one
 commands:

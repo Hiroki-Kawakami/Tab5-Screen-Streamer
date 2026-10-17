@@ -1,5 +1,5 @@
-//! `cargo xtask dist`: builds the app in release and packs it into
-//! target/dist for the OS it runs on.
+//! `cargo xtask dist`: builds the app and the CLI in release and packs them
+//! into one archive in target/dist for the OS it runs on.
 
 use std::env;
 use std::fs;
@@ -9,8 +9,11 @@ use std::process::{Command, ExitCode};
 const APP_NAME: &str = "Tab5 Streamer";
 const ARCHIVE_NAME: &str = "Tab5-Streamer";
 const PACKAGE: &str = "streamer-app";
+const CLI_PACKAGE: &str = "streamer";
+const CLI_NAME: &str = "tab5-streamer";
 #[cfg(target_os = "macos")]
 const BUNDLE_ID: &str = "local.tab5-streamer";
+#[cfg(target_os = "macos")]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 type Result<T> = std::result::Result<T, String>;
@@ -32,13 +35,22 @@ fn target_dir(workspace: &Path) -> PathBuf {
     env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from)
 }
 
-fn build(workspace: &Path) -> Result<PathBuf> {
+struct Binaries {
+    app: PathBuf,
+    cli: PathBuf,
+}
+
+fn build(workspace: &Path) -> Result<Binaries> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     run(Command::new(cargo)
         .current_dir(workspace)
-        .args(["build", "--release", "-p", PACKAGE]))?;
-    let name = format!("{PACKAGE}{}", env::consts::EXE_SUFFIX);
-    Ok(target_dir(workspace).join("release").join(name))
+        .args(["build", "--release", "-p", PACKAGE, "-p", CLI_PACKAGE]))?;
+    let release = target_dir(workspace).join("release");
+    let exe = |name: &str| release.join(format!("{name}{}", env::consts::EXE_SUFFIX));
+    Ok(Binaries {
+        app: exe(PACKAGE),
+        cli: exe(CLI_NAME),
+    })
 }
 
 fn remove(path: &Path) -> Result<()> {
@@ -87,38 +99,43 @@ fn info_plist() -> String {
     )
 }
 
-/// The .app, signed with CODESIGN_IDENTITY or else ad hoc, zipped.
+/// The .app, signed with CODESIGN_IDENTITY or else ad hoc, and the CLI,
+/// zipped.
 #[cfg(target_os = "macos")]
-fn package(workspace: &Path, binary: &Path, dist: &Path) -> Result<PathBuf> {
-    let app = dist.join(format!("{APP_NAME}.app"));
-    remove(&app)?;
+fn package(workspace: &Path, binaries: &Binaries, dist: &Path) -> Result<PathBuf> {
+    let root = dist.join(format!("{ARCHIVE_NAME}-macos-{}", env::consts::ARCH));
+    remove(&root)?;
+    let app = root.join(format!("{APP_NAME}.app"));
     let contents = app.join("Contents");
     for dir in ["MacOS", "Resources"] {
         let dir = contents.join(dir);
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    copy(binary, &contents.join("MacOS").join(PACKAGE))?;
+    copy(&binaries.app, &contents.join("MacOS").join(PACKAGE))?;
     let icon = workspace.join("crates/app/icons/app.icns");
     copy(&icon, &contents.join("Resources/app.icns"))?;
     let plist = contents.join("Info.plist");
     fs::write(&plist, info_plist()).map_err(|e| format!("{}: {e}", plist.display()))?;
     let identity = env::var("CODESIGN_IDENTITY").unwrap_or_else(|_| "-".into());
     run(Command::new("codesign").args(["--force", "--sign", &identity]).arg(&app))?;
-    let archive = dist.join(format!("{ARCHIVE_NAME}-{VERSION}-macos.zip"));
+    copy(&binaries.cli, &root.join(CLI_NAME))?;
+    let archive = root.with_extension("zip");
     remove(&archive)?;
     // ditto keeps the bundle's symlinks and extended attributes, which the
     // signature covers.
-    run(Command::new("ditto").args(["-c", "-k", "--keepParent"]).arg(&app).arg(&archive))?;
+    run(Command::new("ditto").args(["-c", "-k"]).arg(&root).arg(&archive))?;
     Ok(archive)
 }
 
-/// The executable under the app's name, zipped. Its icon is linked in by the
-/// app's build script.
+/// The app's executable under the app's name and the CLI, zipped. The app's
+/// icon is linked in by its build script.
 #[cfg(windows)]
-fn package(_workspace: &Path, binary: &Path, dist: &Path) -> Result<PathBuf> {
-    let exe = format!("{APP_NAME}.exe");
-    copy(binary, &dist.join(&exe))?;
-    let archive = dist.join(format!("{ARCHIVE_NAME}-{VERSION}-windows.zip"));
+fn package(_workspace: &Path, binaries: &Binaries, dist: &Path) -> Result<PathBuf> {
+    let app = format!("{APP_NAME}.exe");
+    let cli = format!("{CLI_NAME}.exe");
+    copy(&binaries.app, &dist.join(&app))?;
+    copy(&binaries.cli, &dist.join(&cli))?;
+    let archive = dist.join(format!("{ARCHIVE_NAME}-windows-{}.zip", env::consts::ARCH));
     remove(&archive)?;
     // Windows' own bsdtar, which writes zip; a GNU tar earlier in PATH does not.
     let system = env::var_os("SystemRoot").ok_or("SystemRoot is not set")?;
@@ -128,21 +145,22 @@ fn package(_workspace: &Path, binary: &Path, dist: &Path) -> Result<PathBuf> {
         .arg(&archive)
         .arg("-C")
         .arg(dist)
-        .arg(&exe))?;
+        .arg(&app)
+        .arg(&cli))?;
     Ok(archive)
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn package(_workspace: &Path, _binary: &Path, _dist: &Path) -> Result<PathBuf> {
+fn package(_workspace: &Path, _binaries: &Binaries, _dist: &Path) -> Result<PathBuf> {
     Err("no package for this OS".into())
 }
 
 fn dist() -> Result<PathBuf> {
     let workspace = workspace();
-    let binary = build(&workspace)?;
+    let binaries = build(&workspace)?;
     let dist = target_dir(&workspace).join("dist");
     fs::create_dir_all(&dist).map_err(|e| format!("{}: {e}", dist.display()))?;
-    package(&workspace, &binary, &dist)
+    package(&workspace, &binaries, &dist)
 }
 
 fn main() -> ExitCode {

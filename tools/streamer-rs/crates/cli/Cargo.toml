@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "tab5-streamer"
+path = "src/main.rs"
+
 [dependencies]
 streamer-capture.workspace = true
 streamer-core.workspace = true

@@ -7,7 +7,7 @@ string and this repository. There are three clients:
 
 | client | role | audio | input |
 |---|---|---|---|
-| CLI (`streamer`) | scripting and power use: capture a display, play a file or an ffmpeg pipe | bulk, for `play` | touch injection |
+| CLI (`tab5-streamer`) | scripting and power use: capture a display, play a file or an ffmpeg pipe | bulk, for `play` | touch injection |
 | App (`Tab5 Streamer`) | resident in the menu bar or notification area, like a display adapter's manager: streams displays and changes the Tab5's settings | none; UAC covers it | touch injection |
 | Web | zero install: plays video files, or shares a screen through `getDisplayMedia` | bulk, in the player only | none |
 
@@ -37,7 +37,7 @@ nix develop -c bash -c 'cd tools/streamer-rs/web && npm ci && npm run dev'   # h
 | `crates/capture` | display lists, capture, the virtual display | macOS, Windows |
 | `crates/input` | touch injection | macOS, Windows |
 | `crates/stream` | the presenter on the wall clock, threaded JPEG bands, the display streaming loop | native |
-| `crates/cli` | `streamer` | native |
+| `crates/cli` | `tab5-streamer` | native |
 | `crates/app` | the App (egui) | macOS, Windows |
 | `crates/wasm` | `core` for the Web client (wasm-bindgen) | wasm32 |
 | `crates/xtask` | `cargo xtask dist` | — |
@@ -146,7 +146,7 @@ range every second.
 
 ## CLI
 
-The arguments are parsed by hand; `streamer` with no command prints the
+The arguments are parsed by hand; `tab5-streamer` with no command prints the
 usage. Global options (`--serial`, `--usbip`) come before the command.
 
 - **`play <file>` runs ffmpeg itself**: `ffprobe` gives the display size
@@ -185,7 +185,7 @@ and outputs NV12 (`420f`, BT.601), so the PC never scales.
   once its few buffers are all held.
 - **Below 60 fps is SCK's delivery**: a 60 fps video gives 50-56 callbacks
   and 40-55 new images a second with nothing dropped by the client.
-- **Another SCK client (`streamer displays`) stops a running capture**
+- **Another SCK client (`tab5-streamer displays`) stops a running capture**
   without an error.
 - **A sleeping display makes SCK stop with "display not found"**;
   `CGDisplayIsAsleep` tells it apart from a display that is gone.
@@ -367,12 +367,30 @@ the PC tools are released on their own when the protocol does not change.
   too. Pages builds without nix, since the dev shell pulls in ESP-IDF
   through `esp-devkit`. The workflow pins rustc and `wasm-bindgen` itself,
   so bump them there together with the flake.
-- **`cargo xtask dist` packs the App** into `target/dist/`:
-  - macOS: `Tab5 Streamer.app` (`LSUIElement`), signed with
-    `CODESIGN_IDENTITY` or ad hoc, zipped with `ditto` to keep symlinks and
-    attributes. The build machine's architecture only, not notarised.
-  - Windows: `Tab5 Streamer.exe`, zipped with `System32\tar.exe`, because a
-    GNU tar earlier on `PATH` (Git's) does not write zip.
+- **The same tag runs `.github/workflows/streamer-release.yml`**, which
+  builds the App and the CLI for macOS (Apple Silicon) and Windows
+  (x86_64) and publishes a release with one archive per OS and
+  `SHA256SUMS`. `workflow_dispatch` builds without releasing.
+  - **The tag must match `version` in `Cargo.toml`**; the build fails
+    otherwise.
+  - **The same files also go to the `streamer-latest` release**, whose tag
+    the workflow moves to each new version, so
+    `releases/download/streamer-latest/Tab5-Streamer-<os>-<arch>.zip` never
+    changes. It is created with `--latest=false` so `releases/latest` keeps
+    following the repository's last release.
+  - **Nothing is notarised.** A browser download of the `.app` is stopped by
+    Gatekeeper until it is allowed in System Settings or its quarantine
+    attribute is removed.
+- **`cargo xtask dist` builds the archive** in `target/dist/` for the OS it
+  runs on, named after its architecture:
+  - macOS: `Tab5-Streamer-macos-aarch64.zip` holding `Tab5 Streamer.app`
+    (`LSUIElement`), signed with `CODESIGN_IDENTITY` or ad hoc, and
+    `tab5-streamer`, zipped with `ditto` to keep the bundle's symlinks and
+    attributes.
+  - Windows: `Tab5-Streamer-windows-x86_64.zip` holding
+    `Tab5 Streamer.exe` and `tab5-streamer.exe`, zipped with
+    `System32\tar.exe`, because a GNU tar earlier on `PATH` (Git's) does not
+    write zip.
 - **Windows builds are checked by building there**: copy the sources
   (without macOS `._*` files), `cargo build --release -p streamer -p
   streamer-app` and clippy. A release build fails while the App runs,
