@@ -115,7 +115,12 @@ void UsbMonitorStreamScreen::startUsb() {
 void UsbMonitorStreamScreen::setStatus(UsbStatus status) {
     status_ = status;
     const bool streaming = status == UsbStatus::Active;
-    if (streaming_.exchange(streaming) && !streaming) restartIdle();
+    const bool was_streaming = streaming_.exchange(streaming);
+    if (was_streaming && !streaming) restartIdle();
+    if (!was_streaming && streaming && !display_on_) {
+        display_on_ = true;
+        applyBrightness();
+    }
     updateWaiting();
     if (status_row_.label) stream_panel_status_set(status_row_, status_);
 }
