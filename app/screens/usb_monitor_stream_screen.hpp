@@ -11,6 +11,7 @@
 #include "bsp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
+#include "protocols/displaylink/displaylink_profile.hpp"
 #include "protocols/gud/gud_profile.hpp"
 #include "screen.hpp"
 #include "settings.hpp"
@@ -27,7 +28,9 @@ public:
 
 private:
     UsbMonitorAdapter adapter_;
-    std::shared_ptr<GudProfile> profile_;
+    std::shared_ptr<GudProfile> gud_;
+    std::shared_ptr<DisplayLinkProfile> displaylink_;
+    bsp_rotation_t usb_rotation_ = BSP_ROTATION_0;
     UsbStatus status_ = UsbStatus::Unconfigured;
     std::atomic<bool> streaming_ = false;
     bsp_rotation_t rotation_ = BSP_ROTATION_0;

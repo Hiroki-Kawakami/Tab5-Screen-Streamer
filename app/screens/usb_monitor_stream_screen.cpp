@@ -57,7 +57,8 @@ void UsbMonitorStreamScreen::onExit() {
     panel_idle_display_delete();
     waiting_display_ = nullptr;
     usb_stop();
-    profile_.reset();
+    gud_.reset();
+    displaylink_.reset();
     ui_orientation_set_listener(nullptr, nullptr);
 }
 
@@ -71,29 +72,43 @@ void UsbMonitorStreamScreen::post(std::weak_ptr<Screen> weak,
 }
 
 void UsbMonitorStreamScreen::startUsb() {
-    if (adapter_ != UsbMonitorAdapter::Gud) {
-        ESP_LOGE(TAG, "adapter %d is not supported", (int)adapter_);
-        return;
-    }
     std::weak_ptr<Screen> weak = weak_from_this();
-    GudProfile::Listeners listeners;
-    listeners.status = [weak](UsbStatus status) {
+    const UsbStatusListener status = [weak](UsbStatus status) {
         post(weak, [status](UsbMonitorStreamScreen &self) { self.setStatus(status); });
     };
-    listeners.display_power = [weak](bool on) {
+    const auto display_power = [weak](bool on) {
         post(weak, [on](UsbMonitorStreamScreen &self) { self.setDisplayPower(on); });
     };
-    listeners.brightness = [weak](int percent) {
-        post(weak, [percent](UsbMonitorStreamScreen &self) { self.setBrightness(percent); });
-    };
-    auto profile = std::make_shared<GudProfile>(std::move(listeners), rotation_,
+    gud_.reset();
+    displaylink_.reset();
+    usb_rotation_ = rotation_;
+    std::shared_ptr<UsbProfile> profile;
+    esp_err_t err;
+    if (adapter_ == UsbMonitorAdapter::Gud) {
+        GudProfile::Listeners listeners;
+        listeners.status = status;
+        listeners.display_power = display_power;
+        listeners.brightness = [weak](int percent) {
+            post(weak, [percent](UsbMonitorStreamScreen &self) { self.setBrightness(percent); });
+        };
+        auto gud = std::make_shared<GudProfile>(std::move(listeners), rotation_,
                                                 settings_display_brightness());
-    const esp_err_t err = profile->start();
+        err = gud->start();
+        if (err == ESP_OK) gud_ = gud;
+        profile = gud;
+    } else {
+        DisplayLinkProfile::Listeners listeners;
+        listeners.status = status;
+        listeners.display_power = display_power;
+        auto displaylink = std::make_shared<DisplayLinkProfile>(std::move(listeners), rotation_);
+        err = displaylink->start();
+        if (err == ESP_OK) displaylink_ = displaylink;
+        profile = displaylink;
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "gud: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "usb monitor: %s", esp_err_to_name(err));
         return;
     }
-    profile_ = profile;
     usb_start(std::move(profile));
 }
 
@@ -112,13 +127,21 @@ void UsbMonitorStreamScreen::rotate(bsp_rotation_t rotation) {
     panel_idle_display_set_rotation(rotation);
     rotation_ = rotation;
     stream_waiting_layout(waiting_, rotation);
-    if (profile_) profile_->rotate(rotation);
+    if (gud_) gud_->rotate(rotation);
+    if (displaylink_) {
+        const bool transposed = (rotation ^ usb_rotation_) & 1;
+        if (transposed) {
+            startUsb();
+        } else {
+            displaylink_->rotate(rotation);
+        }
+    }
     if (reopen) openOverlay();
 }
 
 void UsbMonitorStreamScreen::updateWaiting() {
-    if (!profile_) {
-        stream_waiting_set(waiting_, TABLER_USB, "This adapter is not available yet");
+    if (!gud_ && !displaylink_) {
+        stream_waiting_set(waiting_, TABLER_USB, "USB could not be started");
     } else if (status_ == UsbStatus::Unconfigured) {
         stream_waiting_set(waiting_, TABLER_USB, "Connect Tab5 to your computer");
     } else {

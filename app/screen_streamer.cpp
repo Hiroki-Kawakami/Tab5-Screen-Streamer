@@ -18,6 +18,7 @@
 #include "screens/pc_app_screen.hpp"
 #include "screens/pc_app_stream_screen.hpp"
 #include "screens/usb_monitor_screen.hpp"
+#include "screens/usb_monitor_stream_screen.hpp"
 #include "screens/usb_test_screen.hpp"
 #include "sdkconfig.h"
 #include "settings.hpp"
@@ -57,6 +58,19 @@ static esp_err_t display_init() {
 
 #ifdef CONFIG_HARNESS
 static bool harness_mode(int argc, const char *const *argv, void *) {
+    if (argc == 3 && strcmp(argv[1], "monitor") == 0) {
+        UsbMonitorAdapter adapter;
+        if (strcmp(argv[2], "gud") == 0) {
+            adapter = UsbMonitorAdapter::Gud;
+        } else if (strcmp(argv[2], "displaylink") == 0) {
+            adapter = UsbMonitorAdapter::DisplayLink;
+        } else {
+            return false;
+        }
+        auto screen = std::make_shared<UsbMonitorStreamScreen>(adapter);
+        lv_async_call([screen] { screen_manager.load(screen); });
+        return true;
+    }
     if (argc != 2) return false;
     std::shared_ptr<Screen> screen;
     if (strcmp(argv[1], "home") == 0) {
