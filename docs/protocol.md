@@ -343,9 +343,9 @@ overlay is visible.
 - The PC sends `AUDIO_FORMAT` after connecting and before every format change.
   `AUDIO_DATA` before the first `AUDIO_FORMAT` is dropped.
 - PCM already buffered plays out in its own format before the new one applies.
-- The UAC speaker and bulk audio are exclusive. While the host streams to the
-  speaker (48 kHz, 16-bit stereo), every `AUDIO_DATA` is answered with
-  `EV_ERROR` (unsupported) and dropped.
+- Bulk audio takes priority over the UAC speaker. `AUDIO_DATA` takes the
+  output from a UAC stream, which is dropped meanwhile and plays again once
+  no `AUDIO_DATA` has come for 200 ms, or the session has ended.
 - Any sample rate up to `audio_max_rate` is taken, with 1 or 2 channels of 16,
   24 or 32 bits. Anything else is answered with `EV_ERROR`, and the data
   following it is dropped until the next `AUDIO_FORMAT`.

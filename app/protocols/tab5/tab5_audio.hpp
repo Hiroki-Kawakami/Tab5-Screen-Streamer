@@ -19,8 +19,8 @@
 class Tab5Events;
 
 /* Plays audio endpoint transfers on its own task, paced by the output, or in
- * the host clock by resampling to the rate they arrive at. While the UAC
- * stream runs, it plays that instead and bulk audio is refused. */
+ * the host clock by resampling to the rate they arrive at. Bulk audio takes
+ * the output from the UAC stream, which plays again once bulk audio idles. */
 class Tab5Audio {
 public:
     using Done = void (*)(void *context);
@@ -87,6 +87,7 @@ private:
     void close();
     void report(bool force);
     void play_uac();
+    void update_playing();
     void apply_volume();
     void send(Op op);
     uint32_t frame_bytes() const;
@@ -104,6 +105,7 @@ private:
     tab5::AudioFormat opened_ = {};
     bool have_format_ = false;
     bool open_ = false;
+    bool bulk_ = false;
     int64_t last_report_us_ = 0;
 
     audf_fifo_t *uac_pcm_ = nullptr;
