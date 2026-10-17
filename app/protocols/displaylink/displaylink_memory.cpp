@@ -101,15 +101,6 @@ uint8_t *DisplayLinkMemory::page(uint32_t address) {
     return page;
 }
 
-void DisplayLinkMemory::write8(uint32_t address, uint8_t value) {
-    address &= kAddressMask;
-    uint8_t *p = pages_[address >> kPageShift];
-    if (!p) {
-        if (!value || !(p = page(address))) return;
-    }
-    p[address & (kPageBytes - 1)] = value;
-}
-
 void DisplayLinkMemory::write16(uint32_t address, uint16_t value) {
     address &= kAddressMask;
     uint8_t *p = pages_[address >> kPageShift];

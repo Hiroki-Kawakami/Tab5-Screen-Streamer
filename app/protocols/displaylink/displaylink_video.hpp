@@ -135,8 +135,8 @@ private:
     void load_table();
     void table_entry();
     void build_steps(Step *steps, uint16_t start);
-    template <typename Pixel>
     [[gnu::noinline]] const uint8_t *bits(const uint8_t *p, const uint8_t *end);
+    const uint8_t *skip_bits(const uint8_t *p, const uint8_t *end);
     bool pixel_byte(uint8_t byte);
     void put(uint16_t pixel);
     void repeat(uint16_t pixel, uint32_t count);

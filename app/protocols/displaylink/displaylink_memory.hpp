@@ -18,7 +18,6 @@ public:
     DisplayLinkMemory &operator=(const DisplayLinkMemory &) = delete;
 
     void clear();
-    void write8(uint32_t address, uint8_t value);
     /* `address` is even. */
     void write16(uint32_t address, uint16_t value);
     void copy(uint32_t target, uint32_t source, uint32_t bytes);

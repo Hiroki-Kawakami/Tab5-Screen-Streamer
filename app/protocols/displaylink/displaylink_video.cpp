@@ -362,7 +362,7 @@ void DisplayLinkVideo::parse(const uint8_t *data, uint32_t length) {
                 const uint32_t diag_start = diag_cycles();
                 const uint8_t *diag_from = p;
                 const bool wide = pixel_bytes_ == 2;
-                p = wide ? bits<uint16_t>(p, end) : bits<uint8_t>(p, end);
+                p = wide ? bits(p, end) : skip_bits(p, end);
                 diag_time[wide ? kDiagBits16 : kDiagBits8] += diag_cycles() - diag_start;
                 (wide ? diag_bytes16 : diag_bytes8) += p + 1 - diag_from;
                 break;
@@ -408,16 +408,16 @@ void DisplayLinkVideo::begin_command() {
                        : 1;
     switch (command) {
         case Command::WriteCopy8:
+            state_ = State::Idle;
+            return;
         case Command::WriteCopy16: {
             // The target comes first, then the count and the source.
             const uint32_t source = header_[4] << 16 | header_[5] << 8 | header_[6];
             const uint32_t bytes = total_ * pixel_bytes_;
             const uint32_t diag_start = diag_cycles();
-            if (pixel_bytes_ == 2) {
-                invalidate(source, bytes);
-                invalidate(address_, bytes);
-                wait_write_backs();
-            }
+            invalidate(source, bytes);
+            invalidate(address_, bytes);
+            wait_write_backs();
             vram_.copy(address_, source, bytes);
 #ifdef ESP_PLATFORM
             if (uint8_t *target = vram_.contiguous(address_, bytes)) {
@@ -426,7 +426,7 @@ void DisplayLinkVideo::begin_command() {
             }
 #endif
             diag_time[kDiagCopy] += diag_cycles() - diag_start;
-            if (pixel_bytes_ == 2) mark(address_, bytes);
+            mark(address_, bytes);
             state_ = State::Idle;
             return;
         }
@@ -554,8 +554,8 @@ void DisplayLinkVideo::build_steps(Step *steps, uint16_t start) {
 // Bits are read from the least significant; the rest of the byte holding the
 // last pixel is padding. Returns the last byte read; the command goes on into
 // the next transfer unless it is done.
-template <typename Pixel>
 const uint8_t *DisplayLinkVideo::bits(const uint8_t *p, const uint8_t *end) {
+    using Pixel = uint16_t;
     const auto *steps = reinterpret_cast<const uint8_t *>(active_steps_);
     uint32_t next = table_state_ * (kStepValues * sizeof(Step));
     uint16_t color = color_;
@@ -630,7 +630,7 @@ const uint8_t *DisplayLinkVideo::bits(const uint8_t *p, const uint8_t *end) {
     out_ = reinterpret_cast<uint8_t *>(out);
     written_ = total_ - left;
     if (!left) {
-        (sizeof(Pixel) == 2 ? diag_pixels16 : diag_pixels8) += total_;
+        diag_pixels16 += total_;
         state_ = State::Idle;
         return p;
     }
@@ -639,24 +639,51 @@ const uint8_t *DisplayLinkVideo::bits(const uint8_t *p, const uint8_t *end) {
     return p;
 }
 
-void DisplayLinkVideo::put(uint16_t pixel) {
-    if (out_ && out_ == out_end_) target();
-    if (out_) {
-        if (pixel_bytes_ == 2) {
-            memcpy(out_, &pixel, sizeof(pixel));
-        } else {
-            *out_ = pixel;
+const uint8_t *DisplayLinkVideo::skip_bits(const uint8_t *p, const uint8_t *end) {
+    const auto *steps = reinterpret_cast<const uint8_t *>(active_steps_);
+    uint32_t next = table_state_ * (kStepValues * sizeof(Step));
+    uint32_t left = total_ - written_;
+    for (;; p++) {
+        uint32_t byte = *p;
+        for (int half = 0; half < 2; half++, byte >>= kStepBits) {
+            const auto &step = *reinterpret_cast<const Step *>(
+                steps + next + (byte & (kStepValues - 1)) * sizeof(Step));
+            if (step.pixels >= left) {
+                written_ = total_;
+                diag_pixels8 += total_;
+                state_ = State::Idle;
+                return p;
+            }
+            left -= step.pixels;
+            next = step.next;
         }
-        out_ += pixel_bytes_;
-    } else if (pixel_bytes_ == 2) {
-        vram_.write16(here(), pixel);
-    } else {
-        vram_.write8(here(), pixel);
+        if (p + 1 == end) break;
+    }
+    written_ = total_ - left;
+    table_state_ = next / (kStepValues * sizeof(Step));
+    return p;
+}
+
+// The 8-bit plane holds the low bits of 24-bit color, which is not shown:
+// its pixels are parsed and dropped.
+void DisplayLinkVideo::put(uint16_t pixel) {
+    if (pixel_bytes_ == 2) {
+        if (out_ && out_ == out_end_) target();
+        if (out_) {
+            memcpy(out_, &pixel, sizeof(pixel));
+            out_ += sizeof(pixel);
+        } else {
+            vram_.write16(here(), pixel);
+        }
     }
     written_++;
 }
 
 void DisplayLinkVideo::repeat(uint16_t pixel, uint32_t count) {
+    if (pixel_bytes_ == 1) {
+        written_ += count;
+        return;
+    }
     bool retargeted = false;
     while (count) {
         if (!out_ || out_ == out_end_) {
@@ -669,14 +696,10 @@ void DisplayLinkVideo::repeat(uint16_t pixel, uint32_t count) {
             }
             continue;
         }
-        const uint32_t pixels = std::min<uint32_t>(count, (out_end_ - out_) / pixel_bytes_);
-        if (pixel_bytes_ == 2) {
-            auto *out = reinterpret_cast<uint16_t *>(out_);
-            for (uint32_t i = 0; i < pixels; i++) out[i] = pixel;
-        } else {
-            memset(out_, pixel, pixels);
-        }
-        out_ += pixels * pixel_bytes_;
+        auto *out = reinterpret_cast<uint16_t *>(out_);
+        const uint32_t pixels = std::min<uint32_t>(count, (out_end_ - out_) / sizeof(pixel));
+        for (uint32_t i = 0; i < pixels; i++) out[i] = pixel;
+        out_ += pixels * sizeof(pixel);
         written_ += pixels;
         count -= pixels;
     }
@@ -700,27 +723,26 @@ void DisplayLinkVideo::target_() {
     const uint32_t address = here();
     out_ = nullptr;
     out_end_ = nullptr;
-    if (pixel_bytes_ == 2) {
-        uint32_t offset;
-        const int region = region_of(address, &offset);
-        if (region >= 0) {
-            if (!window_count_) return;
-            const int row = offset / stride16_;
-            const int x = offset % stride16_ / 2;
-            Window &window = windows_[window_at(region, row - row % kTileRows, x - x % kTileWidth)];
-            const int at = row - window.row;
-            const int left = x - window.x;
-            if (window.dirty_first > window.dirty_last && window.region == shown_) {
-                dirty_since_us_ = esp_timer_get_time();
-            }
-            window.dirty_first = std::min(window.dirty_first, at);
-            window.dirty_last = std::max(window.dirty_last, at);
-            const uint32_t span = std::min<uint32_t>(bytes, (window.width - left) * 2);
-            cover(window, at, left, left + span / 2);
-            out_ = window.pixels + (at * window.width + left) * 2;
-            out_end_ = out_ + span;
-            return;
+    if (pixel_bytes_ == 1) return;
+    uint32_t offset;
+    const int region = region_of(address, &offset);
+    if (region >= 0) {
+        if (!window_count_) return;
+        const int row = offset / stride16_;
+        const int x = offset % stride16_ / 2;
+        Window &window = windows_[window_at(region, row - row % kTileRows, x - x % kTileWidth)];
+        const int at = row - window.row;
+        const int left = x - window.x;
+        if (window.dirty_first > window.dirty_last && window.region == shown_) {
+            dirty_since_us_ = esp_timer_get_time();
         }
+        window.dirty_first = std::min(window.dirty_first, at);
+        window.dirty_last = std::max(window.dirty_last, at);
+        const uint32_t span = std::min<uint32_t>(bytes, (window.width - left) * 2);
+        cover(window, at, left, left + span / 2);
+        out_ = window.pixels + (at * window.width + left) * 2;
+        out_end_ = out_ + span;
+        return;
     }
     const uint32_t page_left = 0x10000 - (address & 0xffff);
     const uint32_t span = std::min(bytes, page_left);
