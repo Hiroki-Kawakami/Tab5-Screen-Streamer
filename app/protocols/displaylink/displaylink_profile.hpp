@@ -58,6 +58,7 @@ private:
     Listeners listeners_;
     bsp_rotation_t rotation_;
     uint8_t edid_[128] = {};
+    uint8_t *memory_ = nullptr;
     std::unique_ptr<DisplayLinkVideo> video_;
     std::shared_ptr<usb_device::Vendor> vendor_;
     Slot *slots_[kSlots] = {};

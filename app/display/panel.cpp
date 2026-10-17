@@ -30,6 +30,7 @@ static constexpr int kRowAlign = 16;
 static constexpr uint32_t kScaleDenominator = 16;
 static constexpr size_t kLz4Window = 65536;
 static constexpr int kStrips = 2;
+static constexpr int kMaxPendingBlits = 6;
 
 static lv_display_t *s_ui;
 static uint8_t *s_sram;
@@ -46,6 +47,8 @@ static jpeg_ppa_pipeline_handle_t s_pipeline;
 static ppa_client_handle_t s_fill;
 static ppa_client_handle_t s_copy;
 static SemaphoreHandle_t s_strip_done[kStrips];
+static SemaphoreHandle_t s_blits_done;
+static int s_blits_pending;
 static bool s_strip_busy[kStrips];
 
 static bsp_size_t s_size;
@@ -235,6 +238,8 @@ esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes) {
         s_strip_done[i] = xSemaphoreCreateBinary();
         if (!s_strip_done[i]) return ESP_ERR_NO_MEM;
     }
+    s_blits_done = xSemaphoreCreateCounting(kMaxPendingBlits, 0);
+    if (!s_blits_done) return ESP_ERR_NO_MEM;
     s_size = bsp_display_get_size();
     s_format = bsp_display_get_pixel_format();
     s_stride = s_size.width * bsp_pixel_format_bytes(s_format);
@@ -252,7 +257,7 @@ esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes) {
     esp_err_t err = ppa_register_client(&client, &s_fill);
     if (err == ESP_OK) {
         client.oper_type = PPA_OPERATION_SRM;
-        client.max_pending_trans_num = kStrips;
+        client.max_pending_trans_num = kStrips + kMaxPendingBlits;
         err = ppa_register_client(&client, &s_copy);
     }
     if (err == ESP_OK) {
@@ -511,7 +516,12 @@ int panel_framebuffers() {
     return s_framebuffers;
 }
 
+void panel_blit_wait() {
+    for (; s_blits_pending; s_blits_pending--) xSemaphoreTake(s_blits_done, portMAX_DELAY);
+}
+
 void panel_swap() {
+    panel_blit_wait();
     if (s_clipped) return;
     s_front = (s_front + 1) % s_framebuffers;
     display_manager.present(s_front);
@@ -751,7 +761,7 @@ static bool strip_config(const PanelBlit &blit, uint32_t scale_x, uint32_t scale
     return true;
 }
 
-esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels) {
+static esp_err_t blit(const PanelBlit &blit, const uint8_t *pixels, bool wait) {
     uint32_t scale_x, scale_y;
     esp_err_t err = blit_scale(blit, &scale_x, &scale_y);
     if (err != ESP_OK) return err;
@@ -763,9 +773,28 @@ esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels) {
                           &config)) {
             continue;
         }
+        if (!wait && i == count - 1) {
+            if (s_blits_pending == kMaxPendingBlits) {
+                xSemaphoreTake(s_blits_done, portMAX_DELAY);
+                s_blits_pending--;
+            }
+            config.mode = PPA_TRANS_MODE_NON_BLOCKING;
+            config.user_data = s_blits_done;
+            err = ppa_do_scale_rotate_mirror(s_copy, &config);
+            if (err == ESP_OK) s_blits_pending++;
+            continue;
+        }
         err = ppa_do_scale_rotate_mirror(s_copy, &config);
     }
     return err;
+}
+
+esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels) {
+    return ::blit(blit, pixels, true);
+}
+
+esp_err_t panel_blit_async(const PanelBlit &blit, const uint8_t *pixels) {
+    return ::blit(blit, pixels, false);
 }
 
 esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t bytes) {

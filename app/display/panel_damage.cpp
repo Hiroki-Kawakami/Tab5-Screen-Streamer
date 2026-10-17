@@ -5,116 +5,101 @@
 
 #include "panel_damage.hpp"
 #include <algorithm>
+#include <cstring>
 #include "panel.hpp"
 
-static int right(const bsp_rect_t &r) {
-    return r.origin.x + r.size.width;
+static constexpr int kCell = 32;
+
+static int cell_rows() {
+    return (panel_size().height + kCell - 1) / kCell;
 }
 
-static int bottom(const bsp_rect_t &r) {
-    return r.origin.y + r.size.height;
+/* Bits of the cells touching columns [x0, x1). */
+static uint32_t touched_bits(int x0, int x1) {
+    uint32_t bits = 0;
+    for (int cell = x0 / kCell; cell * kCell < x1; cell++) bits |= 1u << cell;
+    return bits;
 }
 
-static bool contains(const bsp_rect_t &outer, const bsp_rect_t &inner) {
-    return inner.origin.x >= outer.origin.x && inner.origin.y >= outer.origin.y &&
-           right(inner) <= right(outer) && bottom(inner) <= bottom(outer);
-}
-
-static bool overlaps(const bsp_rect_t &a, const bsp_rect_t &b) {
-    return a.origin.x < right(b) && b.origin.x < right(a) && a.origin.y < bottom(b) &&
-           b.origin.y < bottom(a);
-}
-
-static bsp_rect_t bounds(const bsp_rect_t &a, const bsp_rect_t &b) {
-    const int x0 = std::min(a.origin.x, b.origin.x);
-    const int y0 = std::min(a.origin.y, b.origin.y);
-    return {{x0, y0}, {std::max(right(a), right(b)) - x0, std::max(bottom(a), bottom(b)) - y0}};
+/* Bits of the cells within columns [x0, x1). */
+static uint32_t covered_bits(int x0, int x1) {
+    const int width = panel_size().width;
+    uint32_t bits = 0;
+    for (int cell = x0 / kCell; cell * kCell < x1; cell++) {
+        if (cell * kCell >= x0 && std::min((cell + 1) * kCell, width) <= x1) bits |= 1u << cell;
+    }
+    return bits;
 }
 
 void PanelDamage::reset() {
-    for (Region &region : stale_) region.count = 0;
+    memset(stale_, 0, sizeof(stale_));
     pending_ = false;
 }
 
 void PanelDamage::invalidate() {
     const int front = panel_buffer_index(PanelBuffer::Front);
+    const uint32_t all = touched_bits(0, panel_size().width);
     for (int i = 0; i < panel_framebuffers(); i++) {
-        stale_[i].count = 0;
-        if (i != front) add(stale_[i], {{0, 0}, panel_size()});
+        for (int row = 0; row < cell_rows(); row++) stale_[i][row] = i == front ? 0 : all;
     }
 }
 
-// Lacking too much only costs a copy, so a full region merges into one rect.
-void PanelDamage::add(Region &region, const bsp_rect_t &area) {
-    for (int i = 0; i < region.count; i++) {
-        if (contains(region.rects[i], area)) return;
-    }
-    if (region.count < kMaxRects) {
-        region.rects[region.count++] = area;
-        return;
-    }
-    bsp_rect_t all = area;
-    for (int i = 0; i < region.count; i++) all = bounds(all, region.rects[i]);
-    region.rects[0] = all;
-    region.count = 1;
-}
-
-// False when the pieces left do not fit; the region is unchanged then.
-bool PanelDamage::subtract(Region &region, const bsp_rect_t &area) {
-    Region result = {};
-    for (int i = 0; i < region.count; i++) {
-        const bsp_rect_t &r = region.rects[i];
-        if (!overlaps(r, area)) {
-            if (result.count == kMaxRects) return false;
-            result.rects[result.count++] = r;
-            continue;
-        }
-        const int top = std::max(r.origin.y, area.origin.y);
-        const int end = std::min(bottom(r), bottom(area));
-        const bsp_rect_t pieces[] = {
-            {{r.origin.x, r.origin.y}, {r.size.width, top - r.origin.y}},
-            {{r.origin.x, end}, {r.size.width, bottom(r) - end}},
-            {{r.origin.x, top}, {std::max(area.origin.x, r.origin.x) - r.origin.x, end - top}},
-            {{right(area), top}, {right(r) - right(area), end - top}},
-        };
-        for (const bsp_rect_t &piece : pieces) {
-            if (piece.size.width <= 0 || piece.size.height <= 0) continue;
-            if (result.count == kMaxRects) return false;
-            result.rects[result.count++] = piece;
-        }
-    }
-    region = result;
-    return true;
-}
-
-esp_err_t PanelDamage::fill(Region &region) {
+// Runs of lacking cells in each cell row, copied from the front.
+esp_err_t PanelDamage::fill(const uint32_t *rows, int first, int last) {
     esp_err_t err = ESP_OK;
-    for (int i = 0; i < region.count && err == ESP_OK; i++) {
-        err = panel_copy_to_back(region.rects[i]);
+    for (int row = first; row <= last && err == ESP_OK; row++) {
+        uint32_t bits = rows[row];
+        while (bits && err == ESP_OK) {
+            const int start = __builtin_ctz(bits);
+            const uint32_t rest = ~(bits >> start);
+            const int length = rest ? __builtin_ctz(rest) : 32 - start;
+            err = panel_copy_to_back({{start * kCell, row * kCell}, {length * kCell, kCell}});
+            const uint32_t run = length >= 32 ? UINT32_MAX : (1u << length) - 1;
+            bits &= ~(run << start);
+        }
     }
-    region.count = 0;
     return err;
 }
 
-// What the back buffer lacks is filled in before anything is drawn over it
-// when the region would no longer fit around the new area.
+// Cells the area covers whole are drawn over; the others it touches are
+// filled in first, so filling them in later cannot cover what is drawn.
 esp_err_t PanelDamage::drawing(const bsp_rect_t &area) {
-    Region &stale = stale_[panel_buffer_index(PanelBuffer::Back)];
-    if (subtract(stale, area)) return ESP_OK;
-    const esp_err_t err = fill(stale);
-    return err;
+    uint32_t *stale = stale_[panel_buffer_index(PanelBuffer::Back)];
+    const int x0 = area.origin.x, x1 = area.origin.x + area.size.width;
+    const int y0 = area.origin.y, y1 = area.origin.y + area.size.height;
+    if (x1 <= x0 || y1 <= y0) return ESP_OK;
+    const int height = panel_size().height;
+    const uint32_t touched = touched_bits(x0, x1);
+    const uint32_t covered = covered_bits(x0, x1);
+    uint32_t partial[kMaxCellRows] = {};
+    const int first = y0 / kCell, last = (y1 - 1) / kCell;
+    for (int row = first; row <= last; row++) {
+        const bool whole_row = row * kCell >= y0 && std::min((row + 1) * kCell, height) <= y1;
+        partial[row] = stale[row] & touched & ~(whole_row ? covered : 0);
+        stale[row] &= ~touched;
+    }
+    return fill(partial, first, last);
 }
 
 void PanelDamage::drawn(const bsp_rect_t &area) {
+    const int x1 = area.origin.x + area.size.width;
+    const int y1 = area.origin.y + area.size.height;
+    if (x1 <= area.origin.x || y1 <= area.origin.y) return;
+    const uint32_t touched = touched_bits(area.origin.x, x1);
     const int back = panel_buffer_index(PanelBuffer::Back);
     for (int i = 0; i < panel_framebuffers(); i++) {
-        if (i != back) add(stale_[i], area);
+        if (i == back) continue;
+        for (int row = area.origin.y / kCell; row <= (y1 - 1) / kCell; row++) {
+            stale_[i][row] |= touched;
+        }
     }
     pending_ = true;
 }
 
 esp_err_t PanelDamage::present() {
-    const esp_err_t err = fill(stale_[panel_buffer_index(PanelBuffer::Back)]);
+    uint32_t *stale = stale_[panel_buffer_index(PanelBuffer::Back)];
+    const esp_err_t err = fill(stale, 0, cell_rows() - 1);
+    memset(stale, 0, sizeof(Cells));
     panel_swap();
     pending_ = false;
     return err;

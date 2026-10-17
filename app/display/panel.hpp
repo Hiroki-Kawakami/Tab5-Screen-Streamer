@@ -105,6 +105,10 @@ struct PanelBlit {
 };
 
 esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels);
+/* panel_blit() returning once queued: `pixels` are read until
+ * panel_blit_wait(), which panel_swap() calls first. */
+esp_err_t panel_blit_async(const PanelBlit &blit, const uint8_t *pixels);
+void panel_blit_wait();
 esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t bytes);
 esp_err_t panel_blit_jpeg(const PanelBlit &blit, const uint8_t *jpeg, uint32_t bytes);
 

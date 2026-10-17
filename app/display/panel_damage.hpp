@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include <cstdint>
 #include "bsp.h"
 #include "esp_err.h"
 
@@ -25,17 +26,13 @@ public:
     esp_err_t present();
 
 private:
-    static constexpr int kMaxRects = 16;
+    static constexpr int kMaxCellRows = 64;
 
-    struct Region {
-        bsp_rect_t rects[kMaxRects];
-        int count;
-    };
+    /* Per framebuffer, a bit for each cell it lacks; a row of cells per word. */
+    using Cells = uint32_t[kMaxCellRows];
 
-    static void add(Region &region, const bsp_rect_t &area);
-    static bool subtract(Region &region, const bsp_rect_t &area);
-    static esp_err_t fill(Region &region);
+    static esp_err_t fill(const uint32_t *rows, int first, int last);
 
-    Region stale_[BSP_DISPLAY_MAX_FRAME_BUFFERS] = {};
+    Cells stale_[BSP_DISPLAY_MAX_FRAME_BUFFERS] = {};
     bool pending_ = false;
 };

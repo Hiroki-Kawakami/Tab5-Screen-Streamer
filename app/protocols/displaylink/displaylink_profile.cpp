@@ -4,6 +4,7 @@
  */
 
 #include "displaylink_profile.hpp"
+#include <algorithm>
 #include <cstring>
 #include "display/panel.hpp"
 #include "displaylink.hpp"
@@ -90,6 +91,7 @@ DisplayLinkProfile::DisplayLinkProfile(Listeners listeners, bsp_rotation_t rotat
 DisplayLinkProfile::~DisplayLinkProfile() {
     if (idle_timer_) xTimerDelete(idle_timer_, portMAX_DELAY);
     video_.reset();
+    heap_caps_free(memory_);
     for (Slot *slot : slots_) {
         if (!slot) continue;
         heap_caps_free(slot->transfer.buffer);
@@ -109,6 +111,9 @@ usb_device::DeviceInfo DisplayLinkProfile::info() const {
 }
 
 esp_err_t DisplayLinkProfile::start() {
+    memory_ = static_cast<uint8_t *>(
+        heap_caps_calloc(1, displaylink::kMemoryBytes, MALLOC_CAP_SPIRAM));
+    if (!memory_) return ESP_ERR_NO_MEM;
     for (Slot *&slot : slots_) {
         auto *buffer = static_cast<uint8_t *>(
             heap_caps_aligned_alloc(kBufferAlignment, kSlotBytes, MALLOC_CAP_SPIRAM));
@@ -153,19 +158,55 @@ bool DisplayLinkProfile::control(const usb_device::ControlRequest &request, uint
     if ((request.request_type & kRequestTypeMask) != kRequestTypeVendor) return false;
     const auto code = static_cast<displaylink::Request>(request.request);
     if (request.request_type & kDirectionIn) {
-        if (code != displaylink::Request::ReadEdid || request.index != displaylink::kEdidIndex ||
-            *bytes < 2) {
-            ESP_LOGW(TAG, "request 0x%02x in, index 0x%04x", request.request, request.index);
-            return false;
+        const size_t length = std::min<size_t>(*bytes, request.length);
+        switch (code) {
+            case displaylink::Request::ReadEdid: {
+                if ((request.index & 0xff) != displaylink::kEdidIndex || !length) break;
+                const uint32_t offset = request.value >> 8 | (request.value & 0xff) << 8;
+                data[0] = 0;
+                for (size_t i = 1; i < length; i++) {
+                    data[i] = offset + i - 1 < sizeof(edid_) ? edid_[offset + i - 1] : 0;
+                }
+                *bytes = length;
+                return true;
+            }
+            case displaylink::Request::ReadMemory:
+                for (size_t i = 0; i < length; i++) {
+                    data[i] = memory_[(request.index + i) % displaylink::kMemoryBytes];
+                }
+                *bytes = length;
+                return true;
+            case displaylink::Request::ReadStatus:
+                *bytes = std::min(length, sizeof(displaylink::kStatus));
+                memcpy(data, &displaylink::kStatus, *bytes);
+                return true;
+            default:
+                break;
         }
-        const uint32_t offset = request.value >> 8;
-        data[0] = 0;
-        data[1] = offset < sizeof(edid_) ? edid_[offset] : 0;
-        *bytes = 2;
-        return true;
+        ESP_LOGW(TAG, "request 0x%02x in, value 0x%04x index 0x%04x length %u", request.request,
+                 request.value, request.index, request.length);
+        return false;
     }
-    if (code == displaylink::Request::SelectChannel) return true;
-    ESP_LOGW(TAG, "request 0x%02x out, %u bytes", request.request, (unsigned)*bytes);
+    switch (code) {
+        case displaylink::Request::WriteMemory:
+            if (request.value) return true;
+            for (size_t i = 0; i < *bytes; i++) {
+                memory_[(request.index + i) % displaylink::kMemoryBytes] = data[i];
+            }
+            return true;
+        case displaylink::Request::SetKey:
+            if (*bytes != sizeof(displaylink::kNullKey) ||
+                memcmp(data, displaylink::kNullKey, *bytes)) {
+                ESP_LOGW(TAG, "encryption is not supported");
+            }
+            return true;
+        case displaylink::Request::EndTransfer:
+            return true;
+        default:
+            break;
+    }
+    ESP_LOGW(TAG, "request 0x%02x out, value 0x%04x index 0x%04x, %u bytes", request.request,
+             request.value, request.index, (unsigned)*bytes);
     return false;
 }
 
