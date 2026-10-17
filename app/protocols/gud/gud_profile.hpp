@@ -10,6 +10,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "gud.hpp"
@@ -47,6 +48,18 @@ private:
         gud::SetBuffer buffer;
     };
 
+    /* Rows of an uncompressed buffer, received into a panel strip. */
+    struct Strip {
+        usb_device::Transfer transfer;
+        GudProfile *owner;
+        gud::SetBuffer buffer;
+        uint32_t row;
+        uint32_t rows;
+        uint32_t bytes;
+        bool last;
+        bool queued;
+    };
+
     bool control(const usb_device::ControlRequest &request, uint8_t *data, size_t *bytes);
     bool get(gud::Request request, uint16_t value, uint8_t *data, size_t *bytes);
     bool set(gud::Request request, uint16_t value, const uint8_t *data, size_t bytes);
@@ -58,6 +71,13 @@ private:
     void report();
     static void receive_done(usb_device::Transfer *transfer);
     static void release(void *context);
+    uint32_t packet_bytes() const;
+    uint32_t strip_rows(uint32_t row_bytes) const;
+    void receive_rows(const gud::SetBuffer &buffer, uint32_t rows);
+    void stop_rows();
+    void submit_rows();
+    static void rows_done(usb_device::Transfer *transfer);
+    static void release_rows(void *context);
 
     Listeners listeners_;
     usb_device::Device *device_ = nullptr;
@@ -66,6 +86,13 @@ private:
     Slot *slots_[kSlots] = {};
     QueueHandle_t free_slots_ = nullptr;
     Slot *armed_ = nullptr;
+    Strip strips_[2] = {};
+    std::mutex strip_lock_;
+    uint8_t free_strips_ = 0;
+    gud::SetBuffer rows_buffer_ = {};
+    uint32_t rows_per_strip_ = 0;
+    uint32_t next_row_ = 0;
+    bool receiving_rows_ = false;
     uint32_t buffer_bytes_ = 0;
     bsp_pixel_format_t format_ = BSP_PIXEL_FORMAT_RGB565;
     uint8_t wire_format_ = gud::kPixelFormatRgb565;
@@ -80,4 +107,14 @@ private:
     bool configured_ = false;
     bool streaming_ = false;
     UsbStatus reported_ = UsbStatus::Unconfigured;
+    // DIAG
+    int64_t diag_start_us_ = 0;
+    int64_t diag_submit_us_ = 0;
+    int64_t diag_done_us_ = 0;
+    int64_t diag_usb_us_ = 0;
+    int64_t diag_host_us_ = 0;
+    int64_t diag_wait_us_ = 0;
+    uint64_t diag_bytes_ = 0;
+    uint32_t diag_transfers_ = 0;
+    void diag_log(int64_t now);
 };

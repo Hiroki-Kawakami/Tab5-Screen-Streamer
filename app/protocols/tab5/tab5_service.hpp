@@ -90,7 +90,7 @@ private:
     void set_display_power(bool on);
     static void orientation_changed(bsp_rotation_t rotation, void *arg);
     static void format_changed(bsp_pixel_format_t format, void *arg);
-    static void clip_changed(const bsp_rect_t *clip, bool front_changed, void *arg);
+    static void clip_changed(const bsp_rect_t *clip, void *arg);
 
     std::atomic<uint32_t> session_ = 0;
     Tab5Events events_;

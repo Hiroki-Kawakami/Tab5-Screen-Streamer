@@ -7,9 +7,45 @@
 #include <string.h>
 
 #define MIN_MATCH 4
+#define FAST_INPUT 18
+#define FAST_OUTPUT 40
 
 static size_t min_size(size_t a, size_t b) {
     return a < b ? a : b;
+}
+
+static inline void copy8(uint8_t *dst, const uint8_t *src) {
+    memcpy(dst, src, 8);
+}
+
+static inline void copy16(uint8_t *dst, const uint8_t *src) {
+    memcpy(dst, src, 16);
+}
+
+/* Whole sequences of at most 14 literals and 18 match bytes, copied in fixed
+ * chunks that may write past the sequence: the room left in the window and
+ * the input covers them. Stops at anything else, leaving it to the general
+ * loop. */
+static uint8_t *decode_short(lz4_stream_t *s, uint8_t *dst, uint8_t *op, uint8_t *op_end) {
+    const uint8_t *ip = s->ip;
+    while (s->ip_end - ip >= FAST_INPUT && op_end - op >= FAST_OUTPUT) {
+        const uint8_t token = *ip;
+        const size_t literals = token >> 4;
+        if (literals == 15 || (token & 15) == 15) break;
+        copy16(op, ip + 1);
+        const uint8_t *offset_bytes = ip + 1 + literals;
+        const size_t offset = offset_bytes[0] | offset_bytes[1] << 8;
+        uint8_t *const match_op = op + literals;
+        if (offset < 8 || offset > (size_t)(match_op - dst)) break;
+        const uint8_t *match = match_op - offset;
+        copy8(match_op, match);
+        copy8(match_op + 8, match + 8);
+        copy8(match_op + 16, match + 16);
+        ip = offset_bytes + 2;
+        op = match_op + (token & 15) + MIN_MATCH;
+    }
+    s->ip = ip;
+    return op;
 }
 
 static int read_length(lz4_stream_t *s, size_t *length) {
@@ -81,6 +117,8 @@ ptrdiff_t lz4_stream_decompress(lz4_stream_t *s, uint8_t *dst, size_t dst_size,
             }
         }
         if (s->match || op == op_end || s->ip == s->ip_end) break;
+        op = decode_short(s, dst, op, op_end);
+        if (op == op_end || s->ip == s->ip_end) break;
 
         const uint8_t token = *s->ip++;
         size_t literals = token >> 4;

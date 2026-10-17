@@ -34,14 +34,15 @@ using PanelFormatListener = void (*)(bsp_pixel_format_t format, void *arg);
 esp_err_t panel_set_format(bsp_pixel_format_t format);
 void panel_set_format_listener(PanelFormatListener listener, void *arg);
 
-/* While a clip is set, framebuffer 0 is on screen and swaps are held: Back is
- * the framebuffer on screen and panel_swap() presents nothing. Every draw is
- * cut to the clip, leaving up to a scaled source pixel along its edges
- * undrawn. Null clears it. While acquired, what a new clip or null hands back
- * from outside the old clip turns black. Waits for panel_unlock(); the
- * listener runs inside, `front_changed` when setting the clip put another
- * framebuffer on screen. */
-using PanelClipListener = void (*)(const bsp_rect_t *clip, bool front_changed, void *arg);
+/* While a clip is set, swaps are held: Back is the framebuffer on screen and
+ * panel_swap() presents nothing. Every draw is cut to the clip, leaving up to
+ * a scaled source pixel along its edges undrawn. Null clears it. While
+ * acquired, what lies outside the clip is kept in a copy that panel_blit()
+ * and panel_blit_lz4() keep drawing into, and comes back when the clip
+ * changes; other draws outside the clip are lost, and so is the copy when
+ * memory runs short, leaving it black. Waits for panel_unlock(); the listener
+ * runs inside. */
+using PanelClipListener = void (*)(const bsp_rect_t *clip, void *arg);
 esp_err_t panel_set_clip(const bsp_rect_t *clip);
 bool panel_clip(bsp_rect_t *clip);
 void panel_set_clip_listener(PanelClipListener listener, void *arg);
@@ -64,7 +65,19 @@ lv_display_t *panel_idle_display_create(bsp_rotation_t rotation);
 void panel_idle_display_set_rotation(bsp_rotation_t rotation);
 void panel_idle_display_delete();
 
+int panel_buffer_index(PanelBuffer buffer);
+/* The two internal RAM strips panel_blit_lz4() and the JPEG draws decode
+ * into. Between acquire and release, a renderer using neither may fill them
+ * itself, and blit from them. */
+uint8_t *panel_strip(int index);
+size_t panel_strip_bytes();
 void panel_swap();
+/* `area` of the front buffer into the back buffer; nothing while a clip is
+ * set, when they are the same. */
+esp_err_t panel_copy_to_back(bsp_rect_t area);
+/* Turns what is shown upside down: by a swap, or in place while a clip is set,
+ * which needs three framebuffers. */
+esp_err_t panel_rotate_180();
 /* Blackens every framebuffer with the CPU; the one on screen only inside the
  * clip while one is set. PPA fills of large areas starve the DSI of PSRAM
  * bandwidth and underrun it. */
@@ -94,3 +107,5 @@ struct PanelBlit {
 esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels);
 esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t bytes);
 esp_err_t panel_blit_jpeg(const PanelBlit &blit, const uint8_t *jpeg, uint32_t bytes);
+
+extern int64_t panel_diag_lz4_us;  // DIAG

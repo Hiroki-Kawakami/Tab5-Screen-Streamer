@@ -11,7 +11,9 @@
 #include "display_manager.hpp"
 #include "driver/ppa.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -54,13 +56,28 @@ static int s_front;
 static bool s_acquired;
 static bool s_clipped;
 static bsp_rect_t s_clip;
+static uint8_t *s_saved;
 static PanelClipListener s_clip_listener;
 static void *s_clip_listener_arg;
 
-static uint8_t *framebuffer(PanelBuffer buffer) {
-    const int index =
-        buffer == PanelBuffer::Front || s_clipped ? s_front : (s_front + 1) % s_framebuffers;
+int panel_buffer_index(PanelBuffer buffer) {
+    return buffer == PanelBuffer::Front || s_clipped ? s_front : (s_front + 1) % s_framebuffers;
+}
+
+uint8_t *panel_strip(int index) {
+    return s_strips[index];
+}
+
+size_t panel_strip_bytes() {
+    return s_strip_bytes;
+}
+
+static uint8_t *framebuffer_at(int index) {
     return static_cast<uint8_t *>(bsp_display_get_frame_buffer(index));
+}
+
+static uint8_t *framebuffer(PanelBuffer buffer) {
+    return framebuffer_at(panel_buffer_index(buffer));
 }
 
 static bool rows_valid(int y, int height) {
@@ -77,9 +94,22 @@ static bool intersect(bsp_rect_t *area, const bsp_rect_t &clip) {
     return true;
 }
 
-static void clear_area(int index, bsp_rect_t area) {
-    if (area.size.width <= 0 || area.size.height <= 0) return;
-    auto *fb = static_cast<uint8_t *>(bsp_display_get_frame_buffer(index));
+/* The parts of the panel outside `clip`; some may be empty. */
+static void outside(const bsp_rect_t &clip, bsp_rect_t parts[4]) {
+    const int right = clip.origin.x + clip.size.width;
+    const int bottom = clip.origin.y + clip.size.height;
+    parts[0] = {{0, 0}, {s_size.width, clip.origin.y}};
+    parts[1] = {{0, bottom}, {s_size.width, s_size.height - bottom}};
+    parts[2] = {{0, clip.origin.y}, {clip.origin.x, clip.size.height}};
+    parts[3] = {{right, clip.origin.y}, {s_size.width - right, clip.size.height}};
+}
+
+static bool empty(const bsp_rect_t &area) {
+    return area.size.width <= 0 || area.size.height <= 0;
+}
+
+static void clear_area(uint8_t *fb, bsp_rect_t area) {
+    if (empty(area)) return;
     const size_t bytes = bsp_pixel_format_bytes(s_format);
     uint8_t *rows = fb + area.origin.y * s_stride;
     for (int y = 0; y < area.size.height; y++) {
@@ -89,6 +119,10 @@ static void clear_area(int index, bsp_rect_t area) {
     esp_cache_msync(rows, area.size.height * s_stride,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 #endif
+}
+
+static void clear_area(int index, bsp_rect_t area) {
+    clear_area(framebuffer_at(index), area);
 }
 
 static PanelBlit rows_blit(PanelBuffer buffer, int y, int height) {
@@ -108,6 +142,73 @@ static ppa_srm_rotation_angle_t srm_angle(bsp_rotation_t rotation) {
         default: return PPA_SRM_ROTATION_ANGLE_0;
     }
 }
+
+/* `area` of `src` into `dst` at the same place, or turned upside down about
+ * the panel's center. */
+static esp_err_t copy_area(uint8_t *dst, const uint8_t *src, bsp_rect_t area,
+                           bsp_rotation_t rotation = BSP_ROTATION_0) {
+    if (empty(area)) return ESP_OK;
+    ppa_srm_oper_config_t config = {};
+    config.in.buffer = src;
+    config.in.pic_w = s_size.width;
+    config.in.pic_h = s_size.height;
+    config.in.block_offset_x = area.origin.x;
+    config.in.block_offset_y = area.origin.y;
+    config.in.block_w = area.size.width;
+    config.in.block_h = area.size.height;
+    config.in.srm_cm = srm_mode(s_format);
+    config.out.buffer = dst;
+    config.out.buffer_size = s_stride * s_size.height;
+    config.out.pic_w = s_size.width;
+    config.out.pic_h = s_size.height;
+    config.out.block_offset_x = area.origin.x;
+    config.out.block_offset_y = area.origin.y;
+    if (rotation == BSP_ROTATION_180) {
+        config.out.block_offset_x = s_size.width - area.origin.x - area.size.width;
+        config.out.block_offset_y = s_size.height - area.origin.y - area.size.height;
+    }
+    config.out.srm_cm = srm_mode(s_format);
+    config.rotation_angle = srm_angle(rotation);
+    config.scale_x = 1;
+    config.scale_y = 1;
+    config.mode = PPA_TRANS_MODE_BLOCKING;
+    return ppa_do_scale_rotate_mirror(s_copy, &config);
+}
+
+static void free_saved() {
+    heap_caps_free(s_saved);
+    s_saved = nullptr;
+}
+
+/* What lies outside the clip, kept in a copy while the overlay covers it. */
+static void save_outside() {
+    if (!s_saved) {
+        s_saved = static_cast<uint8_t *>(
+            heap_caps_aligned_alloc(64, s_stride * s_size.height, MALLOC_CAP_SPIRAM));
+    }
+    if (!s_saved) {
+        ESP_LOGW(TAG, "no memory to keep what the clip covers");
+        return;
+    }
+    bsp_rect_t parts[4];
+    outside(s_clip, parts);
+    for (const bsp_rect_t &part : parts) copy_area(s_saved, framebuffer_at(s_front), part);
+}
+
+static void restore_outside() {
+    bsp_rect_t parts[4];
+    outside(s_clip, parts);
+    for (const bsp_rect_t &part : parts) {
+        if (s_saved) {
+            copy_area(framebuffer_at(s_front), s_saved, part);
+        } else {
+            clear_area(s_front, part);
+        }
+    }
+    free_saved();
+}
+
+int64_t panel_diag_lz4_us = 0;  // DIAG
 
 static bool IRAM_ATTR strip_done(ppa_client_handle_t, ppa_event_data_t *, void *user_data) {
     if (!user_data) return false;
@@ -215,10 +316,14 @@ void panel_acquire() {
         set_ui_visible(false);
     }
     panel_lock();
-    // A partial LVGL display always presents framebuffer 0.
+    // Framebuffer 0 is on screen while the panel is free.
     s_front = 0;
     s_acquired = true;
     create_pipeline();
+    if (s_clipped) {
+        save_outside();
+        if (s_saved) clear_area(s_saved, {{0, 0}, s_size});
+    }
     panel_unlock();
     lv_unlock();
 }
@@ -227,8 +332,9 @@ void panel_release() {
     lv_lock();
     panel_lock();
     delete_pipeline();
-    // The UI's partial blits land in the framebuffer last presented, then
-    // present 0; anything else on screen would hide them.
+    free_saved();
+    // The UI's partial blits land in the framebuffer last presented, and the
+    // rest of the UI is only in framebuffer 0.
     display_manager.present(0);
     s_front = 0;
     s_acquired = false;
@@ -311,6 +417,7 @@ esp_err_t panel_set_format(bsp_pixel_format_t format) {
     }
     if (s_acquired) {
         delete_pipeline();
+        free_saved();
     } else if (!s_idle) {
         set_ui_visible(false);
     }
@@ -354,30 +461,11 @@ esp_err_t panel_set_clip(const bsp_rect_t *clip) {
         return ESP_ERR_INVALID_ARG;
     }
     preempt_lock();
-    if (s_clipped && s_acquired) {
-        const bsp_rect_t old = s_clip;
-        const int right = old.origin.x + old.size.width;
-        const int bottom = old.origin.y + old.size.height;
-        bsp_rect_t outside[] = {
-            {{0, 0}, {s_size.width, old.origin.y}},
-            {{0, bottom}, {s_size.width, s_size.height - bottom}},
-            {{0, old.origin.y}, {old.origin.x, old.size.height}},
-            {{right, old.origin.y}, {s_size.width - right, old.size.height}},
-        };
-        for (bsp_rect_t &area : outside) {
-            if (area.size.width <= 0 || area.size.height <= 0) continue;
-            if (!clip || intersect(&area, *clip)) clear_area(s_front, area);
-        }
-    }
+    if (s_clipped && s_acquired) restore_outside();
     s_clipped = clip != nullptr;
     if (clip) s_clip = *clip;
-    // Whatever the overlay draws, a partial LVGL display presents framebuffer 0.
-    const bool front_changed = clip && s_acquired && s_front != 0;
-    if (front_changed) {
-        s_front = 0;
-        display_manager.present(0);
-    }
-    if (s_clip_listener) s_clip_listener(clip, front_changed, s_clip_listener_arg);
+    if (s_clipped && s_acquired) save_outside();
+    if (s_clip_listener) s_clip_listener(clip, s_clip_listener_arg);
     panel_unlock();
     return ESP_OK;
 }
@@ -433,6 +521,37 @@ void panel_clear() {
     for (int i = 0; i < s_framebuffers; i++) {
         clear_area(i, s_clipped && i == s_front ? s_clip : bsp_rect_t{{0, 0}, s_size});
     }
+    if (s_saved) clear_area(s_saved, {{0, 0}, s_size});
+}
+
+esp_err_t panel_copy_to_back(bsp_rect_t area) {
+    if (s_clipped || !intersect(&area, {{0, 0}, s_size})) return ESP_OK;
+    return copy_area(framebuffer(PanelBuffer::Back), framebuffer(PanelBuffer::Front), area);
+}
+
+esp_err_t panel_rotate_180() {
+    const bsp_rect_t all = {{0, 0}, s_size};
+    if (!s_clipped) {
+        esp_err_t err = copy_area(framebuffer(PanelBuffer::Back), framebuffer(PanelBuffer::Front),
+                                  all, BSP_ROTATION_180);
+        if (err == ESP_OK) panel_swap();
+        return err;
+    }
+    if (s_framebuffers < 3 || !s_saved) return ESP_ERR_NOT_SUPPORTED;
+    uint8_t *whole = framebuffer_at((s_front + 1) % s_framebuffers);
+    uint8_t *turned = framebuffer_at((s_front + 2) % s_framebuffers);
+    bsp_rect_t parts[4];
+    outside(s_clip, parts);
+    esp_err_t err = copy_area(whole, framebuffer_at(s_front), s_clip);
+    for (const bsp_rect_t &part : parts) {
+        if (err == ESP_OK) err = copy_area(whole, s_saved, part);
+    }
+    if (err == ESP_OK) err = copy_area(turned, whole, all, BSP_ROTATION_180);
+    if (err == ESP_OK) err = copy_area(framebuffer_at(s_front), turned, s_clip);
+    for (const bsp_rect_t &part : parts) {
+        if (err == ESP_OK) err = copy_area(s_saved, turned, part);
+    }
+    return err;
 }
 
 esp_err_t panel_fill(PanelBuffer buffer, bsp_rect_t area, uint32_t rgb888) {
@@ -546,14 +665,36 @@ static bool clip_axis(uint32_t out0, uint32_t out1, uint32_t scale, uint32_t len
     return true;
 }
 
+struct Target {
+    bsp_rect_t visible;
+    uint8_t *buffer;
+};
+
+/* Where a draw over `blit.area` lands: the framebuffer inside the clip, and
+ * the copy kept of what lies outside it. */
+static int draw_targets(const PanelBlit &blit, Target targets[5]) {
+    int count = 0;
+    bsp_rect_t visible = blit.area;
+    if (!s_clipped || intersect(&visible, s_clip)) {
+        targets[count++] = {visible, framebuffer(blit.buffer)};
+    }
+    if (!s_clipped || !s_saved) return count;
+    bsp_rect_t parts[4];
+    outside(s_clip, parts);
+    for (bsp_rect_t part : parts) {
+        if (!empty(part) && intersect(&part, blit.area)) targets[count++] = {part, s_saved};
+    }
+    return count;
+}
+
 /* Source rows [row, row + rows) as their own block, placed where they land
- * in the rotated, scaled source and cut to the clip; false when nothing of
- * them is visible. */
+ * in the rotated, scaled source and cut to `target`; false when nothing of
+ * them lands there. */
 static bool strip_config(const PanelBlit &blit, uint32_t scale_x, uint32_t scale_y,
-                         const void *pixels, int row, int rows, ppa_srm_oper_config_t *config) {
+                         const void *pixels, int row, int rows, const Target &target,
+                         ppa_srm_oper_config_t *config) {
     const bsp_rect_t &area = blit.area;
-    bsp_rect_t visible = area;
-    if (s_clipped && !intersect(&visible, s_clip)) return false;
+    const bsp_rect_t &visible = target.visible;
     const uint32_t ex0 = visible.origin.x - area.origin.x;
     const uint32_t ex1 = ex0 + visible.size.width;
     const uint32_t ey0 = visible.origin.y - area.origin.y;
@@ -596,7 +737,7 @@ static bool strip_config(const PanelBlit &blit, uint32_t scale_x, uint32_t scale
     config->in.block_w = col1 - col0;
     config->in.block_h = row1 - row0;
     config->in.srm_cm = srm_mode(blit.format);
-    config->out.buffer = framebuffer(blit.buffer);
+    config->out.buffer = target.buffer;
     config->out.buffer_size = s_stride * s_size.height;
     config->out.pic_w = s_size.width;
     config->out.pic_h = s_size.height;
@@ -614,11 +755,17 @@ esp_err_t panel_blit(const PanelBlit &blit, const uint8_t *pixels) {
     uint32_t scale_x, scale_y;
     esp_err_t err = blit_scale(blit, &scale_x, &scale_y);
     if (err != ESP_OK) return err;
-    ppa_srm_oper_config_t config;
-    if (!strip_config(blit, scale_x, scale_y, pixels, 0, blit.source.height, &config)) {
-        return ESP_OK;
+    Target targets[5];
+    const int count = draw_targets(blit, targets);
+    for (int i = 0; i < count && err == ESP_OK; i++) {
+        ppa_srm_oper_config_t config;
+        if (!strip_config(blit, scale_x, scale_y, pixels, 0, blit.source.height, targets[i],
+                          &config)) {
+            continue;
+        }
+        err = ppa_do_scale_rotate_mirror(s_copy, &config);
     }
-    return ppa_do_scale_rotate_mirror(s_copy, &config);
+    return err;
 }
 
 esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t bytes) {
@@ -631,6 +778,8 @@ esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t byt
     // one being written is all the history it needs.
     if (strip_rows * row_bytes < kLz4Window) return ESP_ERR_NOT_SUPPORTED;
 
+    Target targets[5];
+    const int count = draw_targets(blit, targets);
     lz4_stream_t stream;
     lz4_stream_init(&stream, lz4, bytes);
     size_t previous = 0;
@@ -639,23 +788,30 @@ esp_err_t panel_blit_lz4(const PanelBlit &blit, const uint8_t *lz4, uint32_t byt
         const int rows = std::min(strip_rows, blit.source.height - row);
         const size_t size = rows * row_bytes;
         wait_strip(strip);
+        const int64_t diag_start = esp_timer_get_time();
         const ptrdiff_t written = lz4_stream_decompress(&stream, s_strips[strip], size,
                                                         s_strips[strip ^ 1], previous);
+        panel_diag_lz4_us += esp_timer_get_time() - diag_start;
         if (written != (ptrdiff_t)size) {
             err = ESP_ERR_INVALID_SIZE;
             break;
         }
         previous = size;
-        ppa_srm_oper_config_t config;
-        if (!strip_config(blit, scale_x, scale_y, s_strips[strip], row, rows, &config)) {
-            strip ^= 1;
-            continue;
+        // Only the last block of a strip runs behind the decoding of the next.
+        for (int i = 0; i < count && err == ESP_OK; i++) {
+            ppa_srm_oper_config_t config;
+            if (!strip_config(blit, scale_x, scale_y, s_strips[strip], row, rows, targets[i],
+                              &config)) {
+                continue;
+            }
+            if (i == count - 1) {
+                config.mode = PPA_TRANS_MODE_NON_BLOCKING;
+                config.user_data = s_strip_done[strip];
+                s_strip_busy[strip] = true;
+            }
+            err = ppa_do_scale_rotate_mirror(s_copy, &config);
+            if (err != ESP_OK) s_strip_busy[strip] = false;
         }
-        config.mode = PPA_TRANS_MODE_NON_BLOCKING;
-        config.user_data = s_strip_done[strip];
-        s_strip_busy[strip] = true;
-        err = ppa_do_scale_rotate_mirror(s_copy, &config);
-        if (err != ESP_OK) s_strip_busy[strip] = false;
         strip ^= 1;
     }
     for (int i = 0; i < kStrips; i++) wait_strip(i);

@@ -96,7 +96,7 @@ static tab5::Rect wire_rect(const bsp_rect_t &rect) {
             static_cast<uint16_t>(rect.size.width), static_cast<uint16_t>(rect.size.height)};
 }
 
-void Tab5Service::clip_changed(const bsp_rect_t *clip, bool front_changed, void *arg) {
+void Tab5Service::clip_changed(const bsp_rect_t *clip, void *arg) {
     auto *self = static_cast<Tab5Service *>(arg);
     const bsp_size_t size = panel_size();
     const bsp_rect_t stream = clip ? *clip : bsp_rect_t{{0, 0}, size};
@@ -109,10 +109,6 @@ void Tab5Service::clip_changed(const bsp_rect_t *clip, bool front_changed, void 
 
     const tab5::OverlayEvent event = {clip != nullptr, 0, wire_rect(stream)};
     self->events_.send(tab5::Type::Overlay, 0, &event, sizeof(event));
-    if (front_changed) {
-        const tab5::Rect wire = wire_rect(stream);
-        self->events_.send(tab5::Type::Damage, 0, &wire, sizeof(wire));
-    }
     if (!was_visible || (clip && clip->origin.x == covered.origin.x &&
                          clip->origin.y == covered.origin.y &&
                          clip->size.width == covered.size.width &&

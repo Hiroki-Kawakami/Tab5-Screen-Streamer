@@ -9,6 +9,7 @@
 #include "display/panel.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "usb/usb.hpp"
 
 static const char *TAG = "gud_profile";
@@ -18,6 +19,9 @@ static constexpr uint32_t kHighSpeedPacketBytes = 512;
 static constexpr uint32_t kFullSpeedPacketBytes = 64;
 // The most one bulk OUT transfer of the USB stack takes.
 static constexpr uint32_t kMaxTransferBytes = 16 * 65024;
+// Decoding LZ4 is slower than high speed USB carries the raw pixels.
+static constexpr uint8_t kCompression = 0;
+static constexpr uint32_t kStripRows[] = {32, 16};
 static constexpr uint32_t kRefreshHz = 60;
 static constexpr TickType_t kSlotWait = pdMS_TO_TICKS(1000);
 static constexpr uint8_t kRequestTypeMask = 0x60;
@@ -94,6 +98,14 @@ esp_err_t GudProfile::start() {
         slot->transfer.context = slot;
         xQueueSend(free_slots_, &slot, 0);
     }
+    for (int i = 0; i < 2; i++) {
+        Strip &strip = strips_[i];
+        strip.owner = this;
+        strip.transfer.buffer = panel_strip(i);
+        strip.transfer.callback = rows_done;
+        strip.transfer.context = &strip;
+        free_strips_ |= 1 << i;
+    }
     video_ = std::make_unique<GudVideo>([this](bool streaming) { this->streaming(streaming); });
     return video_->start(rotation_, format_, buffer_bytes_);
 }
@@ -149,7 +161,7 @@ bool GudProfile::get(gud::Request request, uint16_t value, uint8_t *data, size_t
             gud::DisplayDescriptor descriptor = {};
             descriptor.magic = gud::kMagic;
             descriptor.version = gud::kVersion;
-            descriptor.compression = gud::kCompressionLz4;
+            descriptor.compression = kCompression;
             descriptor.max_buffer_size = buffer_bytes_;
             descriptor.min_width = std::min(panel.width, panel.height);
             descriptor.max_width = std::max(panel.width, panel.height);
@@ -211,6 +223,7 @@ bool GudProfile::set(gud::Request request, uint16_t value, const uint8_t *data, 
             return true;
         case gud::Request::SetControllerEnable:
             if (bytes != 1) break;
+            if (!data[0]) stop_rows();
             video_->set_enabled(data[0] != 0);
             return true;
         case gud::Request::SetDisplayEnable:
@@ -275,19 +288,33 @@ bool GudProfile::set_buffer(const uint8_t *data, size_t bytes) {
         status_ = gud::Status::InvalidParameter;
         return false;
     }
+    const int64_t diag_now = esp_timer_get_time();
+    if (diag_done_us_) diag_host_us_ += diag_now - diag_done_us_;
+    diag_log(diag_now);
     // A transfer still armed is from a bulk transfer the host gave up on.
     if (armed_) vendor_->out().flush();
+    stop_rows();
+    // The strips also take what panel_blit_lz4() decodes, so they only carry
+    // uncompressed buffers while compression is off.
+    const uint32_t rows = strip_rows(buffer.width * bytes_per_pixel);
+    if (!kCompression && !lz4 && rows && video_->drawing()) {
+        diag_submit_us_ = esp_timer_get_time();
+        receive_rows(buffer, rows);
+        return true;
+    }
     Slot *slot;
-    if (xQueueReceive(free_slots_, &slot, kSlotWait) != pdTRUE) {
+    const BaseType_t diag_got = xQueueReceive(free_slots_, &slot, kSlotWait);
+    diag_wait_us_ += esp_timer_get_time() - diag_now;
+    if (diag_got != pdTRUE) {
         ESP_LOGW(TAG, "no free buffer");
         status_ = gud::Status::Busy;
         return false;
     }
-    const uint32_t packet = device_->speed() == usb_device::Speed::High ? kHighSpeedPacketBytes
-                                                                        : kFullSpeedPacketBytes;
+    const uint32_t packet = packet_bytes();
     slot->buffer = buffer;
     slot->transfer.length = (length + packet - 1) / packet * packet;
     armed_ = slot;
+    diag_submit_us_ = esp_timer_get_time();
     const esp_err_t err = vendor_->out().submit(&slot->transfer);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "submit: %s", esp_err_to_name(err));
@@ -314,6 +341,10 @@ void GudProfile::receive_done(usb_device::Transfer *transfer) {
         xQueueSend(self->free_slots_, &slot, 0);
         return;
     }
+    self->diag_done_us_ = esp_timer_get_time();
+    self->diag_usb_us_ += self->diag_done_us_ - self->diag_submit_us_;
+    self->diag_bytes_ += length;
+    self->diag_transfers_++;
     self->video_->submit(buffer, transfer->buffer, length, release, slot);
 }
 
@@ -331,6 +362,10 @@ void GudProfile::configured() {
 
 void GudProfile::unconfigured() {
     armed_ = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(strip_lock_);
+        receiving_rows_ = false;
+    }
     video_->end();
     portENTER_CRITICAL(&lock_);
     configured_ = false;
@@ -353,4 +388,125 @@ void GudProfile::report() {
     reported_ = status;
     portEXIT_CRITICAL(&lock_);
     if (changed) listeners_.status(status);
+}
+
+uint32_t GudProfile::packet_bytes() const {
+    return device_->speed() == usb_device::Speed::High ? kHighSpeedPacketBytes
+                                                       : kFullSpeedPacketBytes;
+}
+
+// Every transfer but the last of a buffer fills whole packets, or the host's
+// next packet would be taken as the start of the next transfer.
+uint32_t GudProfile::strip_rows(uint32_t row_bytes) const {
+    for (uint32_t rows : kStripRows) {
+        const uint32_t bytes = rows * row_bytes;
+        if (bytes <= panel_strip_bytes() && bytes % packet_bytes() == 0) return rows;
+    }
+    return 0;
+}
+
+void GudProfile::receive_rows(const gud::SetBuffer &buffer, uint32_t rows) {
+    {
+        std::lock_guard<std::mutex> guard(strip_lock_);
+        rows_buffer_ = buffer;
+        rows_per_strip_ = rows;
+        next_row_ = 0;
+        receiving_rows_ = true;
+    }
+    submit_rows();
+}
+
+// Rows still queued are from a bulk transfer the host gave up on.
+void GudProfile::stop_rows() {
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> guard(strip_lock_);
+        receiving_rows_ = false;
+        for (const Strip &strip : strips_) queued |= strip.queued;
+    }
+    if (queued) vendor_->out().flush();
+}
+
+// Queues the next rows into every free strip, in order.
+void GudProfile::submit_rows() {
+    std::lock_guard<std::mutex> guard(strip_lock_);
+    const uint32_t row_bytes = rows_buffer_.width * bsp_pixel_format_bytes(format_);
+    const uint32_t packet = packet_bytes();
+    while (receiving_rows_ && next_row_ < rows_buffer_.height && free_strips_) {
+        const int index = free_strips_ & 1 ? 0 : 1;
+        Strip &strip = strips_[index];
+        strip.buffer = rows_buffer_;
+        strip.row = next_row_;
+        strip.rows = std::min(rows_per_strip_, rows_buffer_.height - next_row_);
+        strip.bytes = strip.rows * row_bytes;
+        strip.last = next_row_ + strip.rows == rows_buffer_.height;
+        strip.transfer.length = (strip.bytes + packet - 1) / packet * packet;
+        strip.queued = true;
+        const esp_err_t err = vendor_->out().submit(&strip.transfer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "submit rows: %s", esp_err_to_name(err));
+            strip.queued = false;
+            receiving_rows_ = false;
+            break;
+        }
+        free_strips_ &= ~(1 << index);
+        next_row_ += strip.rows;
+    }
+}
+
+void GudProfile::rows_done(usb_device::Transfer *transfer) {
+    auto *strip = static_cast<Strip *>(transfer->context);
+    GudProfile *self = strip->owner;
+    {
+        std::lock_guard<std::mutex> guard(self->strip_lock_);
+        strip->queued = false;
+    }
+    if (transfer->status != usb_device::TransferStatus::Completed ||
+        transfer->actual != strip->bytes) {
+        if (transfer->status != usb_device::TransferStatus::Canceled) {
+            ESP_LOGW(TAG, "rows status %d, %u of %u bytes", (int)transfer->status,
+                     (unsigned)transfer->actual, (unsigned)strip->bytes);
+        }
+        release_rows(strip);
+        return;
+    }
+    if (strip->last) {
+        self->diag_done_us_ = esp_timer_get_time();
+        self->diag_usb_us_ += self->diag_done_us_ - self->diag_submit_us_;
+        self->diag_bytes_ += strip->buffer.length;
+        self->diag_transfers_++;
+    }
+    self->video_->submit_rows(strip->buffer, strip->row, strip->rows, strip->last,
+                              transfer->buffer, release_rows, strip);
+}
+
+void GudProfile::release_rows(void *context) {
+    auto *strip = static_cast<Strip *>(context);
+    GudProfile *self = strip->owner;
+    {
+        std::lock_guard<std::mutex> guard(self->strip_lock_);
+        self->free_strips_ |= 1 << (strip - self->strips_);
+    }
+    self->submit_rows();
+}
+
+void GudProfile::diag_log(int64_t now) {
+    if (!diag_start_us_) diag_start_us_ = now;
+    const int64_t elapsed = now - diag_start_us_;
+    if (elapsed < 5000000) return;
+    const double seconds = elapsed / 1e6;
+    ESP_LOGI(TAG, "DIAG %u transfers, %.2f MB/s, usb %.1f ms/s (%.1f MB/s while busy, %.2f ms each), "
+             "host gap %.1f ms/s (%.2f ms each), slot wait %.1f ms/s",
+             (unsigned)diag_transfers_, diag_bytes_ / seconds / 1e6, diag_usb_us_ / 1e3 / seconds,
+             diag_usb_us_ ? diag_bytes_ / (double)diag_usb_us_ : 0.0,
+             diag_transfers_ ? diag_usb_us_ / 1e3 / diag_transfers_ : 0.0,
+             diag_host_us_ / 1e3 / seconds,
+             diag_transfers_ ? diag_host_us_ / 1e3 / diag_transfers_ : 0.0,
+             diag_wait_us_ / 1e3 / seconds);
+    diag_start_us_ = now;
+    diag_usb_us_ = 0;
+    diag_host_us_ = 0;
+    diag_wait_us_ = 0;
+    diag_bytes_ = 0;
+    diag_transfers_ = 0;
 }

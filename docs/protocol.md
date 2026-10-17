@@ -325,11 +325,9 @@ While it is visible:
 - A `DRAW_DIRECT` JPEG that crosses the clip goes through the slower
   `DRAW_BLIT` path on the device.
 
-When showing the overlay changes the framebuffer on screen, the device sends
-`EV_DAMAGE` for the stream rectangle. When the overlay hides, it sends
-`EV_DAMAGE` for the area the overlay covered, which it has turned black. The
-device keeps no copy of what is under the overlay; the PC redraws damaged
-areas, except what is black after `CLEAR`.
+When the overlay hides, the device sends `EV_DAMAGE` for the area the overlay
+covered. What it shows there may be out of date or black; the PC redraws
+damaged areas, except what is black after `CLEAR`.
 
 The user opens the overlay with a swipe in from the bottom-right corner of the
 screen. That swipe is never sent as input, and no input is sent while the
