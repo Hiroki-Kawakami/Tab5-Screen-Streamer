@@ -63,11 +63,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
+          name: esp32p4
           path: artifacts
       - run: |
           mkdir dist
-          for dir in artifacts/*/; do
-            project=$(basename "$dir")
-            cp "$dir/merged-binary.bin" "dist/tab5-screen-streamer-$project-$GITHUB_REF_NAME.bin"
-          done
+          cp artifacts/merged-binary.bin "dist/tab5-screen-streamer-esp32p4-$GITHUB_REF_NAME.bin"
       - run: gh release create "$GITHUB_REF_NAME" dist/* --title "Firmware $GITHUB_REF_NAME" --notes ""
