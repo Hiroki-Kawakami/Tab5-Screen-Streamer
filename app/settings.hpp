@@ -12,6 +12,7 @@ inline constexpr int kMinDisplayBrightness = 1;
 enum class AppMode : uint8_t {
     None,
     PcApp,
+    UsbMonitor,
 };
 
 void settings_init();
@@ -42,3 +43,11 @@ enum class PcAppOption : uint8_t {
 
 bool settings_pc_app_option(PcAppOption option);
 void settings_set_pc_app_option(PcAppOption option, bool enabled);
+
+enum class UsbMonitorAdapter : uint8_t {
+    DisplayLink,
+    Gud,
+};
+
+UsbMonitorAdapter settings_usb_monitor_adapter();
+void settings_set_usb_monitor_adapter(UsbMonitorAdapter adapter);

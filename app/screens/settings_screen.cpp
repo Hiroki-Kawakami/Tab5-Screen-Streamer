@@ -8,7 +8,7 @@
 #include "home_screen.hpp"
 #include "screen_manager.hpp"
 #include "settings.hpp"
-#include "settings_widgets.hpp"
+#include "setup/settings_widgets.hpp"
 
 static void color_mode_failed(lv_obj_t *obj, esp_err_t err) {
     auto modal = lv_modal_open(lv_obj_get_screen(obj));

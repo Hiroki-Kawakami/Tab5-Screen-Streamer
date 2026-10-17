@@ -4,8 +4,10 @@
  */
 
 #include "usb.hpp"
+#include <cstdio>
 #include <memory>
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -67,4 +69,13 @@ void usb_start(std::shared_ptr<UsbProfile> profile) {
 void usb_stop() {
     auto *request = new Request{};
     xQueueSend(s_requests, &request, portMAX_DELAY);
+}
+
+std::string usb_serial() {
+    uint8_t mac[6];
+    if (esp_efuse_mac_get_default(mac) != ESP_OK) return {};
+    char serial[13];
+    snprintf(serial, sizeof(serial), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3],
+             mac[4], mac[5]);
+    return serial;
 }

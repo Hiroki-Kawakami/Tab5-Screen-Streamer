@@ -6,7 +6,7 @@
 #include "tab5_profile.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_mac.h"
+#include "usb/usb.hpp"
 
 static const char *TAG = "tab5_profile";
 
@@ -61,13 +61,7 @@ usb_device::DeviceInfo Tab5Profile::info() const {
     info.bcd_device = 0x0300 | (uac_ ? 0x01 : 0) | (keyboard_ ? 0x02 : 0) | (mouse_ ? 0x04 : 0);
     info.manufacturer = "M5Stack";
     info.product = "Tab5 Screen Streamer";
-    uint8_t mac[6];
-    if (esp_efuse_mac_get_default(mac) == ESP_OK) {
-        char serial[13];
-        snprintf(serial, sizeof(serial), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2],
-                 mac[3], mac[4], mac[5]);
-        info.serial = serial;
-    }
+    info.serial = usb_serial();
     info.ms_os_20 = true;
     return info;
 }

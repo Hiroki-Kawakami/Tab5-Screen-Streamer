@@ -5,6 +5,7 @@
 
 #pragma once
 #include <memory>
+#include <string>
 #include "esp_err.h"
 #include "usb_profile.hpp"
 
@@ -14,3 +15,5 @@ esp_err_t usb_init();
  * usb_stop() the PHY is off. */
 void usb_start(std::shared_ptr<UsbProfile> profile);
 void usb_stop();
+/* The serial number every profile reports; empty when it cannot be read. */
+std::string usb_serial();

@@ -20,6 +20,10 @@ enum class PanelBuffer : uint8_t { Front, Back };
 esp_err_t panel_init(lv_display_t *ui, uint8_t *sram, size_t sram_bytes);
 
 bsp_size_t panel_size();
+/* The panel as seen upright at `rotation`, and a rect of that view on the
+ * panel. */
+bsp_size_t panel_logical_size(bsp_rotation_t rotation);
+bsp_rect_t panel_native_rect(const bsp_rect_t &rect, bsp_rotation_t rotation);
 bsp_pixel_format_t panel_format();
 int panel_framebuffers();
 

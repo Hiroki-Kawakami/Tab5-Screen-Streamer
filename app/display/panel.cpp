@@ -242,13 +242,8 @@ void panel_release() {
     lv_unlock();
 }
 
-static bsp_size_t idle_size(bsp_rotation_t rotation) {
-    const bool transposed = rotation == BSP_ROTATION_90 || rotation == BSP_ROTATION_270;
-    return transposed ? bsp_size_t{s_size.height, s_size.width} : s_size;
-}
-
 static void idle_flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels) {
-    const bsp_size_t size = idle_size(s_idle_rotation);
+    const bsp_size_t size = panel_logical_size(s_idle_rotation);
     const int x = area->x1, y = area->y1;
     const int w = lv_area_get_width(area), h = lv_area_get_height(area);
     bsp_rect_t native;
@@ -272,7 +267,7 @@ static void idle_flush(lv_display_t *display, const lv_area_t *area, uint8_t *pi
 // manager loads its screens into.
 lv_display_t *panel_idle_display_create(bsp_rotation_t rotation) {
     if (s_idle) return nullptr;
-    const bsp_size_t size = idle_size(rotation);
+    const bsp_size_t size = panel_logical_size(rotation);
     lv_display_t *main = lv_display_get_default();
     lv_display_t *display = lv_display_create(size.width, size.height);
     lv_display_set_default(main);
@@ -294,7 +289,7 @@ lv_display_t *panel_idle_display_create(bsp_rotation_t rotation) {
 void panel_idle_display_set_rotation(bsp_rotation_t rotation) {
     if (!s_idle || rotation == s_idle_rotation) return;
     s_idle_rotation = rotation;
-    const bsp_size_t size = idle_size(rotation);
+    const bsp_size_t size = panel_logical_size(rotation);
     lv_display_set_resolution(s_idle, size.width, size.height);
     lv_obj_invalidate(lv_display_get_screen_active(s_idle));
 }
@@ -401,6 +396,23 @@ void panel_set_clip_listener(PanelClipListener listener, void *arg) {
 
 bsp_size_t panel_size() {
     return s_size;
+}
+
+bsp_size_t panel_logical_size(bsp_rotation_t rotation) {
+    const bool transposed = rotation == BSP_ROTATION_90 || rotation == BSP_ROTATION_270;
+    return transposed ? bsp_size_t{s_size.height, s_size.width} : s_size;
+}
+
+bsp_rect_t panel_native_rect(const bsp_rect_t &rect, bsp_rotation_t rotation) {
+    const bsp_size_t size = panel_logical_size(rotation);
+    const int x = rect.origin.x, y = rect.origin.y;
+    const int w = rect.size.width, h = rect.size.height;
+    switch (rotation) {
+        case BSP_ROTATION_90: return {{y, size.width - x - w}, {h, w}};
+        case BSP_ROTATION_180: return {{size.width - x - w, size.height - y - h}, {w, h}};
+        case BSP_ROTATION_270: return {{size.height - y - h, x}, {h, w}};
+        default: return rect;
+    }
 }
 
 bsp_pixel_format_t panel_format() {

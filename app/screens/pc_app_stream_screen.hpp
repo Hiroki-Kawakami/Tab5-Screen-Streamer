@@ -14,6 +14,8 @@
 #include "protocols/tab5/tab5_profile.hpp"
 #include "protocols/tab5/tab5_service.hpp"
 #include "screen.hpp"
+#include "stream/stream_panel.hpp"
+#include "stream/stream_waiting.hpp"
 
 class PcAppStreamScreen : public Screen {
 public:
@@ -38,15 +40,11 @@ private:
     std::atomic<bsp_rotation_t> input_rotation_ = BSP_ROTATION_0;
 
     lv_display_t *waiting_display_ = nullptr;
-    lv_obj_t *waiting_ = nullptr;
-    lv_obj_t *waiting_icon_ = nullptr;
-    lv_obj_t *waiting_message_ = nullptr;
+    StreamWaiting waiting_ = {};
 
     lv_display_t *overlay_ = nullptr;
-    lv_obj_t *status_dot_ = nullptr;
-    lv_obj_t *status_label_ = nullptr;
-    lv_obj_t *brightness_slider_ = nullptr;
-    lv_obj_t *brightness_value_ = nullptr;
+    StreamStatusRow status_row_ = {};
+    StreamBrightness brightness_ = {};
 
     enum class Gesture : uint8_t { None, Corner, Swiped, Input, Menu, Wake };
 
@@ -66,7 +64,6 @@ private:
     void setStatus(UsbStatus status);
     void rotate(bsp_rotation_t rotation);
     void buildWaiting(lv_obj_t *screen);
-    void layoutWaiting();
     void updateWaiting();
     void updateStatusRow();
     void applyBrightness();

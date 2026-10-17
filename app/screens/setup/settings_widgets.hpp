@@ -33,6 +33,9 @@ lv_obj_t *lv_setting_separator_create(lv_obj_t *section, const SettingColors *co
 lv_obj_t *lv_setting_switch_create(lv_obj_t *row, bool checked,
                                    std::function<void(lv_obj_t *, bool)> on_change,
                                    const SettingColors *colors = nullptr);
+lv_obj_t *lv_setting_dropdown_create(lv_obj_t *row, const char *options, uint32_t selected,
+                                     std::function<void(lv_obj_t *, uint32_t)> on_select,
+                                     const SettingColors *colors = nullptr);
 lv_obj_t *lv_setting_segmented_create(lv_obj_t *row, std::initializer_list<const char *> labels,
                                       int active,
                                       std::function<void(lv_obj_t *, int)> on_select,

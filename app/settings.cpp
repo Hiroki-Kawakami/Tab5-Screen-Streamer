@@ -122,7 +122,7 @@ constexpr auto sanitize_flag = +[](bool enabled) -> uint8_t {
 Setting<"equalizer", uint8_t, sanitize_flag> s_equalizer{1};
 
 Setting<"lastmode", uint8_t, +[](int mode) -> uint8_t {
-    return mode >= 0 && mode <= (int)AppMode::PcApp ? mode : 0;
+    return mode >= 0 && mode <= (int)AppMode::UsbMonitor ? mode : 0;
 }> s_last_mode{(uint8_t)AppMode::None};
 
 constexpr uint8_t kPcAppOptionsAll = (uint8_t)PcAppOption::UsbAudio |
@@ -133,6 +133,10 @@ Setting<"pcappoptions", uint8_t, +[](int options) -> uint8_t {
     return options & kPcAppOptionsAll;
 }> s_pc_app_options{kPcAppOptionsAll};
 
+Setting<"monitoradapter", uint8_t, +[](int adapter) -> uint8_t {
+    return adapter == (int)UsbMonitorAdapter::DisplayLink ? adapter : (int)UsbMonitorAdapter::Gud;
+}> s_usb_monitor_adapter{(uint8_t)UsbMonitorAdapter::Gud};
+
 template <typename Fn>
 void for_each_setting(Fn &&fn) {
     fn(s_display_brightness);
@@ -141,6 +145,7 @@ void for_each_setting(Fn &&fn) {
     fn(s_equalizer);
     fn(s_last_mode);
     fn(s_pc_app_options);
+    fn(s_usb_monitor_adapter);
 }
 
 }  // namespace
@@ -225,4 +230,12 @@ bool settings_pc_app_option(PcAppOption option) {
 void settings_set_pc_app_option(PcAppOption option, bool enabled) {
     const uint8_t options = s_pc_app_options.get();
     s_pc_app_options.set(enabled ? options | (uint8_t)option : options & ~(uint8_t)option);
+}
+
+UsbMonitorAdapter settings_usb_monitor_adapter() {
+    return (UsbMonitorAdapter)s_usb_monitor_adapter.get();
+}
+
+void settings_set_usb_monitor_adapter(UsbMonitorAdapter adapter) {
+    s_usb_monitor_adapter.set((int)adapter);
 }
