@@ -17,7 +17,7 @@ static const char *TAG = "pc_app_screen";
 
 namespace {
 
-constexpr const char *kGuideUrl = "https://github.com/Hiroki-Kawakami/Tab5-Screen-Streamer";
+constexpr const char *kGuideUrl = "https://github.com/Hiroki-Kawakami/Tab5-Screen-Streamer/blob/main/docs/stream-from-pc-app.md";
 constexpr int32_t kQrSize = 200;
 constexpr int32_t kStartHeight = 72;
 
@@ -48,7 +48,7 @@ void PcAppScreen::build() {
     lv_obj_set_style_pad_row(section, 24, 0);
 
     setup_steps_create(section, {
-        "Install Tab5 Streamer on your computer. Windows and macOS apps, or the web version.",
+        "Install Tab5 Streamer v1.0.0 or later on your computer. Windows and macOS apps, or the web version.",
         "Connect Tab5 to your computer with a USB-A to USB-A cable.",
         "Tap Start, then open Tab5 Streamer.",
     });
