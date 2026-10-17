@@ -16,6 +16,10 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
       in {
+        packages.fw-image = esp-devkit.lib.${system}.mkFwImage {
+          name = "tab5-screen-streamer-fw";
+        };
+
         devShells.default = pkgs.mkShell {
           inputsFrom = [ esp-devkit.devShells.${system}.default ];
           packages = [

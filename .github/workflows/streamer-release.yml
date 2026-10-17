@@ -59,7 +59,7 @@ jobs:
           merge-multiple: true
       - working-directory: dist
         run: sha256sum Tab5-Streamer-* > SHA256SUMS
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --title "Tab5 Streamer ${GITHUB_REF_NAME#streamer-v}" --notes ""
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --title "Tab5 Streamer ${GITHUB_REF_NAME#streamer-}" --notes ""
       - run: |
           git tag -f streamer-latest "$GITHUB_SHA"
           git push -f origin streamer-latest
